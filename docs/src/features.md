@@ -31,7 +31,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `multipart` | `full` | `zapline::multipart`: the `Multipart` extractor ([Uploads](files.md#uploads-with-multipart)) | | `multer` |
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
-| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom` |
+| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `full` | | Every feature above | all | |
 
 <!-- TODO(integration): confirm the http2 and tls rows once the server package lands -->
