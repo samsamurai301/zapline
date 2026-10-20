@@ -29,7 +29,7 @@ fs = ["dep:mime_guess", "dep:tokio-util"]
 multipart = ["dep:multer"]
 compression = ["dep:async-compression", "dep:tokio-util"]
 jwt = ["json", "dep:jsonwebtoken"]
-cookies = ["dep:cookie"]
+cookies = ["json", "dep:cookie", "dep:getrandom"]
 
 [dependencies]
 zapline-macros = { path = "../zapline-macros", version = "0.1.0", optional = true }
@@ -69,6 +69,7 @@ multer = { version = "3", optional = true }
 async-compression = { version = "0.4", optional = true, features = ["tokio", "gzip", "brotli", "zstd", "deflate"] }
 jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["rust_crypto", "use_pem"] }
 cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
+getrandom = { version = "0.2", optional = true }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
