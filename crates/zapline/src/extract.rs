@@ -217,11 +217,11 @@ newtype!(
 impl<T: DeserializeOwned + Send> FromRequestParts for Path<T> {
     #[inline]
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
-        let mut params = Vec::with_capacity(req.params.len());
-        params.extend(req.param_values());
-        T::deserialize(path_de::ParamsDe { params })
-            .map(Path)
-            .map_err(path_error)
+        let params = path_de::ParamsDe {
+            len: req.params.len(),
+            iter: req.param_values(),
+        };
+        T::deserialize(params).map(Path).map_err(path_error)
     }
 }
 
@@ -459,14 +459,16 @@ mod path_de {
         }
     }
 
-    pub struct ParamsDe<'a> {
-        pub params: Vec<(&'static str, Cow<'a, str>)>,
+    /// Route parameters, decoded as they are visited: `len` of them in `iter`.
+    pub struct ParamsDe<I> {
+        pub len: usize,
+        pub iter: I,
     }
 
-    impl<'a> ParamsDe<'a> {
-        fn single(self) -> Result<ValueDe<'a>, DeError> {
-            let n = self.params.len();
-            match self.params.into_iter().next() {
+    impl<'a, I: Iterator<Item = (&'static str, Cow<'a, str>)>> ParamsDe<I> {
+        fn single(mut self) -> Result<ValueDe<'a>, DeError> {
+            let n = self.len;
+            match self.iter.next() {
                 Some((name, v)) if n == 1 => Ok(ValueDe { name, value: v }),
                 _ => Err(DeError::new(format!(
                     "expected 1 path parameter, route has {n}"
@@ -483,11 +485,14 @@ mod path_de {
         )*};
     }
 
-    impl<'de, 'a> de::Deserializer<'de> for ParamsDe<'a> {
+    impl<'de, 'a, I> de::Deserializer<'de> for ParamsDe<I>
+    where
+        I: Iterator<Item = (&'static str, Cow<'a, str>)>,
+    {
         type Error = DeError;
 
         fn deserialize_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, DeError> {
-            if self.params.len() == 1 {
+            if self.len == 1 {
                 self.single()?.deserialize_any(v)
             } else {
                 self.deserialize_map(v)
@@ -495,7 +500,7 @@ mod path_de {
         }
         fn deserialize_map<V: Visitor<'de>>(self, v: V) -> Result<V::Value, DeError> {
             v.visit_map(Map {
-                iter: self.params.into_iter(),
+                iter: self.iter,
                 value: None,
             })
         }
@@ -508,15 +513,13 @@ mod path_de {
             self.deserialize_map(v)
         }
         fn deserialize_seq<V: Visitor<'de>>(self, v: V) -> Result<V::Value, DeError> {
-            v.visit_seq(Seq {
-                iter: self.params.into_iter(),
-            })
+            v.visit_seq(Seq { iter: self.iter })
         }
         fn deserialize_tuple<V: Visitor<'de>>(self, len: usize, v: V) -> Result<V::Value, DeError> {
-            if self.params.len() != len {
+            if self.len != len {
                 return Err(DeError::new(format!(
                     "expected {len} path parameters, route has {}",
-                    self.params.len()
+                    self.len
                 )));
             }
             self.deserialize_seq(v)
@@ -561,12 +564,15 @@ mod path_de {
         }
     }
 
-    struct Map<'a> {
-        iter: std::vec::IntoIter<(&'static str, Cow<'a, str>)>,
+    struct Map<'a, I> {
+        iter: I,
         value: Option<(&'static str, Cow<'a, str>)>,
     }
 
-    impl<'de, 'a> MapAccess<'de> for Map<'a> {
+    impl<'de, 'a, I> MapAccess<'de> for Map<'a, I>
+    where
+        I: Iterator<Item = (&'static str, Cow<'a, str>)>,
+    {
         type Error = DeError;
         fn next_key_seed<K: DeserializeSeed<'de>>(
             &mut self,
@@ -589,11 +595,14 @@ mod path_de {
         }
     }
 
-    struct Seq<'a> {
-        iter: std::vec::IntoIter<(&'static str, Cow<'a, str>)>,
+    struct Seq<I> {
+        iter: I,
     }
 
-    impl<'de, 'a> SeqAccess<'de> for Seq<'a> {
+    impl<'de, 'a, I> SeqAccess<'de> for Seq<I>
+    where
+        I: Iterator<Item = (&'static str, Cow<'a, str>)>,
+    {
         type Error = DeError;
         fn next_element_seed<T: DeserializeSeed<'de>>(
             &mut self,

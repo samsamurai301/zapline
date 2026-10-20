@@ -179,9 +179,28 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
     type Error = std::convert::Infallible;
     type Future = ResponseFuture;
 
+    /// HTTP/1: see [`ResponseFuture::poll_now`].
     #[inline]
     fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
-        self.app.handle(req.map(ReqBody::Incoming), self.conn)
+        self.app
+            .handle(req.map(ReqBody::Incoming), self.conn)
+            .poll_now()
+    }
+}
+
+/// The hyper service for one HTTP/2 connection. hyper runs every stream as
+/// its own task, so the response future is left for that task to poll.
+#[cfg(feature = "http2")]
+pub(crate) struct H2Service(Service);
+
+#[cfg(feature = "http2")]
+impl hyper::service::Service<http::Request<hyper::body::Incoming>> for H2Service {
+    type Response = crate::Response;
+    type Error = std::convert::Infallible;
+    type Future = ResponseFuture;
+
+    fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
+        self.0.app.handle(req.map(ReqBody::Incoming), self.0.conn)
     }
 }
 
@@ -367,7 +386,8 @@ type H1<I> = http1::UpgradeableConnection<TokioIo<I>, Service>;
 
 #[cfg(feature = "http2")]
 async fn serve_h2<I: Io>(io: I, service: Service, h2: &http2::Builder<TokioExecutor>, slot: Slot) {
-    Watched::new(h2.serve_connection(TokioIo::new(io), service), slot, None).await
+    let conn = h2.serve_connection(TokioIo::new(io), H2Service(service));
+    Watched::new(conn, slot, None).await
 }
 
 #[cfg(not(feature = "ws"))]
@@ -385,7 +405,7 @@ impl<I: Io> GracefulShutdown for http1::UpgradeableConnection<TokioIo<I>, Servic
 }
 
 #[cfg(feature = "http2")]
-impl<I: Io> GracefulShutdown for http2::Connection<TokioIo<I>, Service, TokioExecutor> {
+impl<I: Io> GracefulShutdown for http2::Connection<TokioIo<I>, H2Service, TokioExecutor> {
     fn graceful_shutdown(self: Pin<&mut Self>) {
         http2::Connection::graceful_shutdown(self)
     }

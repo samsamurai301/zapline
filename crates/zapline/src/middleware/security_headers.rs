@@ -172,12 +172,7 @@ impl Middleware for SecurityHeaders {
         let fut = next.run(req);
         Box::pin(async move {
             let mut res = fut.await;
-            let h = res.headers_mut();
-            for (name, value) in headers.iter() {
-                if !h.contains_key(name) {
-                    h.insert(name.clone(), value.clone());
-                }
-            }
+            super::insert_missing(res.headers_mut(), &headers);
             res
         })
     }
