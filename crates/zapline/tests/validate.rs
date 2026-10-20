@@ -159,13 +159,15 @@ async fn inner_extractor_errors_pass_through() {
         .await;
     assert_eq!(r.status(), 422);
     let body: Value = r.json();
-    assert!(body.get("code").is_none(), "{body}");
+    assert_eq!(body["code"], "invalid_json", "{body}");
     let r = c
         .post("/orders")
         .json(&json!({ "email": "a@b.co" }))
         .send()
         .await;
     assert_eq!(r.status(), 422);
+    let body: Value = r.json();
+    assert_eq!(body["code"], "invalid_body", "{body}");
 }
 
 #[derive(Debug, Deserialize, Validate)]

@@ -204,34 +204,11 @@ impl FromRequest for BodyStream {
     }
 }
 
-/// A [`zapline::Error`](crate::Error) viewed as a `std::error::Error`, so it
-/// can travel through `BoxError`-based APIs (response streams, multer) and
-/// be recovered intact with `downcast`.
-pub(crate) struct CompatError(pub(crate) Error);
-
-impl fmt::Debug for CompatError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&self.0, f)
-    }
-}
-
-impl fmt::Display for CompatError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.0.message())
-    }
-}
-
-impl std::error::Error for CompatError {}
-
-/// Lets streams that yield [`zapline::Error`](crate::Error) (e.g. a
-/// [`BodyStream`], or SSE events built with `json_data`) be used wherever a
-/// `BoxError` is expected, such as [`Body::from_stream`] and
-/// [`Sse`](crate::sse::Sse).
-impl From<Error> for BoxError {
-    fn from(e: Error) -> BoxError {
-        Box::new(CompatError(e))
-    }
-}
+// `BodyStream` yields `zapline::Error`, which converts into `BoxError` (for
+// `Body::from_stream`, `Sse`, multer) via the impl next to `Error`; multipart
+// downcasts it back.
+#[cfg(feature = "multipart")]
+pub(crate) use crate::error::CompatError;
 
 // ---------------------------------------------------------------------------
 // Response side
