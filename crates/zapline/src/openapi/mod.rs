@@ -35,6 +35,17 @@
 //! }
 //! ```
 //!
+//! Authentication is documented too. Credential extractors (`BearerToken`,
+//! `Jwt`, `BasicAuth`, `ApiKey`, `CurrentUser`) and route policies
+//! (`.require_auth()`, `.require_roles(..)`, `.require_scopes(..)`) add a
+//! security requirement and `401`/`403` responses, using the schemes declared
+//! on [`OpenApi`] (the first bearer scheme for bearer tokens, and so on); a
+//! default scheme such as `bearerAuth` is added when none fits. Routes marked
+//! `.allow_anonymous()` get `security: []`. Infrastructure routes stay out of
+//! the spec: the docs themselves, [`Health`](crate::health::Health) and
+//! [`Metrics`](crate::metrics::Metrics) endpoints (unless they opt in with
+//! `.document(true)`) and static files.
+//!
 //! Types appear in the spec when they implement [`JsonSchema`]. Derive it with
 //! `#[derive(JsonSchema)]`; the derive expands to paths in the `schemars`
 //! crate, so add `schemars = "1"` to your `Cargo.toml` (or point the derive at
@@ -60,10 +71,11 @@ use http::HeaderValue;
 use serde_json::Value;
 
 pub use describe::{ApiInput, ApiOutput};
-pub use doc::{GroupDoc, OperationDoc, ParamIn};
+pub use doc::{AuthKind, GroupDoc, OperationDoc, ParamIn};
 pub use schemars::{self, JsonSchema};
 pub use ui::DocsUi;
 
+use crate::auth::AllowAnonymous;
 use crate::{App, Plugin, RouteInfo, Routes};
 
 /// Env var: when set to a file path, the [`OpenApi`] plugin writes the spec
@@ -303,18 +315,17 @@ impl OpenApi {
             }
         }
 
+        // Not part of the API, and public even behind `Authenticate::required()`.
         let json = Bytes::from(generate::to_json(&spec, false));
-        let mut routes = Routes::new()
-            .get(&self.json_path, static_page(json, "application/json"))
-            .meta(OperationDoc::hidden_route());
+        let mut routes = Routes::new().get(&self.json_path, static_page(json, "application/json"));
         let spec_url = self.spec_url.as_deref().unwrap_or(&self.json_path);
         for (ui, path) in self.docs_pages() {
             let html = Bytes::from(ui.page(&self.title, spec_url, &self.cdn));
-            routes = routes
-                .get(&path, static_page(html, "text/html; charset=utf-8"))
-                .meta(OperationDoc::hidden_route());
+            routes = routes.get(&path, static_page(html, "text/html; charset=utf-8"));
         }
         routes
+            .meta_all(OperationDoc::hidden_route())
+            .meta_all(AllowAnonymous)
     }
 }
 
@@ -426,20 +437,22 @@ doc_methods! {
 }
 
 impl Routes {
-    /// Tag every route in this group (including routes added later).
-    pub fn tag_all(mut self, tag: impl Into<Cow<'static, str>>) -> Self {
-        self.defaults_mut()
-            .get_or_insert_default::<GroupDoc>()
-            .tag(tag);
-        self
+    /// Tag every route in this group (including routes added later). Tags
+    /// of nested groups accumulate, inner groups' first.
+    pub fn tag_all(self, tag: impl Into<Cow<'static, str>>) -> Self {
+        let tag = tag.into();
+        self.map_meta_all(move |meta| {
+            meta.get_or_insert_default::<GroupDoc>().tag(tag.clone());
+        })
     }
 
     /// Require a security scheme on every route in this group that doesn't
-    /// set its own.
-    pub fn security_all(mut self, scheme: impl Into<Cow<'static, str>>) -> Self {
-        self.defaults_mut()
-            .get_or_insert_default::<GroupDoc>()
-            .security(scheme);
-        self
+    /// set its own. Schemes of nested groups accumulate as alternatives.
+    pub fn security_all(self, scheme: impl Into<Cow<'static, str>>) -> Self {
+        let scheme = scheme.into();
+        self.map_meta_all(move |meta| {
+            meta.get_or_insert_default::<GroupDoc>()
+                .security(scheme.clone());
+        })
     }
 }

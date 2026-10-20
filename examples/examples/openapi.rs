@@ -20,6 +20,9 @@ use std::sync::{Arc, RwLock};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+use zapline::auth::{constant_time_eq, Authenticate};
+use zapline::header;
+use zapline::health::Health;
 use zapline::openapi::{DocsUi, OpenApi};
 use zapline::prelude::*;
 use zapline::validate::Valid;
@@ -147,28 +150,35 @@ async fn delete_book(State(db): State<Db>, Path(id): Path<u64>) -> Result<Status
     }
 }
 
-/// Demo auth for write routes. Real apps would use `zapline::auth`.
-async fn require_token(req: Request, next: Next) -> Response {
-    match req.headers().get("authorization") {
-        Some(v) if v == "Bearer demo-token" => next.run(req).await,
-        _ => Error::unauthorized().into_response(),
-    }
+/// Demo authentication with one static token. Real apps would use JWTs
+/// (`Authenticate::jwt()`) or their identity provider.
+fn demo_user(req: &Request) -> std::future::Ready<Result<Option<String>>> {
+    let token = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    std::future::ready(match token {
+        None => Ok(None),
+        Some(t) if constant_time_eq(t, "demo-token") => Ok(Some("demo".into())),
+        Some(_) => Err(Error::unauthorized().with_code("invalid_credentials")),
+    })
 }
 
 fn app() -> App {
-    // Write routes share middleware and are documented as requiring a token.
+    // Write routes require a user. The policy is enforced by `Authenticate`
+    // and documented automatically: a bearer security requirement and a 401.
     let writes = Routes::new()
         .mount((create_book, update_book, delete_book))
-        .wrap(require_token)
-        .security_all("bearer");
+        .require_auth_all()
+        .wrap(Authenticate::new(demo_user));
 
     App::new()
         .state(Db::default())
         .mount((list_books, get_book))
         .mount(writes)
-        .get("/health", || async { "ok" })
-        .summary("Liveness probe")
-        .tag("ops")
+        // Probes at /health, /health/live and /health/ready, kept out of the docs.
+        .plugin(Health::new())
         .openapi(
             OpenApi::new("Bookshelf API", "1.0.0")
                 .description("A tiny catalog showing zapline's automatic API docs.")

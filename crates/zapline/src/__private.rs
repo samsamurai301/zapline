@@ -21,6 +21,11 @@ impl<T> Probe<T> {
     }
 }
 
+/// Stands in for a generic argument the macros cannot name, so wrappers
+/// such as `Sse<impl Stream<..>>` can still be probed as `Sse<Opaque>`.
+#[derive(Clone, Copy, Debug)]
+pub struct Opaque;
+
 #[cfg(feature = "openapi")]
 pub use crate::openapi::OperationDoc as Doc;
 
