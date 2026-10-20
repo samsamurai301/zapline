@@ -114,6 +114,9 @@ impl EndpointLayers {
     }
 }
 
+/// A build-time edit of a route's metadata (see [`Routes::map_meta_all`]).
+type MetaHook = Arc<dyn Fn(&mut Extensions) + Send + Sync>;
+
 /// A group of routes, optionally sharing middleware and metadata. Nest it
 /// under a prefix with [`Routes::nest`] or [`App::nest`](crate::App::nest).
 #[derive(Default)]
@@ -121,6 +124,7 @@ pub struct Routes {
     entries: Vec<Entry>,
     middleware: Vec<Arc<dyn Middleware>>,
     defaults: Extensions,
+    meta_hooks: Vec<MetaHook>,
 }
 
 macro_rules! method_fns {
@@ -225,6 +229,35 @@ impl Routes {
         &mut self.defaults
     }
 
+    /// Edit the metadata of every route in this group (including routes
+    /// added later) when the group is finished: after the group's defaults
+    /// are merged, and after the hooks of groups nested inside it, so an
+    /// outer group's hook sees what inner groups did. Use it for metadata
+    /// that must *compose* across nesting (e.g. accumulated tags), where a
+    /// [`meta_all`](Self::meta_all) value would replace the inner group's.
+    ///
+    /// Hooks run once, while the app is built.
+    ///
+    /// ```
+    /// use zapline::prelude::*;
+    ///
+    /// #[derive(Clone, Default)]
+    /// struct Trail(Vec<&'static str>);
+    ///
+    /// let inner = Routes::new()
+    ///     .get("/x", || async { "x" })
+    ///     .map_meta_all(|m| m.get_or_insert_default::<Trail>().0.push("inner"));
+    /// let outer = Routes::new()
+    ///     .nest("/in", inner)
+    ///     .map_meta_all(|m| m.get_or_insert_default::<Trail>().0.push("outer"));
+    /// let table = App::new().nest("/out", outer).route_table();
+    /// assert_eq!(table[0].meta::<Trail>().unwrap().0, ["inner", "outer"]);
+    /// ```
+    pub fn map_meta_all(mut self, f: impl Fn(&mut Extensions) + Send + Sync + 'static) -> Self {
+        self.meta_hooks.push(Arc::new(f));
+        self
+    }
+
     /// Add macro-annotated handlers, other `Routes`, or tuples of them.
     pub fn mount(self, routes: impl IntoRoutes) -> Self {
         routes.into_routes(self)
@@ -261,12 +294,14 @@ impl Routes {
         (!mw.is_empty()).then(|| mw.into())
     }
 
-    /// Record group middleware and merge default metadata into each entry.
+    /// Record group middleware, merge default metadata into each entry and
+    /// run the group's metadata hooks.
     pub(crate) fn finish(self) -> Vec<Entry> {
         let chain: Option<Arc<[Arc<dyn Middleware>]>> =
             (!self.middleware.is_empty()).then(|| self.middleware.into());
         let defaults = self.defaults;
         let has_defaults = !defaults.is_empty();
+        let hooks = self.meta_hooks;
         self.entries
             .into_iter()
             .map(|mut e| {
@@ -287,6 +322,9 @@ impl Routes {
                         meta.insert(layers);
                     }
                     e.meta = meta;
+                }
+                for hook in &hooks {
+                    hook(&mut e.meta);
                 }
                 e
             })

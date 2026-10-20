@@ -47,6 +47,10 @@
 //! {"status":"down","checks":{"db":{"status":"up","duration_ms":1.204},
 //!  "cache":{"status":"down","duration_ms":2000.113,"error":"timed out after 2s"}}}
 //! ```
+//!
+//! The endpoints are public (marked `.allow_anonymous()`, so app-wide
+//! authentication doesn't block probes) and left out of the OpenAPI spec
+//! unless [`Health::document`] opts in.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -174,6 +178,7 @@ pub struct Health {
     details: bool,
     cache: Option<Duration>,
     state: HealthState,
+    document: bool,
 }
 
 impl Default for Health {
@@ -195,6 +200,7 @@ impl Health {
             details: true,
             cache: None,
             state: HealthState::new(),
+            document: false,
         }
     }
 
@@ -280,6 +286,23 @@ impl Health {
         self.state = state;
         self
     }
+
+    /// List the endpoints in the OpenAPI spec, tagged `health` (default
+    /// `false`: they are infrastructure, not API).
+    pub fn document(mut self, enabled: bool) -> Self {
+        self.document = enabled;
+        self
+    }
+}
+
+/// Mark the last registered route public, and document it or hide it.
+fn endpoint(app: App, document: bool, summary: &'static str, can_fail: bool) -> App {
+    let app = app.allow_anonymous();
+    #[cfg(feature = "openapi")]
+    let app = app.meta(docs::operation(document, summary, can_fail));
+    #[cfg(not(feature = "openapi"))]
+    let _ = (document, summary, can_fail);
+    app
 }
 
 impl Plugin for Health {
@@ -308,6 +331,7 @@ impl Plugin for Health {
             app = app.get(&self.live_path, || async {
                 json(StatusCode::OK, r#"{"status":"up"}"#)
             });
+            app = endpoint(app, self.document, "Liveness probe", false);
         }
         if !self.ready_path.is_empty() {
             let r = runner.clone();
@@ -315,6 +339,7 @@ impl Plugin for Health {
                 let r = r.clone();
                 async move { r.respond(false).await }
             });
+            app = endpoint(app, self.document, "Readiness probe", true);
         }
         if !self.path.is_empty() {
             let r = runner;
@@ -322,8 +347,78 @@ impl Plugin for Health {
                 let r = r.clone();
                 async move { r.respond(true).await }
             });
+            app = endpoint(app, self.document, "Health report", true);
         }
         app
+    }
+}
+
+#[cfg(feature = "openapi")]
+mod docs {
+    use std::borrow::Cow;
+
+    use schemars::{json_schema, JsonSchema, Schema, SchemaGenerator};
+
+    use crate::openapi::OperationDoc;
+
+    /// The JSON body of every health endpoint.
+    struct HealthReport;
+
+    impl JsonSchema for HealthReport {
+        fn schema_name() -> Cow<'static, str> {
+            "HealthReport".into()
+        }
+
+        fn schema_id() -> Cow<'static, str> {
+            "zapline::health::HealthReport".into()
+        }
+
+        fn json_schema(_: &mut SchemaGenerator) -> Schema {
+            json_schema!({
+                "type": "object",
+                "description": "Health report.",
+                "required": ["status"],
+                "properties": {
+                    "status": { "type": "string", "enum": ["up", "degraded", "down"] },
+                    "reason": { "type": "string" },
+                    "checks": {
+                        "type": "object",
+                        "additionalProperties": {
+                            "type": "object",
+                            "required": ["status", "duration_ms"],
+                            "properties": {
+                                "status": { "type": "string", "enum": ["up", "down"] },
+                                "duration_ms": { "type": "number" },
+                                "error": { "type": "string" }
+                            }
+                        }
+                    },
+                    "info": {
+                        "type": "object",
+                        "properties": {
+                            "name": { "type": "string" },
+                            "version": { "type": "string" }
+                        }
+                    },
+                    "uptime_seconds": { "type": "number" }
+                }
+            })
+        }
+    }
+
+    /// Docs for a health endpoint, or a hidden route.
+    pub(super) fn operation(document: bool, summary: &'static str, can_fail: bool) -> OperationDoc {
+        if !document {
+            return OperationDoc::hidden_route();
+        }
+        let mut doc = OperationDoc::new();
+        doc.summary(summary)
+            .tag("health")
+            .success::<HealthReport>("application/json");
+        if can_fail {
+            doc.response::<HealthReport>(503, "Service Unavailable");
+        }
+        doc
     }
 }
 

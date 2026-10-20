@@ -222,3 +222,68 @@ async fn endpoint_layers_run_innermost_across_nested_groups() {
         vec!["route", "outer-group", "inner-group", "innermost"]
     );
 }
+
+#[test]
+fn meta_hooks_compose_across_nested_groups() {
+    /// Accumulated by hooks, inner groups first.
+    #[derive(Clone, Debug, Default, PartialEq)]
+    struct Trail(Vec<String>);
+
+    let runs = Arc::new(AtomicUsize::new(0));
+    let push = |label: &'static str| {
+        let runs = runs.clone();
+        move |meta: &mut zapline::http::Extensions| {
+            runs.fetch_add(1, Ordering::SeqCst);
+            // Hooks run after defaults are merged: they see `meta_all` values.
+            let tag = meta.get::<Tag>().map_or("-", |t| t.0);
+            meta.get_or_insert_default::<Trail>()
+                .0
+                .push(format!("{label}:{tag}"));
+        }
+    };
+
+    let inner = Routes::new()
+        .map_meta_all(push("inner"))
+        // Routes registered after the hook are covered too.
+        .get("/x", || async { "x" })
+        .meta_all(Tag("inner"));
+    let outer = Routes::new()
+        .nest("/in", inner)
+        .get("/y", || async { "y" })
+        .map_meta_all(push("outer"))
+        .meta_all(Tag("outer"));
+    let table = App::new().nest("/out", outer).route_table();
+
+    let route = |path: &str| *table.iter().find(|r| r.path() == path).unwrap();
+    let x = route("/out/in/x");
+    assert_eq!(
+        x.meta::<Trail>().unwrap().0,
+        ["inner:inner", "outer:inner"],
+        "outer hooks run after inner ones"
+    );
+    // `meta_all` keeps its replace semantics: the innermost value wins.
+    assert_eq!(x.meta::<Tag>(), Some(&Tag("inner")));
+    let y = route("/out/y");
+    assert_eq!(y.meta::<Trail>().unwrap().0, ["outer:outer"]);
+    assert_eq!(y.meta::<Tag>(), Some(&Tag("outer")));
+    // Once per route per hook, at build time.
+    assert_eq!(runs.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn meta_hooks_apply_to_routes_from_build_hooks() {
+    #[derive(Clone, Debug, PartialEq)]
+    struct Seen;
+
+    let table = App::new()
+        .get("/a", || async { "a" })
+        .on_build(|_: &[&'static RouteInfo]| {
+            Routes::new().get("/b", || async { "b" }).map_meta_all(|m| {
+                m.insert(Seen);
+            })
+        })
+        .route_table();
+    assert!(table[0].meta::<Seen>().is_none());
+    assert_eq!(table[1].path(), "/b");
+    assert_eq!(table[1].meta::<Seen>(), Some(&Seen));
+}

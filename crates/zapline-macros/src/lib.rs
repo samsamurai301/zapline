@@ -30,6 +30,10 @@ const METHODS: &[&str] = &[
     "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS", "TRACE", "CONNECT",
 ];
 
+/// Response wrappers whose docs don't depend on their (usually
+/// `impl Stream<..>`) type argument.
+const STREAM_WRAPPERS: &[&str] = &["Sse", "StreamBody"];
+
 const ARGS: &str =
     "tag, tags, summary, description, operation_id, status, deprecated, hidden, security";
 
@@ -340,10 +344,30 @@ fn describe_output(ty: &Type) -> TokenStream2 {
                 let inner = describe_output(inner);
                 return quote! { #inner ::zapline::__private::error_response(doc); };
             }
+            (name, [inner]) if STREAM_WRAPPERS.contains(&name) && !nameable(inner) => {
+                return probe(&opaque_args(ty), quote!(zapline_describe_output));
+            }
             _ => {}
         }
     }
     probe(ty, quote!(zapline_describe_output))
+}
+
+/// `Sse<impl Stream<..>>` -> `Sse<::zapline::__private::Opaque>`.
+fn opaque_args(ty: &Type) -> Type {
+    let mut ty = ty.clone();
+    if let Type::Path(p) = &mut ty {
+        if let Some(PathArguments::AngleBracketed(a)) =
+            p.path.segments.last_mut().map(|s| &mut s.arguments)
+        {
+            for arg in &mut a.args {
+                if let GenericArgument::Type(t) = arg {
+                    *t = syn::parse_quote!(::zapline::__private::Opaque);
+                }
+            }
+        }
+    }
+    ty
 }
 
 /// `(&&Probe::<T>::new()).method(doc);` for a leaf type, or nothing when the
@@ -653,6 +677,22 @@ mod tests {
         assert!(out(quote!(impl IntoResponse)).is_empty());
         let s = out(quote!(Result<impl IntoResponse>));
         assert!(s.contains("error_response") && !s.contains("Probe"), "{s}");
+        // Streaming wrappers are probed with an opaque stream type.
+        let s = out(quote!(Sse<impl Stream<Item = Event>>));
+        assert!(
+            s.contains("Probe :: < Sse < :: zapline :: __private :: Opaque > >"),
+            "{s}"
+        );
+        let s = out(quote!(Result<zapline::stream::StreamBody<impl Stream>>));
+        assert!(
+            s.contains("StreamBody < :: zapline :: __private :: Opaque >")
+                && s.contains("error_response"),
+            "{s}"
+        );
+        // Nameable stream types are probed as written; other generic
+        // wrappers around `impl Trait` are still skipped.
+        assert!(out(quote!(Sse<MyStream>)).contains("Sse < MyStream >"));
+        assert!(out(quote!(Json<impl Serialize>)).is_empty());
 
         let input =
             |ty: TokenStream2| describe_input(&syn::parse2::<Type>(ty).unwrap()).to_string();

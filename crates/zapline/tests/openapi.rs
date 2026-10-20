@@ -949,3 +949,40 @@ async fn served_over_a_real_socket() {
     assert!(out.contains("content-type: text/html; charset=utf-8"));
     assert!(out.contains("SwaggerUIBundle"));
 }
+
+#[test]
+fn nested_group_docs_accumulate() {
+    let inner = Routes::new()
+        .get("/x", || async { "x" })
+        .tag("route")
+        .tag_all("inner")
+        .security_all("api_key");
+    let outer = Routes::new()
+        .nest("/in", inner)
+        .get("/y", || async { "y" })
+        .get("/z", || async { "z" })
+        .security("bearer")
+        .tag_all("outer")
+        .tag_all("inner")
+        .security_all("bearer");
+    let app = App::new()
+        .nest("/out", outer)
+        .nest("/other", Routes::new().get("/w", || async { "w" }));
+    let spec = spec_for(app, api());
+
+    // Inner group first, then outer groups (deduplicated), then the route's.
+    let x = op(&spec, "/out/in/x", "get");
+    assert_eq!(x["tags"], json!(["inner", "outer", "route"]));
+    assert_eq!(x["security"], json!([{ "api_key": [] }, { "bearer": [] }]));
+    let y = op(&spec, "/out/y", "get");
+    assert_eq!(y["tags"], json!(["outer", "inner"]));
+    assert_eq!(y["security"], json!([{ "bearer": [] }]));
+    // Route-level security still replaces the group's.
+    assert_eq!(
+        op(&spec, "/out/z", "get")["security"],
+        json!([{ "bearer": [] }])
+    );
+    // Groups don't leak into siblings.
+    let w = op(&spec, "/other/w", "get");
+    assert!(w.get("tags").is_none() && w.get("security").is_none());
+}

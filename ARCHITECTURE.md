@@ -34,7 +34,7 @@ TCP accept (per-core runtime, SO_REUSEPORT)            server.rs
 | `Resources` | The typed registry behind `State<T>`: `insert`, `insert_arc`, `get`, `get_arc`, `require`, `contains`. |
 | `App::wrap(mw)` | Global middleware, before routing. Use it for CORS, request IDs, path normalization, and anything that must see 404s. |
 | `App::wrap_route(mw)`, `Routes::wrap(mw)` | Middleware that runs after routing. `req.route()` and `req.matched_path()` are available. Use it for metrics, auth policies and per-route config. |
-| `Routes::meta(v)`, `Routes::meta_all(v)`, `App::meta(v)`, `Routes::route_with(m, p, h, Extensions)`, `Routes::last_meta_mut()`, `Routes::defaults_mut()` | Typed per-route metadata. Values must be `Clone + Send + Sync + 'static`. Plugins define their own metadata types and read them via `RouteInfo::meta::<T>()`. |
+| `Routes::meta(v)`, `Routes::meta_all(v)`, `App::meta(v)`, `Routes::route_with(m, p, h, Extensions)`, `Routes::last_meta_mut()`, `Routes::defaults_mut()`, `Routes::map_meta_all(f)` | Typed per-route metadata. Values must be `Clone + Send + Sync + 'static`. Plugins define their own metadata types and read them via `RouteInfo::meta::<T>()`. Group defaults (`meta_all`) are replaced by inner groups' values; `map_meta_all` hooks compose instead (inner groups' run first, e.g. OpenAPI `tag_all`). |
 | `Routes::endpoint(method, path, Arc<dyn Endpoint>)` | Register a dynamically built endpoint. |
 | `App::extensions_mut()` | Builder-time typed storage for plugins (e.g. accumulated config). |
 | `App::error_handler(\|r: &ErrorReport\| -> Response)` | Re-render every error response. Each error response carries an `ErrorReport` in its extensions. |

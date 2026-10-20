@@ -7,8 +7,11 @@ use schemars::generate::{Contract, SchemaSettings};
 use schemars::SchemaGenerator;
 use serde_json::{json, Map, Value};
 
-use super::doc::{BodyDoc, GroupDoc, OperationDoc, ParamIn, SchemaFn, Status, Text};
+use super::doc::{
+    AuthKind, BodyDoc, GroupDoc, OperationDoc, ParamIn, ResponseDoc, SchemaFn, Scheme, Status, Text,
+};
 use super::OpenApi;
+use crate::auth::RoutePolicy;
 use crate::RouteInfo;
 
 /// Where response (and shared) schemas live.
@@ -75,6 +78,67 @@ impl Schemas {
     }
 }
 
+/// The spec's security schemes: those declared on [`OpenApi`], plus
+/// defaults added for kinds of credentials the app uses but didn't declare.
+struct Schemes<'a> {
+    declared: &'a [(String, Value)],
+    added: Vec<(String, Value)>,
+}
+
+impl Schemes<'_> {
+    fn all(&self) -> impl Iterator<Item = &(String, Value)> {
+        self.declared.iter().chain(&self.added)
+    }
+
+    /// The name of the first scheme of this kind, adding a default one if
+    /// there is none.
+    fn resolve(&mut self, kind: AuthKind) -> String {
+        if let Some((name, _)) = self.all().find(|(_, s)| is_kind(s, kind)) {
+            return name.clone();
+        }
+        let (base, scheme) = match kind {
+            AuthKind::Bearer => ("bearerAuth", json!({ "type": "http", "scheme": "bearer" })),
+            AuthKind::Basic => ("basicAuth", json!({ "type": "http", "scheme": "basic" })),
+            AuthKind::ApiKey => (
+                "apiKeyAuth",
+                json!({ "type": "apiKey", "in": "header", "name": "x-api-key" }),
+            ),
+        };
+        let mut name = base.to_owned();
+        let mut n = 2;
+        while self.all().any(|(k, _)| *k == name) {
+            name = format!("{base}{n}");
+            n += 1;
+        }
+        self.added.push((name.clone(), scheme));
+        name
+    }
+
+    /// OAuth-style schemes list scopes only; others may list role names.
+    fn is_oauth(&self, name: &str) -> bool {
+        self.all().any(|(k, s)| {
+            k == name
+                && matches!(
+                    s.get("type").and_then(Value::as_str),
+                    Some("oauth2" | "openIdConnect")
+                )
+        })
+    }
+}
+
+fn is_kind(scheme: &Value, kind: AuthKind) -> bool {
+    let field = |k: &str| scheme.get(k).and_then(Value::as_str);
+    let http = |name: &str| {
+        field("type") == Some("http")
+            && field("scheme").is_some_and(|s| s.eq_ignore_ascii_case(name))
+    };
+    match kind {
+        AuthKind::Bearer => http("bearer"),
+        AuthKind::Basic => http("basic"),
+        AuthKind::ApiKey => field("type") == Some("apiKey"),
+    }
+}
+
 /// A documented route.
 struct Op<'a> {
     path: String,
@@ -82,6 +146,7 @@ struct Op<'a> {
     method: &'static str,
     doc: &'a OperationDoc,
     group: Option<&'a GroupDoc>,
+    policy: RoutePolicy<'a>,
 }
 
 pub(crate) fn generate(api: &OpenApi, routes: &[&'static RouteInfo]) -> Value {
@@ -91,7 +156,11 @@ pub(crate) fn generate(api: &OpenApi, routes: &[&'static RouteInfo]) -> Value {
         .filter_map(|r| {
             let method = method_key(r.method()?)?;
             let doc = r.meta::<OperationDoc>().unwrap_or(&empty);
-            if doc.hidden {
+            #[cfg(feature = "fs")]
+            let static_files = r.meta::<crate::fs::StaticFilesRoute>().is_some();
+            #[cfg(not(feature = "fs"))]
+            let static_files = false;
+            if doc.hidden || static_files {
                 return None;
             }
             let (path, params) = openapi_path(r.path());
@@ -101,19 +170,27 @@ pub(crate) fn generate(api: &OpenApi, routes: &[&'static RouteInfo]) -> Value {
                 method,
                 doc,
                 group: r.meta::<GroupDoc>(),
+                policy: RoutePolicy::of(r),
             })
         })
         .collect();
     let ids = operation_ids(&ops);
 
     let mut schemas = Schemas::new();
+    let mut schemes = Schemes {
+        declared: &api.schemes,
+        added: Vec::new(),
+    };
     let mut paths: BTreeMap<String, Map<String, Value>> = BTreeMap::new();
     for (op, id) in ops.iter().zip(ids) {
-        let value = operation(&mut schemas, op, id);
+        let mut value = operation(&mut schemas, op, id);
+        if let Some(security) = security(&mut schemes, &api.security, op) {
+            value.insert("security".into(), security);
+        }
         paths
             .entry(op.path.clone())
             .or_default()
-            .insert(op.method.to_owned(), value);
+            .insert(op.method.to_owned(), Value::Object(value));
     }
     let mut paths = Value::Object(
         paths
@@ -149,8 +226,8 @@ pub(crate) fn generate(api: &OpenApi, routes: &[&'static RouteInfo]) -> Value {
         spec.insert("tags".into(), tags.collect());
     }
     spec.insert("paths".into(), paths);
-    if !api.schemes.is_empty() {
-        let schemes: Map<String, Value> = api.schemes.iter().cloned().collect();
+    let schemes: Map<String, Value> = schemes.all().cloned().collect();
+    if !schemes.is_empty() {
         components.insert("securitySchemes".into(), Value::Object(schemes));
     }
     spec.insert("components".into(), Value::Object(components));
@@ -278,7 +355,7 @@ fn operation_ids(ops: &[Op<'_>]) -> Vec<String> {
     ids.into_iter().map(Option::unwrap_or_default).collect()
 }
 
-fn operation(s: &mut Schemas, op: &Op<'_>, id: String) -> Value {
+fn operation(s: &mut Schemas, op: &Op<'_>, id: String) -> Map<String, Value> {
     let doc = op.doc;
     let mut o = Map::new();
 
@@ -312,20 +389,106 @@ fn operation(s: &mut Schemas, op: &Op<'_>, id: String) -> Value {
     if let Some(body) = &doc.body {
         o.insert("requestBody".into(), request_body(s, body));
     }
-    o.insert("responses".into(), responses(s, doc));
+    // What the route's auth policy answers with (documented ones win).
+    let mut policy = Vec::new();
+    if op.policy.requires_auth() {
+        policy.push(ResponseDoc::error(401, "Unauthorized"));
+    }
+    if op.policy.has_permissions() {
+        policy.push(ResponseDoc::error(403, "Forbidden"));
+    }
+    o.insert("responses".into(), responses(s, doc, &policy));
     if doc.deprecated {
         o.insert("deprecated".into(), true.into());
     }
+    o
+}
 
-    let security = if doc.security.is_empty() {
-        op.group.map(|g| &g.security[..]).unwrap_or(&[])
-    } else {
-        &doc.security[..]
+/// An operation's security requirements, or `None` to leave the spec-wide
+/// default in effect. In order of precedence:
+///
+/// 1. its own schemes (explicit, or from credential extractors), plus `{}`
+///    when they all come from optional extractors;
+/// 2. `[]` for `.allow_anonymous()` routes;
+/// 3. its group's schemes (`security_all`);
+/// 4. for routes with an auth policy, the spec's default security, else the
+///    app's bearer scheme.
+///
+/// Required scopes are listed in each requirement; required roles (any one
+/// suffices) make one alternative per role, except for OAuth schemes.
+fn security(schemes: &mut Schemes<'_>, global: &[String], op: &Op<'_>) -> Option<Value> {
+    let group = op.group.map_or(&[][..], |g| &g.security[..]);
+    // How the app authenticates users: group, spec default, else bearer.
+    let user = |schemes: &mut Schemes<'_>| -> Vec<String> {
+        if !group.is_empty() {
+            group.iter().map(ToString::to_string).collect()
+        } else if !global.is_empty() {
+            global.to_vec()
+        } else {
+            vec![schemes.resolve(AuthKind::Bearer)]
+        }
     };
-    if !security.is_empty() {
-        o.insert("security".into(), security_list(security));
+
+    let own = &op.doc.security;
+    let mut names: Vec<String> = Vec::new();
+    let mut anonymous = false;
+    if !own.is_empty() {
+        for sec in own {
+            let resolved = match &sec.scheme {
+                Scheme::Named(name) => vec![name.to_string()],
+                Scheme::Kind(kind) => vec![schemes.resolve(*kind)],
+                Scheme::User => user(schemes),
+            };
+            for name in resolved {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        anonymous = !op.policy.requires_auth() && own.iter().all(|s| s.optional);
+    } else if op.policy.is_anonymous() {
+        return Some(Value::Array(Vec::new()));
+    } else if !group.is_empty() {
+        names = group.iter().map(ToString::to_string).collect();
+    } else if op.policy.requires_auth() {
+        names = user(schemes);
+    } else {
+        return None;
     }
-    Value::Object(o)
+
+    let scopes = op.policy.scopes();
+    let mut requirements = Vec::new();
+    for name in &names {
+        let roles = if schemes.is_oauth(name) {
+            &[][..]
+        } else {
+            op.policy.roles()
+        };
+        if roles.is_empty() {
+            requirements.push(requirement(name, scopes.iter()));
+        }
+        for role in roles {
+            requirements.push(requirement(name, std::iter::once(role).chain(scopes)));
+        }
+    }
+    if anonymous {
+        requirements.push(Value::Object(Map::new()));
+    }
+    Some(Value::Array(requirements))
+}
+
+/// `{ "<scheme>": [<scopes or roles>] }`, without duplicates.
+fn requirement<'a>(scheme: &str, values: impl Iterator<Item = &'a String>) -> Value {
+    let mut list: Vec<Value> = Vec::new();
+    for v in values {
+        let v = Value::from(v.as_str());
+        if !list.contains(&v) {
+            list.push(v);
+        }
+    }
+    let mut m = Map::new();
+    m.insert(scheme.to_owned(), Value::Array(list));
+    Value::Object(m)
 }
 
 /// Alternatives: any one of the schemes satisfies the requirement.
@@ -498,7 +661,7 @@ fn reason(code: Option<u16>) -> &'static str {
     }
 }
 
-fn responses(s: &mut Schemas, doc: &OperationDoc) -> Value {
+fn responses(s: &mut Schemas, doc: &OperationDoc, extra: &[ResponseDoc]) -> Value {
     struct Acc {
         code: Option<u16>,
         description: Option<Text>,
@@ -508,7 +671,7 @@ fn responses(s: &mut Schemas, doc: &OperationDoc) -> Value {
     let success = doc.success_status.unwrap_or(200);
     let mut acc: BTreeMap<String, Acc> = BTreeMap::new();
     let mut has_success = false;
-    for r in &doc.responses {
+    for r in doc.responses.iter().chain(extra) {
         let code = match r.status {
             Status::Success => Some(success),
             Status::Code(c) => Some(c),

@@ -81,6 +81,79 @@ pub(crate) struct ResponseDoc {
     pub(crate) headers: Vec<(Text, Text)>,
 }
 
+impl ResponseDoc {
+    /// A `status` response whose body is the framework's `Error`.
+    pub(crate) fn error(status: u16, description: &'static str) -> Self {
+        ResponseDoc {
+            status: Status::Code(status),
+            description: Some(description.into()),
+            content: error_content(),
+            headers: Vec::new(),
+        }
+    }
+}
+
+/// A kind of credentials, for documenting extractors that don't know the
+/// name of the app's security scheme (e.g. `BearerToken`).
+///
+/// When the spec is generated, it resolves to the first scheme of that kind
+/// declared on [`OpenApi`](super::OpenApi) (e.g. with `.bearer_auth("jwt")`);
+/// if there is none, a default scheme is added: `bearerAuth`, `basicAuth`
+/// or `apiKeyAuth` (header `x-api-key`).
+///
+/// ```
+/// use zapline::openapi::{ApiInput, AuthKind, OperationDoc};
+///
+/// struct AdminToken(String);
+///
+/// impl ApiInput for AdminToken {
+///     fn describe_input(op: &mut OperationDoc) {
+///         op.security_kind(AuthKind::Bearer)
+///             .error_response(401, "Unauthorized");
+///     }
+/// }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum AuthKind {
+    /// HTTP bearer tokens (`Authorization: Bearer ..`).
+    Bearer,
+    /// HTTP basic credentials.
+    Basic,
+    /// An API key (`apiKey` scheme).
+    ApiKey,
+}
+
+/// A security scheme required by an operation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Scheme {
+    /// Declared on `OpenApi` under this name.
+    Named(Text),
+    /// The app's scheme for this kind of credentials.
+    Kind(AuthKind),
+    /// However the app authenticates users (`CurrentUser`, route policies):
+    /// the group's or the spec's security, else bearer.
+    User,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SecurityDoc {
+    pub(crate) scheme: Scheme,
+    /// Added by an optional extractor (`Option<BearerToken>`).
+    pub(crate) optional: bool,
+}
+
+/// How much input-side documentation an operation had, so docs added by an
+/// optional extractor can be found afterwards.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct InputMark {
+    query: usize,
+    params: usize,
+    body: bool,
+    security: usize,
+    responses: usize,
+}
+
 /// OpenAPI documentation for one route (an "operation").
 ///
 /// The route macros fill this in from doc comments, macro arguments and the
@@ -105,7 +178,7 @@ pub struct OperationDoc {
     pub(crate) operation_id: Option<Text>,
     pub(crate) deprecated: bool,
     pub(crate) hidden: bool,
-    pub(crate) security: Vec<Text>,
+    pub(crate) security: Vec<SecurityDoc>,
     pub(crate) success_status: Option<u16>,
     pub(crate) path: Option<SchemaFn>,
     pub(crate) query: Vec<QueryDoc>,
@@ -172,9 +245,29 @@ impl OperationDoc {
     /// (e.g. with `bearer_auth("bearer")`). Several calls list alternatives:
     /// any one of them is enough.
     pub fn security(&mut self, scheme: impl Into<Text>) -> &mut Self {
-        let scheme = scheme.into();
-        if !self.security.contains(&scheme) {
-            self.security.push(scheme);
+        self.push_security(Scheme::Named(scheme.into()))
+    }
+
+    /// Require the app's security scheme for `kind` of credentials, whatever
+    /// its name (see [`AuthKind`]). Combines with [`security`](Self::security)
+    /// as an alternative.
+    pub fn security_kind(&mut self, kind: AuthKind) -> &mut Self {
+        self.push_security(Scheme::Kind(kind))
+    }
+
+    /// Require an authenticated user, however the app authenticates them.
+    pub(crate) fn security_user(&mut self) -> &mut Self {
+        self.push_security(Scheme::User)
+    }
+
+    fn push_security(&mut self, scheme: Scheme) -> &mut Self {
+        match self.security.iter_mut().find(|s| s.scheme == scheme) {
+            // Required once means required.
+            Some(existing) => existing.optional = false,
+            None => self.security.push(SecurityDoc {
+                scheme,
+                optional: false,
+            }),
         }
         self
     }
@@ -233,7 +326,7 @@ impl OperationDoc {
         self.add_body(content_type.into(), None)
     }
 
-    fn add_body(&mut self, content_type: Text, schema: Option<SchemaFn>) -> &mut Self {
+    pub(crate) fn add_body(&mut self, content_type: Text, schema: Option<SchemaFn>) -> &mut Self {
         let body = self.body.get_or_insert_with(|| BodyDoc {
             required: true,
             content: Vec::new(),
@@ -319,28 +412,38 @@ impl OperationDoc {
         self
     }
 
-    /// Snapshot of the input-side lengths, for [`Self::make_optional_since`].
-    pub(crate) fn input_mark(&self) -> (usize, usize, bool) {
-        (self.query.len(), self.params.len(), self.body.is_some())
+    /// Snapshot of the input-side docs, for [`Self::make_optional_since`].
+    pub(crate) fn input_mark(&self) -> InputMark {
+        InputMark {
+            query: self.query.len(),
+            params: self.params.len(),
+            body: self.body.is_some(),
+            security: self.security.len(),
+            responses: self.responses.len(),
+        }
     }
 
-    /// Inputs added after `mark` came from an optional extractor
-    /// (`Option<Query<T>>`): make them not required.
-    pub(crate) fn make_optional_since(&mut self, mark: (usize, usize, bool)) {
-        let (query, params, had_body) = mark;
-        for q in &mut self.query[query..] {
+    /// Docs added after `mark` came from an optional extractor
+    /// (`Option<BearerToken>`), which never fails: its inputs become
+    /// optional, its security can be skipped and its error responses go.
+    pub(crate) fn make_optional_since(&mut self, mark: InputMark) {
+        for q in &mut self.query[mark.query..] {
             q.optional = true;
         }
-        for p in &mut self.params[params..] {
+        for p in &mut self.params[mark.params..] {
             if p.location != ParamIn::Path {
                 p.required = false;
             }
         }
-        if !had_body {
+        if !mark.body {
             if let Some(b) = &mut self.body {
                 b.required = false;
             }
         }
+        for s in &mut self.security[mark.security..] {
+            s.optional = true;
+        }
+        self.responses.truncate(mark.responses);
     }
 }
 
@@ -355,8 +458,8 @@ fn error_content() -> Option<(Text, Option<SchemaFn>)> {
 /// `Routes::tag_all` / `Routes::security_all`.
 ///
 /// Route-level tags are added after the group's; route-level security
-/// replaces the group's. When groups are nested, the innermost group that
-/// sets a `GroupDoc` wins.
+/// replaces the group's. Nested groups accumulate: an inner group's tags and
+/// schemes come first, then the outer group's.
 #[derive(Clone, Debug, Default)]
 pub struct GroupDoc {
     pub(crate) tags: Vec<Text>,

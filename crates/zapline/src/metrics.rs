@@ -87,7 +87,10 @@ pub const CONTENT_TYPE_TEXT: &str = "text/plain; version=0.0.4; charset=utf-8";
 ///   [`App::error_handler`] (and other middleware that replaces responses)
 ///   so it sees the router's own 404/405 responses;
 /// - the scrape endpoint (unless [`endpoint(false)`](Self::endpoint)) and a
-///   [`MetricsHandle`] as app state for custom exposition.
+///   [`MetricsHandle`] as app state for custom exposition. The endpoint is
+///   left out of the OpenAPI spec unless [`document(true)`](Self::document).
+///   Unlike health checks it is not public by default: app-wide
+///   authentication applies to it.
 #[must_use = "install it with `App::plugin`"]
 pub struct Metrics {
     path: String,
@@ -98,6 +101,8 @@ pub struct Metrics {
     registry: Option<Registry>,
     track_unmatched: bool,
     process: bool,
+    #[cfg_attr(not(feature = "openapi"), allow(dead_code))]
+    document: bool,
 }
 
 impl Default for Metrics {
@@ -119,6 +124,7 @@ impl Metrics {
             registry: None,
             track_unmatched: true,
             process: true,
+            document: false,
         }
     }
 
@@ -182,6 +188,13 @@ impl Metrics {
         self.process = enabled;
         self
     }
+
+    /// List the scrape endpoint in the OpenAPI spec, tagged `metrics`
+    /// (default `false`: it is infrastructure, not API).
+    pub fn document(mut self, enabled: bool) -> Self {
+        self.document = enabled;
+        self
+    }
 }
 
 impl Plugin for Metrics {
@@ -220,6 +233,19 @@ impl Plugin for Metrics {
                 let handle = handle.clone();
                 async move { handle.response() }
             });
+            #[cfg(feature = "openapi")]
+            {
+                use crate::openapi::{ApiOutput, OperationDoc};
+                let doc = if self.document {
+                    let mut doc = OperationDoc::new();
+                    doc.summary("Prometheus metrics").tag("metrics");
+                    MetricsHandle::describe_output(&mut doc);
+                    doc
+                } else {
+                    OperationDoc::hidden_route()
+                };
+                app = app.meta(doc);
+            }
         }
         app
     }
@@ -286,6 +312,14 @@ impl MetricsHandle {
 }
 
 /// The scrape response (`text/plain; version=0.0.4`).
+/// The Prometheus text format.
+#[cfg(feature = "openapi")]
+impl crate::openapi::ApiOutput for MetricsHandle {
+    fn describe_output(op: &mut crate::openapi::OperationDoc) {
+        op.success::<String>("text/plain");
+    }
+}
+
 impl IntoResponse for MetricsHandle {
     fn into_response(self) -> Response {
         self.response()
