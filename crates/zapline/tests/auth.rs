@@ -773,3 +773,132 @@ async fn authenticator_errors_propagate() {
     let r = c.get("/").send().await;
     assert_eq!(r.status(), 503);
 }
+
+// ---------------------------------------------------------------------------
+// Fail-closed policies: forgetting or misplacing auth middleware never makes
+// a protected route public.
+
+#[tokio::test]
+async fn policies_fail_closed_without_auth_middleware() {
+    let c = App::new()
+        .get("/secret", || async { "secret" })
+        .require_auth()
+        .get("/admin", || async { "admin" })
+        .require_roles(["admin"])
+        .get("/public", || async { "public" })
+        .test();
+
+    let r = c.get("/secret").send().await;
+    assert_eq!(r.status(), 401);
+    assert_eq!(code(&r), "missing_credentials");
+    assert_eq!(
+        c.get("/admin")
+            .header("x-user", "ann;admin")
+            .send()
+            .await
+            .status(),
+        401
+    );
+    assert_eq!(c.get("/public").send().await.text(), "public");
+}
+
+#[tokio::test]
+async fn global_authenticate_satisfies_auth_but_not_unchecked_roles() {
+    // Global middleware runs before routing, so it cannot check route roles.
+    let c = App::new()
+        .wrap(Authenticate::new(HeaderAuth::new()).authorize())
+        .get("/me", whoami)
+        .require_auth()
+        .get("/admin", || async { "admin" })
+        .require_roles(["admin"])
+        .test();
+
+    assert_eq!(
+        c.get("/me").header("x-user", "ann").send().await.text(),
+        "ann"
+    );
+    assert_eq!(c.get("/me").send().await.status(), 401);
+    let r = c.get("/admin").header("x-user", "ann;admin").send().await;
+    assert_eq!(r.status(), 500);
+    assert_eq!(code(&r), "auth_misconfigured");
+
+    // The same setup with route middleware enforces roles properly.
+    let c = App::new()
+        .wrap_route(Authenticate::new(HeaderAuth::new()).authorize())
+        .get("/admin", || async { "admin" })
+        .require_roles(["admin"])
+        .test();
+    assert_eq!(
+        c.get("/admin")
+            .header("x-user", "ann;admin")
+            .send()
+            .await
+            .text(),
+        "admin"
+    );
+    assert_eq!(
+        c.get("/admin")
+            .header("x-user", "bob;user")
+            .send()
+            .await
+            .status(),
+        403
+    );
+}
+
+#[tokio::test]
+async fn group_policy_with_auth_in_inner_group_is_enforced_in_order() {
+    // Policy declared on the outer group, Authenticate on the inner group:
+    // the enforcement layer must still run after (inside) authentication.
+    let inner = Routes::new()
+        .get("/x", || async { "x" })
+        .wrap(Authenticate::new(HeaderAuth::new()).authorize());
+    let outer = Routes::new()
+        .nest("/inner", inner)
+        .require_roles_all(["admin"]);
+    let c = App::new().nest("/outer", outer).test();
+
+    assert_eq!(
+        c.get("/outer/inner/x")
+            .header("x-user", "a;admin")
+            .send()
+            .await
+            .text(),
+        "x"
+    );
+    assert_eq!(
+        c.get("/outer/inner/x")
+            .header("x-user", "a;user")
+            .send()
+            .await
+            .status(),
+        403
+    );
+    assert_eq!(c.get("/outer/inner/x").send().await.status(), 401);
+}
+
+#[tokio::test]
+async fn guard_policies_marks_routes_verified() {
+    let c = App::new()
+        .wrap(Authenticate::new(HeaderAuth::new()).authorize())
+        .wrap_route(Guard::<User>::policies())
+        .get("/admin", || async { "admin" })
+        .require_roles(["admin"])
+        .test();
+    assert_eq!(
+        c.get("/admin")
+            .header("x-user", "a;admin")
+            .send()
+            .await
+            .text(),
+        "admin"
+    );
+    assert_eq!(
+        c.get("/admin")
+            .header("x-user", "a;user")
+            .send()
+            .await
+            .status(),
+        403
+    );
+}

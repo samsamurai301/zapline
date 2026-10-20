@@ -17,7 +17,9 @@ use super::authenticate::CurrentUser;
 use super::{forbidden, missing_credentials};
 use crate::handler::BoxFuture;
 use crate::middleware::{Middleware, Next};
-use crate::{App, Error, IntoResponse, Request, Response, Result, RouteInfo, Routes};
+use crate::{
+    App, EndpointLayers, Error, IntoResponse, Request, Response, Result, RouteInfo, Routes,
+};
 
 /// A user type that carries roles (and optionally OAuth-style scopes), used
 /// by role/scope policies.
@@ -229,13 +231,66 @@ impl<'a> RoutePolicy<'a> {
 }
 
 // ---------------------------------------------------------------------------
+// Fail-closed enforcement
+
+/// Request marker: an auth middleware verified the matched route's policy.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct PolicyVerified;
+
+/// Request marker: an `Authenticate` middleware identified a user.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct UserAuthenticated;
+
+/// Innermost layer attached by every `.require_*()` call. Policies are
+/// declarative, so without it a route whose auth middleware was forgotten
+/// (or installed before routing) would silently be public. Instead it fails
+/// closed: no authenticated user means `401`; roles/scopes that no
+/// middleware checked mean `500 auth_misconfigured`.
+#[derive(Clone, Copy, Debug)]
+struct PolicyEnforcer;
+
+impl Middleware for PolicyEnforcer {
+    fn handle(&self, req: Request, next: Next) -> BoxFuture<Response> {
+        let Some(route) = req.route() else {
+            return next.run(req);
+        };
+        let policy = RoutePolicy::of(route);
+        let ext = req.extensions();
+        if !policy.requires_auth() || ext.get::<PolicyVerified>().is_some() {
+            return next.run(req);
+        }
+        let authenticated = ext.get::<UserAuthenticated>().is_some();
+        let err = if !authenticated {
+            missing_credentials(None)
+        } else if !policy.has_permissions() {
+            return next.run(req);
+        } else {
+            Error::internal(format!(
+                "route `{}` requires roles or scopes, but no `Authenticate::authorize()` or \
+                 `Guard::policies()` middleware checked them after routing",
+                route.path()
+            ))
+            .with_code("auth_misconfigured")
+        };
+        Box::pin(ready(err.into_response()))
+    }
+}
+
+fn enforce(meta: &mut Extensions) {
+    meta.get_or_insert_default::<EndpointLayers>()
+        .add(PolicyEnforcer);
+}
+
+// ---------------------------------------------------------------------------
 // Builder methods
 
 impl Routes {
     /// Require an authenticated user for the most recently registered route.
     /// Enforced by [`Authenticate`](super::Authenticate) or [`Guard`].
     pub fn require_auth(mut self) -> Self {
-        self.last_meta_mut().insert(RequireAuth);
+        let meta = self.last_meta_mut();
+        meta.insert(RequireAuth);
+        enforce(meta);
         self
     }
 
@@ -246,7 +301,9 @@ impl Routes {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireRoles::new(roles).merge_into(self.last_meta_mut());
+        let meta = self.last_meta_mut();
+        RequireRoles::new(roles).merge_into(meta);
+        enforce(meta);
         self
     }
 
@@ -256,7 +313,9 @@ impl Routes {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireScopes::new(scopes).merge_into(self.last_meta_mut());
+        let meta = self.last_meta_mut();
+        RequireScopes::new(scopes).merge_into(meta);
+        enforce(meta);
         self
     }
 
@@ -268,7 +327,9 @@ impl Routes {
 
     /// Require an authenticated user for every route in this group.
     pub fn require_auth_all(mut self) -> Self {
-        self.defaults_mut().insert(RequireAuth);
+        let meta = self.defaults_mut();
+        meta.insert(RequireAuth);
+        enforce(meta);
         self
     }
 
@@ -279,7 +340,9 @@ impl Routes {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireRoles::new(roles).merge_into(self.defaults_mut());
+        let meta = self.defaults_mut();
+        RequireRoles::new(roles).merge_into(meta);
+        enforce(meta);
         self
     }
 
@@ -290,7 +353,9 @@ impl Routes {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireScopes::new(scopes).merge_into(self.defaults_mut());
+        let meta = self.defaults_mut();
+        RequireScopes::new(scopes).merge_into(meta);
+        enforce(meta);
         self
     }
 }
@@ -298,7 +363,9 @@ impl Routes {
 impl App {
     /// Require an authenticated user for the most recently registered route.
     pub fn require_auth(mut self) -> Self {
-        self.routes_mut().last_meta_mut().insert(RequireAuth);
+        let meta = self.routes_mut().last_meta_mut();
+        meta.insert(RequireAuth);
+        enforce(meta);
         self
     }
 
@@ -308,7 +375,9 @@ impl App {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireRoles::new(roles).merge_into(self.routes_mut().last_meta_mut());
+        let meta = self.routes_mut().last_meta_mut();
+        RequireRoles::new(roles).merge_into(meta);
+        enforce(meta);
         self
     }
 
@@ -318,7 +387,9 @@ impl App {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        RequireScopes::new(scopes).merge_into(self.routes_mut().last_meta_mut());
+        let meta = self.routes_mut().last_meta_mut();
+        RequireScopes::new(scopes).merge_into(meta);
+        enforce(meta);
         self
     }
 
@@ -359,12 +430,14 @@ type Check<U> =
 /// ```
 pub struct Guard<U> {
     check: Check<U>,
+    verifies_policies: bool,
 }
 
 impl<U> Clone for Guard<U> {
     fn clone(&self) -> Self {
         Guard {
             check: self.check.clone(),
+            verifies_policies: self.verifies_policies,
         }
     }
 }
@@ -398,6 +471,7 @@ impl<U: Clone + Send + Sync + 'static> Guard<U> {
     {
         Guard {
             check: Arc::new(check),
+            verifies_policies: false,
         }
     }
 }
@@ -407,7 +481,7 @@ impl<U: HasRoles + Clone + Send + Sync + 'static> Guard<U> {
     /// `.require_roles(..)`, `.require_scopes(..)`). Routes without a policy
     /// pass, with or without a user.
     pub fn policies() -> Self {
-        Guard::from_check(|user, policy, _| {
+        let mut guard = Guard::from_check(|user, policy, _| {
             if !policy.requires_auth() {
                 return Ok(());
             }
@@ -417,7 +491,9 @@ impl<U: HasRoles + Clone + Send + Sync + 'static> Guard<U> {
             } else {
                 Err(forbidden())
             }
-        })
+        });
+        guard.verifies_policies = true;
+        guard
     }
 
     /// Require at least one of `roles` on every route this wraps, in addition
@@ -443,7 +519,7 @@ impl<U: HasRoles + Clone + Send + Sync + 'static> Guard<U> {
 }
 
 impl<U: Clone + Send + Sync + 'static> Middleware for Guard<U> {
-    fn handle(&self, req: Request, next: Next) -> BoxFuture<Response> {
+    fn handle(&self, mut req: Request, next: Next) -> BoxFuture<Response> {
         let Some(route) = req.route() else {
             let err = Error::internal(
                 "`Guard` runs before routing: install it with `App::wrap_route` or `Routes::wrap`",
@@ -454,7 +530,12 @@ impl<U: Clone + Send + Sync + 'static> Middleware for Guard<U> {
         let policy = RoutePolicy::of(route);
         let user = req.extensions().get::<CurrentUser<U>>().map(|u| &u.0);
         match (self.check)(user, &policy, route) {
-            Ok(()) => next.run(req),
+            Ok(()) => {
+                if self.verifies_policies {
+                    req.extensions_mut().insert(PolicyVerified);
+                }
+                next.run(req)
+            }
             Err(e) => Box::pin(ready(e.into_response())),
         }
     }

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use http::HeaderValue;
 
-use super::guard::{HasRoles, RoutePolicy};
+use super::guard::{HasRoles, PolicyVerified, RoutePolicy, UserAuthenticated};
 use super::{forbidden, missing_credentials};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
@@ -196,6 +196,11 @@ impl<A: Authenticator> Authenticate<A> {
                 None => return Err(no_role_checker(req)),
             }
         }
+        if req.route().is_some() {
+            // The matched route's policy was checked against this user.
+            req.extensions_mut().insert(PolicyVerified);
+        }
+        req.extensions_mut().insert(UserAuthenticated);
         req.extensions_mut().insert(CurrentUser(user));
         Ok(())
     }

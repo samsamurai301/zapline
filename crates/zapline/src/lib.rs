@@ -81,11 +81,11 @@ pub mod telemetry;
 pub use app::{App, Plugin, DEFAULT_BODY_LIMIT, ENV_PRINT_ROUTES};
 pub use body::{Body, BoxError, ReqBody};
 pub use error::{Error, ErrorReport, Result};
-pub use handler::{Endpoint, Handler};
+pub use handler::{BoxFuture, Endpoint, Handler};
 pub use lifecycle::Resources;
 pub use request::{ConnInfo, Request};
 pub use response::{Html, IntoResponse, Redirect, Response};
-pub use router::{IntoRoutes, RouteInfo, Routes};
+pub use router::{EndpointLayers, IntoRoutes, RouteInfo, Routes};
 pub use server::ServerConfig;
 
 pub use bytes::{self, Bytes};

@@ -57,7 +57,54 @@ pub(crate) struct Entry {
     method: MethodKey,
     path: String,
     endpoint: BoxEndpoint,
+    /// Group middleware chains, innermost group first. Applied when the
+    /// router is compiled so [`EndpointLayers`] can stay innermost.
+    groups: Vec<Arc<[Arc<dyn Middleware>]>>,
     meta: Extensions,
+}
+
+/// Route metadata: middleware that runs *innermost* for a route, after all
+/// global, route and group middleware and right before the handler.
+///
+/// Plugins use it for enforcement that must see everything outer middleware
+/// did (e.g. auth policies verifying that authentication actually ran).
+/// Layers are keyed by type: adding a layer of a type that is already
+/// present keeps the existing one. Group-level layers (set through
+/// [`Routes::defaults_mut`]) are combined with route-level ones.
+#[derive(Clone, Default)]
+pub struct EndpointLayers {
+    layers: Vec<(std::any::TypeId, Arc<dyn Middleware>)>,
+}
+
+impl EndpointLayers {
+    /// Add `mw` unless a layer of the same type is already present.
+    pub fn add<M: Middleware>(&mut self, mw: M) {
+        let id = std::any::TypeId::of::<M>();
+        if !self.layers.iter().any(|(t, _)| *t == id) {
+            self.layers.push((id, Arc::new(mw)));
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.layers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.layers.is_empty()
+    }
+
+    fn union(mut self, other: &EndpointLayers) -> Self {
+        for (id, mw) in &other.layers {
+            if !self.layers.iter().any(|(t, _)| t == id) {
+                self.layers.push((*id, mw.clone()));
+            }
+        }
+        self
+    }
+
+    fn chain(&self) -> Arc<[Arc<dyn Middleware>]> {
+        self.layers.iter().map(|(_, mw)| mw.clone()).collect()
+    }
 }
 
 /// A group of routes, optionally sharing middleware and metadata. Nest it
@@ -102,6 +149,7 @@ impl Routes {
             method: MethodKey::One(method),
             path: normalize(path),
             endpoint: boxed(handler),
+            groups: Vec::new(),
             meta,
         });
         self
@@ -113,6 +161,7 @@ impl Routes {
             method: MethodKey::Any,
             path: normalize(path),
             endpoint: boxed(handler),
+            groups: Vec::new(),
             meta: Extensions::new(),
         });
         self
@@ -130,6 +179,7 @@ impl Routes {
             method: method.map_or(MethodKey::Any, MethodKey::One),
             path: normalize(path),
             endpoint,
+            groups: Vec::new(),
             meta: Extensions::new(),
         });
         self
@@ -198,7 +248,7 @@ impl Routes {
         self.entries.is_empty()
     }
 
-    /// Bake group middleware and default metadata into each entry.
+    /// Record group middleware and merge default metadata into each entry.
     pub(crate) fn finish(self) -> Vec<Entry> {
         let chain: Option<Arc<[Arc<dyn Middleware>]>> =
             (!self.middleware.is_empty()).then(|| self.middleware.into());
@@ -208,14 +258,21 @@ impl Routes {
             .into_iter()
             .map(|mut e| {
                 if let Some(chain) = &chain {
-                    e.endpoint = Arc::new(Wrapped {
-                        chain: chain.clone(),
-                        endpoint: e.endpoint,
-                    });
+                    e.groups.push(chain.clone());
                 }
                 if has_defaults {
+                    let layers = match (
+                        defaults.get::<EndpointLayers>(),
+                        e.meta.get::<EndpointLayers>(),
+                    ) {
+                        (Some(group), Some(own)) => Some(own.clone().union(group)),
+                        _ => None,
+                    };
                     let mut meta = defaults.clone();
                     meta.extend(e.meta);
+                    if let Some(layers) = layers {
+                        meta.insert(layers);
+                    }
                     e.meta = meta;
                 }
                 e
@@ -309,6 +366,16 @@ pub(crate) fn leak_entries(entries: Vec<Entry>) -> Vec<(&'static RouteInfo, BoxE
     entries
         .into_iter()
         .map(|e| {
+            let mut endpoint = e.endpoint;
+            if let Some(layers) = e.meta.get::<EndpointLayers>().filter(|l| !l.is_empty()) {
+                endpoint = Arc::new(Wrapped {
+                    chain: layers.chain(),
+                    endpoint,
+                });
+            }
+            for chain in e.groups {
+                endpoint = Arc::new(Wrapped { chain, endpoint });
+            }
             let info: &'static RouteInfo = Box::leak(Box::new(RouteInfo {
                 method: match e.method {
                     MethodKey::Any => None,
@@ -317,7 +384,7 @@ pub(crate) fn leak_entries(entries: Vec<Entry>) -> Vec<(&'static RouteInfo, BoxE
                 path: e.path,
                 meta: e.meta,
             }));
-            (info, e.endpoint)
+            (info, endpoint)
         })
         .collect()
 }

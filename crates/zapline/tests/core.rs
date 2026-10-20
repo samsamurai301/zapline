@@ -181,3 +181,44 @@ async fn real_server_reports_peer_address() {
     s.read_to_string(&mut out).await.unwrap();
     assert!(out.ends_with("127.0.0.1"), "{out}");
 }
+
+#[tokio::test]
+async fn endpoint_layers_run_innermost_across_nested_groups() {
+    use std::sync::Mutex;
+    use zapline::middleware::Middleware;
+    use zapline::{BoxFuture, EndpointLayers};
+
+    type Log = Arc<Mutex<Vec<&'static str>>>;
+
+    #[derive(Clone)]
+    struct Mark(&'static str, Log);
+    impl Middleware for Mark {
+        fn handle(&self, req: Request, next: Next) -> BoxFuture<Response> {
+            self.1.lock().unwrap().push(self.0);
+            next.run(req)
+        }
+    }
+
+    let log: Log = Arc::default();
+    let mut layers = EndpointLayers::default();
+    layers.add(Mark("innermost", log.clone()));
+
+    let inner = Routes::new()
+        .get("/x", || async { "x" })
+        .wrap(Mark("inner-group", log.clone()));
+    let mut outer = Routes::new()
+        .nest("/inner", inner)
+        .wrap(Mark("outer-group", log.clone()));
+    outer.defaults_mut().insert(layers);
+    let c = App::new()
+        .nest("/outer", outer)
+        .wrap_route(Mark("route", log.clone()))
+        .test();
+
+    assert_eq!(c.get("/outer/inner/x").send().await.text(), "x");
+    // The same layer type registered twice is kept once.
+    assert_eq!(
+        *log.lock().unwrap(),
+        vec!["route", "outer-group", "inner-group", "innermost"]
+    );
+}
