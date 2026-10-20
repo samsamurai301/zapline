@@ -53,6 +53,7 @@ pub mod fs;
 #[cfg(feature = "multipart")]
 pub mod multipart;
 pub mod sse;
+pub mod stream;
 #[cfg(feature = "tls")]
 pub mod tls;
 #[cfg(feature = "ws")]
