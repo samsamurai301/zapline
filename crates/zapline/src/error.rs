@@ -17,7 +17,25 @@ type Details = serde_json::Value;
 ///
 /// Rendered as JSON: `{"error": "...", "code": "...", "details": ...}` where
 /// `code` and `details` are omitted when unset. Customize globally with
-/// [`App::error_handler`](crate::App::error_handler).
+/// [`App::error_handler`](crate::App::error_handler). Extractor rejections
+/// use the same shape, with the codes listed in
+/// [`extract`](crate::extract#rejections).
+///
+/// ```
+/// use zapline::prelude::*;
+///
+/// async fn transfer(Path(amount): Path<u64>) -> Result<&'static str> {
+///     if amount > 1_000 {
+///         // 409 {"error":"limit exceeded","code":"limit_exceeded","details":{"max":1000}}
+///         return Err(Error::conflict("limit exceeded")
+///             .with_code("limit_exceeded")
+///             .with_details(serde_json::json!({ "max": 1_000 })));
+///     }
+///     let _fee: u64 = "1".parse()?; // any std error: a logged 500
+///     Ok("done")
+/// }
+/// # let _ = App::new().post("/transfer/{amount}", transfer);
+/// ```
 pub struct Error {
     status: StatusCode,
     message: Cow<'static, str>,
@@ -129,6 +147,36 @@ impl Error {
 impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
     fn from(e: E) -> Self {
         Error::internal("internal server error").with_source(e)
+    }
+}
+
+/// A [`zapline::Error`](Error) viewed as a `std::error::Error`, so it can
+/// travel through `BoxError`-based APIs (response streams, multer) and be
+/// recovered intact with `downcast`.
+pub(crate) struct CompatError(pub(crate) Error);
+
+impl fmt::Debug for CompatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(&self.0, f)
+    }
+}
+
+impl fmt::Display for CompatError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.0.message())
+    }
+}
+
+impl std::error::Error for CompatError {}
+
+/// Lets streams that yield [`zapline::Error`](Error) (e.g. a
+/// [`BodyStream`](crate::stream::BodyStream), or SSE events built with
+/// `json_data`) be used wherever a [`BoxError`](crate::BoxError) is
+/// expected, such as [`Body::from_stream`](crate::Body::from_stream) and
+/// [`Sse`](crate::sse::Sse).
+impl From<Error> for crate::body::BoxError {
+    fn from(e: Error) -> Self {
+        Box::new(CompatError(e))
     }
 }
 

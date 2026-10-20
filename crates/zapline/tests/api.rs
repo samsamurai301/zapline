@@ -79,7 +79,12 @@ async fn path_variants() {
         .test();
 
     assert_eq!(c.get("/t/x/5").send().await.text(), "x-5");
-    assert_eq!(c.get("/t/x/500").send().await.status(), 400);
+    let r = c.get("/t/x/500").send().await;
+    assert_eq!(r.status(), 400);
+    assert_eq!(
+        r.text(),
+        r#"{"error":"invalid path parameter: `b` = \"500\" is not a valid u8","code":"invalid_path","details":{"param":"b"}}"#
+    );
     assert_eq!(c.get("/s/acme/9").send().await.text(), "acme:9");
     assert_eq!(c.get("/files/a/b/c.txt").send().await.text(), "a/b/c.txt");
     assert_eq!(
@@ -199,7 +204,23 @@ async fn body_limit_and_content_type() {
         "12345678"
     );
     assert_eq!(c.post("/echo").body("123456789").send().await.status(), 413);
-    assert_eq!(c.post("/json").body("{}").send().await.status(), 415);
+    let r = c.post("/json").body("{}").send().await;
+    assert_eq!(r.status(), 415);
+    assert_eq!(
+        r.text(),
+        r#"{"error":"expected `Content-Type: application/json`","code":"unsupported_media_type"}"#
+    );
+    let r = c
+        .post("/json")
+        .header("content-type", "application/json")
+        .body("{")
+        .send()
+        .await;
+    assert_eq!(r.status(), 422);
+    assert_eq!(
+        r.text(),
+        r#"{"error":"invalid JSON body: EOF while parsing an object","code":"invalid_json","details":{"column":1,"line":1}}"#
+    );
 }
 
 // Tiny stand-in so the test crate does not need serde_json directly.

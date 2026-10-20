@@ -13,7 +13,24 @@ async fn add_member(
 ) -> Result<StatusCode> { /* ... */ }
 ```
 
-If an extractor fails, its error response is returned and the handler isn't called. For example, a bad path parameter gives a 400 and a wrong content type gives a 415.
+If an extractor fails, its error response is returned and the handler isn't called. For example, a bad path parameter gives a 400 and a wrong content type gives a 415. Rejections carry a stable `code`, and `details` that locate the problem:
+
+| Rejection | Status | `code` | `details` |
+|---|---|---|---|
+| Bad route parameter | 400 | `invalid_path` | `{"param": "id"}` |
+| Bad query string | 400 | `invalid_query` | |
+| Bad form body | 422 | `invalid_form` | |
+| Malformed JSON | 422 | `invalid_json` | `{"line": 1, "column": 9}` |
+| JSON of the wrong shape (missing field, wrong type...) | 422 | `invalid_body` | `{"line": 1, "column": 22, "path": "items[0].qty"}` |
+| Wrong `Content-Type` for `Json` / `Form` | 415 | `unsupported_media_type` | |
+
+```text
+POST /orders  {"items": [{"qty": "x"}]}
+
+HTTP/1.1 422 Unprocessable Entity
+{"error":"invalid request body: invalid type: string \"x\", expected u32",
+ "code":"invalid_body","details":{"column":22,"line":1,"path":"items[0].qty"}}
+```
 
 ## Built-in extractors
 
