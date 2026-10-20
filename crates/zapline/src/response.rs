@@ -159,9 +159,14 @@ impl<T: Into<Body>> IntoResponse for Html<T> {
 }
 
 /// A redirect response (`303 See Other` by default).
+///
+/// A location that is not a valid header value (e.g. contains CR/LF, which
+/// can happen with request-derived `?next=` URLs) never panics: the response
+/// becomes a `500`. Validate user-supplied redirect targets (same-origin,
+/// relative paths) before redirecting to them to avoid open redirects.
 pub struct Redirect {
     status: StatusCode,
-    location: HeaderValue,
+    location: Option<HeaderValue>,
 }
 
 impl Redirect {
@@ -175,16 +180,24 @@ impl Redirect {
         Self::with_status(StatusCode::PERMANENT_REDIRECT, uri)
     }
     fn with_status(status: StatusCode, uri: &str) -> Self {
-        let location =
-            HeaderValue::try_from(uri).expect("redirect URI is not a valid header value");
-        Redirect { status, location }
+        Redirect {
+            status,
+            location: HeaderValue::try_from(uri).ok(),
+        }
     }
 }
 
 impl IntoResponse for Redirect {
     fn into_response(self) -> Response {
-        let mut r = self.status.into_response();
-        r.headers_mut().insert(LOCATION, self.location);
-        r
+        match self.location {
+            Some(location) => {
+                let mut r = self.status.into_response();
+                r.headers_mut().insert(LOCATION, location);
+                r
+            }
+            None => crate::Error::internal("invalid redirect location")
+                .with_code("invalid_redirect")
+                .into_response(),
+        }
     }
 }

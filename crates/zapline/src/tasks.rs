@@ -215,6 +215,10 @@ pub(crate) struct Supervisor {
     inflight: AtomicUsize,
     idle: Notify,
     next_id: AtomicUsize,
+    /// The runtime startup hooks ran on (the long-lived system runtime under
+    /// `App::run`): queued tasks run there so they outlive the per-core
+    /// worker runtimes and can be drained at shutdown.
+    runtime: std::sync::OnceLock<tokio::runtime::Handle>,
 }
 
 /// App-state handle so `BackgroundTasks` can find the supervisor.
@@ -242,6 +246,7 @@ impl Supervisor {
             inflight: AtomicUsize::new(0),
             idle: Notify::new(),
             next_id: AtomicUsize::new(1),
+            runtime: std::sync::OnceLock::new(),
         }
     }
 
@@ -253,9 +258,14 @@ impl Supervisor {
         }
         let sup = Arc::new(Supervisor::new());
         let drain_sup = sup.clone();
+        let rt_sup = sup.clone();
         let mut app = app
             .state(SupervisorHandle(sup.clone()))
             .state(sup.shutdown.clone())
+            .on_startup(move |_res: Resources| async move {
+                let _ = rt_sup.runtime.set(tokio::runtime::Handle::current());
+                Ok(())
+            })
             .on_shutdown(move |_res: Resources| async move {
                 drain_sup.drain_logged(drain_sup.begin_shutdown()).await;
             });
@@ -689,7 +699,11 @@ impl Drop for Queue {
         if tasks.is_empty() {
             return;
         }
-        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+        let supervised = self
+            .supervisor
+            .as_ref()
+            .and_then(|s| s.runtime.get().cloned());
+        let Some(rt) = supervised.or_else(|| tokio::runtime::Handle::try_current().ok()) else {
             log_warn(format_args!(
                 "{} background task(s) dropped: no Tokio runtime to run them on",
                 tasks.len()

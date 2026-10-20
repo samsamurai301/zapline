@@ -70,16 +70,22 @@ impl Accepted for TcpStream {
     #[cfg(feature = "http2")]
     async fn detect_h2(self) -> io::Result<(TcpStream, bool)> {
         let mut buf = [0u8; 24];
+        let mut wait = Duration::from_millis(2);
         loop {
             let n = self.peek(&mut buf).await?;
             let matches = buf[..n] == H2_PREFACE[..n];
             if !matches || n == 0 || n == H2_PREFACE.len() {
                 return Ok((self, matches && n == H2_PREFACE.len()));
             }
-            // A partial preface. `peek` does not consume, so polling again
-            // right away would spin; wait a little for the rest (bounded
-            // by the caller's timeout). Real clients send it in one write.
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            // A partial preface. `peek` does not consume, so it would spin;
+            // real h2c clients send the whole preface in one write, so wait
+            // briefly with backoff (~60ms total), then let HTTP/1 handle the
+            // connection (its header timeout costs no CPU while idle).
+            if wait > Duration::from_millis(32) {
+                return Ok((self, false));
+            }
+            tokio::time::sleep(wait).await;
+            wait *= 2;
         }
     }
 
@@ -446,7 +452,7 @@ pub(crate) async fn serve<L: Listen>(listener: L, worker: Worker) -> io::Result<
                 };
                 spawn_connection(io, conn, &worker, permit);
             }
-            // e.g. EMFILE: back off instead of spinning.
+            // e.g. EMFILE/ENOMEM: back off instead of spinning or exiting.
             Err(e) if is_transient(&e) => tokio::time::sleep(Duration::from_millis(10)).await,
             Err(e) => break Err(e),
         }
@@ -489,14 +495,24 @@ fn spawn_connection<I: Accepted>(
     tokio::spawn(Watched::new(worker.proto.h1(io, service), slot, permit));
 }
 
+/// Accept errors are per-connection or resource exhaustion (EMFILE, ENFILE,
+/// ENOMEM, ENOBUFS, ECONNABORTED, EPROTO, EPERM, ...) and worth riding out
+/// with backoff, except the few that mean the listener itself is unusable.
 fn is_transient(e: &io::Error) -> bool {
-    matches!(
+    #[cfg(unix)]
+    {
+        // EBADF, EINVAL, ENOTSOCK, EOPNOTSUPP (Linux numbering; other unixes
+        // report these via ErrorKind below as well).
+        if let Some(code) = e.raw_os_error() {
+            if cfg!(any(target_os = "linux", target_os = "android")) {
+                return !matches!(code, 9 | 22 | 88 | 95);
+            }
+        }
+    }
+    !matches!(
         e.kind(),
-        io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::Interrupted
-            | io::ErrorKind::WouldBlock
-    ) || e.raw_os_error().is_some_and(|c| c == 24 || c == 23) // EMFILE / ENFILE
+        io::ErrorKind::InvalidInput | io::ErrorKind::Unsupported | io::ErrorKind::NotConnected
+    )
 }
 
 /// `f`, bounded by `timeout` when there is one (`None` on timeout).

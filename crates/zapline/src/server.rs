@@ -457,14 +457,19 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
         .thread_name("zapline-system")
         .enable_all()
         .build()?;
+    let started = system.block_on(prepared.start());
     let Running {
         app,
         mut lifecycle,
         resources,
         config,
-    } = system
-        .block_on(prepared.start())
-        .map_err(|e| io::Error::other(format!("startup failed: {e}")))?;
+    } = match started {
+        Ok(running) => running,
+        Err(e) => {
+            system.shutdown_timeout(Duration::from_secs(1));
+            return Err(io::Error::other(format!("startup failed: {e}")));
+        }
+    };
     #[cfg(unix)]
     let bind = options
         .unix
@@ -473,6 +478,9 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
     let bind = Bind::Tcp(addr);
     let result = run_workers(app, bind, config, options.shutdown, system.handle());
     system.block_on(lifecycle.run_shutdown(&resources));
+    // Don't hang on blocking tasks that ignore shutdown (plain drop would
+    // wait for them forever).
+    system.shutdown_timeout(Duration::from_secs(1));
     result
 }
 
@@ -516,6 +524,13 @@ fn run_workers(
         bind_listeners(&bind, &config, workers, true)?
     } else {
         bind_listeners(&bind, &config, 1, false)?
+    };
+    // Identity of the socket file we created, so cleanup never unlinks a
+    // replacement instance's socket bound at the same path while we drained.
+    #[cfg(unix)]
+    let socket_id = match &bind {
+        Bind::Unix(path, _) => file_id(path),
+        _ => None,
     };
 
     if config.banner {
@@ -565,9 +580,20 @@ fn run_workers(
     driver.abort();
     #[cfg(unix)]
     if let Bind::Unix(path, _) = &bind {
-        let _ = std::fs::remove_file(path);
+        if socket_id.is_some() && file_id(path) == socket_id {
+            let _ = std::fs::remove_file(path);
+        }
     }
     result
+}
+
+/// `(device, inode)` of the file at `path`, if any.
+#[cfg(unix)]
+fn file_id(path: &Path) -> Option<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(path)
+        .ok()
+        .map(|m| (m.dev(), m.ino()))
 }
 
 fn run_per_core(

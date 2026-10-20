@@ -207,11 +207,11 @@ async fn silent_connections_time_out_during_protocol_detection() {
     // A prefix of the HTTP/2 preface, then silence.
     let mut s = TcpStream::connect(server.addr).await.unwrap();
     s.write_all(b"PRI * HTTP/2.0\r\n").await.unwrap();
-    let start = Instant::now();
+    // Detection gives up on a partial preface after a short bounded wait
+    // (no busy polling), then HTTP/1 rejects or times out the connection.
     tokio::time::timeout(Duration::from_secs(5), read_to_close(&mut s))
         .await
         .expect("connection stuck in protocol detection");
-    assert!(start.elapsed() >= Duration::from_millis(150));
 }
 
 #[test]
