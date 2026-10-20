@@ -299,7 +299,7 @@ fn app() -> App {
 }
 ```
 
-With the cache failing, `GET /health/ready` answers `200`:
+With the cache failing, `GET /health/ready` answers `200` (the `error` field appears only with `.show_errors(true)`):
 
 ```json
 {"status":"degraded","checks":{"db":{"status":"up","duration_ms":0.006},"cache":{"status":"down","duration_ms":52.576,"error":"cache unreachable"}},"info":{"name":"orders","version":"1.2.3"}}
@@ -313,7 +313,8 @@ A failing critical check gives `{"status":"down", ...}` with `503`. Responses ca
 | `.critical(bool)` | Whether the **most recently added** check is critical. A failing non-critical check reports `degraded` and keeps the app ready. |
 | `.timeout(duration)` | Per-check timeout (default 2 s). A timed-out check is reported as down: `timed out after 1s`. |
 | `.info(name, version)` | Static service info in the reports |
-| `.details(bool)` | Include per-check results and errors (default `true`). **Turn it off on publicly reachable endpoints:** error text can reveal internal hostnames and library messages. Only `status` is exposed then. |
+| `.details(bool)` | Include per-check results: name, status and duration (default `true`). When it's off, only the overall `status` is exposed. |
+| `.show_errors(bool)` | Include each failing check's error text (default `false`). Error text can reveal internal hostnames and library messages, so enable it only on endpoints that aren't publicly reachable. Failures are always logged. |
 | `.cache_for(ttl)` | Reuse the last readiness result for this long, so frequent probes don't hammer dependencies |
 | `.live_path(p)`, `.ready_path(p)`, `.path(p)` | Change the paths. `""` disables an endpoint. |
 | `.state(HealthState)` | Use an existing `HealthState` |

@@ -150,11 +150,12 @@ async fn missing_provider_is_a_500_with_code() {
     assert_eq!(r.status(), 500);
     let body: serde_json::Value = r.json();
     assert_eq!(body["code"], "missing_dependency");
-    assert!(body["error"].as_str().unwrap().contains("NotRegistered"));
+    // The type name is logged for operators, never sent to clients.
+    assert_eq!(body["error"], "internal server error");
 
     let r = c.get("/dyn").send().await;
     assert_eq!(r.status(), 500);
-    assert!(r.text().contains("UserRepo"));
+    assert!(!r.text().contains("UserRepo"));
 }
 
 #[tokio::test]

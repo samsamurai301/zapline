@@ -287,3 +287,27 @@ fn meta_hooks_apply_to_routes_from_build_hooks() {
     assert_eq!(table[1].path(), "/b");
     assert_eq!(table[1].meta::<Seen>(), Some(&Seen));
 }
+
+#[tokio::test]
+async fn error_keeps_repeated_headers() {
+    let c = App::new()
+        .get("/", || async {
+            Err::<(), _>(
+                Error::unauthorized()
+                    .with_header(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("Bearer"),
+                    )
+                    .with_header(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("Basic realm=\"x\""),
+                    )
+                    .with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1")),
+            )
+        })
+        .test();
+    let r = c.get("/").send().await;
+    let values: Vec<_> = r.headers().get_all("www-authenticate").iter().collect();
+    assert_eq!(values, ["Bearer", "Basic realm=\"x\""]);
+    assert_eq!(r.header("retry-after"), Some("1"));
+}

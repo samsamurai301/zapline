@@ -11,9 +11,12 @@ use crate::response::{IntoResponse, Response};
 #[cfg(feature = "json")]
 type Details = serde_json::Value;
 
-/// HTTP-aware error. Any `E: std::error::Error` converts into a 500 via `?`
-/// (details are logged, never sent to the client); use the constructors for
-/// client errors.
+/// HTTP-aware error. Any `E: std::error::Error` converts into a 500 via `?`;
+/// use the constructors for client errors.
+///
+/// For `500 Internal Server Error` the client always receives the generic
+/// message `"internal server error"` (plus `code`, if set); the specific
+/// message and source are logged. Other statuses send their message as is.
 ///
 /// Rendered as JSON: `{"error": "...", "code": "...", "details": ...}` where
 /// `code` and `details` are omitted when unset. Customize globally with
@@ -146,7 +149,7 @@ impl Error {
 // impl does not overlap with `From<T> for T` (same trick as `anyhow`).
 impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
     fn from(e: E) -> Self {
-        Error::internal("internal server error").with_source(e)
+        Error::internal(GENERIC_500).with_source(e)
     }
 }
 
@@ -239,14 +242,25 @@ impl ErrorReport {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        if self.status.is_server_error() {
-            if let Some(src) = &self.source {
-                log_server_error(self.status, src.as_ref());
+        // A 500 means the server is at fault: its message and cause are
+        // diagnostics for operators (type names, routes, driver errors) and
+        // are logged, never sent. Clients get a generic message plus `code`.
+        let message = if self.status == StatusCode::INTERNAL_SERVER_ERROR {
+            if self.message != GENERIC_500 || self.source.is_some() {
+                log_server_error(self.status, &self.message, self.source.as_deref());
             }
-        }
+            Cow::Borrowed(GENERIC_500)
+        } else {
+            if self.status.is_server_error() {
+                if let Some(src) = &self.source {
+                    log_server_error(self.status, &self.message, Some(src.as_ref()));
+                }
+            }
+            self.message
+        };
         let report = ErrorReport {
             status: self.status,
-            message: self.message.into_owned(),
+            message: message.into_owned(),
             code: self.code.map(Cow::into_owned),
             #[cfg(feature = "json")]
             details: self.details,
@@ -259,9 +273,15 @@ impl IntoResponse for Error {
             HeaderValue::from_static("application/json"),
         );
         if let Some(extra) = self.headers {
+            // `HeaderMap::into_iter` yields the name only for the first value
+            // of each header; later values come with `None`.
+            let mut name = None;
             for (k, v) in extra.into_iter() {
-                if let Some(k) = k {
-                    h.append(k, v);
+                if k.is_some() {
+                    name = k;
+                }
+                if let Some(n) = &name {
+                    h.append(n.clone(), v);
                 }
             }
         }
@@ -270,14 +290,30 @@ impl IntoResponse for Error {
     }
 }
 
+const GENERIC_500: &str = "internal server error";
+
 #[cfg(feature = "tracing")]
-fn log_server_error(status: StatusCode, err: &(dyn std::error::Error + Send + Sync)) {
-    tracing::error!(status = status.as_u16(), error = %err, "request failed");
+fn log_server_error(
+    status: StatusCode,
+    message: &str,
+    source: Option<&(dyn std::error::Error + Send + Sync)>,
+) {
+    match source {
+        Some(err) => tracing::error!(status = status.as_u16(), error = %err, "{message}"),
+        None => tracing::error!(status = status.as_u16(), "{message}"),
+    }
 }
 
 #[cfg(not(feature = "tracing"))]
-fn log_server_error(status: StatusCode, err: &(dyn std::error::Error + Send + Sync)) {
-    eprintln!("[zapline] {status}: {err}");
+fn log_server_error(
+    status: StatusCode,
+    message: &str,
+    source: Option<&(dyn std::error::Error + Send + Sync)>,
+) {
+    match source {
+        Some(err) => eprintln!("[zapline] {status}: {message}: {err}"),
+        None => eprintln!("[zapline] {status}: {message}"),
+    }
 }
 
 pub(crate) fn json_escape(s: &str) -> String {

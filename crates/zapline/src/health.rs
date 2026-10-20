@@ -176,6 +176,7 @@ pub struct Health {
     path: String,
     info: Option<(String, String)>,
     details: bool,
+    show_errors: bool,
     cache: Option<Duration>,
     state: HealthState,
     document: bool,
@@ -198,6 +199,7 @@ impl Health {
             path: "/health".into(),
             info: None,
             details: true,
+            show_errors: false,
             cache: None,
             state: HealthState::new(),
             document: false,
@@ -266,10 +268,19 @@ impl Health {
         self
     }
 
-    /// Include per-check results and errors in responses (default `true`).
-    /// Disable on publicly reachable endpoints to only expose `status`.
+    /// Include per-check results (name, status, duration) in responses
+    /// (default `true`). Disable to only expose the overall `status`.
     pub fn details(mut self, enabled: bool) -> Self {
         self.details = enabled;
+        self
+    }
+
+    /// Include each failing check's error text in responses (default
+    /// `false`). Errors often contain hostnames or driver messages, so only
+    /// enable this on endpoints that aren't publicly reachable. Errors are
+    /// always logged.
+    pub fn show_errors(mut self, enabled: bool) -> Self {
+        self.show_errors = enabled;
         self
     }
 
@@ -313,6 +324,7 @@ impl Plugin for Health {
             timeout: self.timeout,
             info: self.info,
             details: self.details,
+            show_errors: self.show_errors,
             cache: self.cache,
             cached: Mutex::new(None),
             state: self.state.clone(),
@@ -459,6 +471,7 @@ struct Runner {
     timeout: Duration,
     info: Option<(String, String)>,
     details: bool,
+    show_errors: bool,
     cache: Option<Duration>,
     cached: Mutex<Option<(Instant, Arc<Report>)>>,
     state: HealthState,
@@ -512,6 +525,9 @@ impl Runner {
                     Ok(Err(_panic)) => Some("check panicked".to_owned()),
                     Err(_) => Some(format!("timed out after {timeout:?}")),
                 };
+                if let Some(e) = &error {
+                    log_check_failure(&c.name, e);
+                }
                 CheckResult {
                     name: c.name.clone(),
                     error,
@@ -554,7 +570,7 @@ impl Runner {
                         let status = if c.error.is_some() { "down" } else { "up" };
                         let ms = c.duration.as_secs_f64() * 1000.0;
                         let _ = write!(b, r#":{{"status":"{status}","duration_ms":{ms:.3}"#);
-                        if let Some(e) = &c.error {
+                        if let Some(e) = c.error.as_ref().filter(|_| self.show_errors) {
                             b.push_str(r#","error":"#);
                             b.push_str(&json_escape(e));
                         }
@@ -599,4 +615,14 @@ fn json(status: StatusCode, body: impl Into<Body>) -> Response {
     h.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     h.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
     res
+}
+
+#[cfg(feature = "tracing")]
+fn log_check_failure(name: &str, error: &str) {
+    tracing::warn!(check = name, error, "health check failed");
+}
+
+#[cfg(not(feature = "tracing"))]
+fn log_check_failure(name: &str, error: &str) {
+    eprintln!("[zapline] health check `{name}` failed: {error}");
 }

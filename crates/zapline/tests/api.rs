@@ -295,3 +295,30 @@ async fn custom_extractor() {
         "s3cret"
     );
 }
+
+#[tokio::test]
+async fn json_content_type_is_matched_on_mime_essence() {
+    #[derive(Deserialize, Serialize)]
+    struct Body {
+        a: u32,
+    }
+    let c = App::new()
+        .post("/", |Json(b): Json<Body>| async move { b.a.to_string() })
+        .test();
+    let send = |ct: &'static str| {
+        c.post("/")
+            .header("content-type", ct)
+            .body(r#"{"a":1}"#)
+            .send()
+    };
+    // CORS-safelisted types must never be accepted, even with a "json" parameter.
+    assert_eq!(send("text/plain; x=json").await.status(), 415);
+    assert_eq!(
+        send("text/plain;charset=application/json").await.status(),
+        415
+    );
+    assert_eq!(send("application/jsonx").await.status(), 415);
+    assert_eq!(send("application/json").await.text(), "1");
+    assert_eq!(send("Application/JSON; charset=utf-8").await.text(), "1");
+    assert_eq!(send("application/vnd.api+json").await.text(), "1");
+}

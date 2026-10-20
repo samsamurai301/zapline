@@ -35,7 +35,7 @@ fn without_timings(mut v: Value) -> Value {
 
 #[tokio::test]
 async fn defaults_without_checks() {
-    let c = App::new().plugin(Health::new()).test();
+    let c = App::new().plugin(Health::new().show_errors(true)).test();
     assert_eq!(
         get(&c, "/health/live").await,
         (StatusCode::OK, json!({"status": "up"}))
@@ -67,6 +67,7 @@ async fn checks_report_up_down_and_errors() {
         .state(db)
         .plugin(
             Health::new()
+                .show_errors(true)
                 .info("orders", "1.2.3")
                 .check("db", |res: Resources| async move {
                     let db = res.require::<Db>()?;
@@ -117,10 +118,14 @@ async fn checks_report_up_down_and_errors() {
 #[tokio::test]
 async fn question_mark_errors_include_their_source() {
     let c = App::new()
-        .plugin(Health::new().check("file", |_res: Resources| async move {
-            std::fs::read("/definitely/not/here/zapline")?;
-            Ok(())
-        }))
+        .plugin(
+            Health::new()
+                .show_errors(true)
+                .check("file", |_res: Resources| async move {
+                    std::fs::read("/definitely/not/here/zapline")?;
+                    Ok(())
+                }),
+        )
         .test();
     let (s, body) = get(&c, "/health/ready").await;
     assert_eq!(s, 503);
@@ -134,6 +139,7 @@ async fn non_critical_failures_degrade() {
     let c = App::new()
         .plugin(
             Health::new()
+                .show_errors(true)
                 .check("db", |_res: Resources| async move { Ok(()) })
                 .check("cache", |_res: Resources| async move {
                     Err(Error::internal("cache miss storm"))
@@ -160,6 +166,7 @@ async fn checks_run_concurrently_with_timeouts() {
     let c = App::new()
         .plugin(
             Health::new()
+                .show_errors(true)
                 .timeout(Duration::from_millis(300))
                 .check("a", slow(150))
                 .check("b", slow(150))
@@ -185,6 +192,7 @@ async fn panicking_check_is_down_not_a_crash() {
     let c = App::new()
         .plugin(
             Health::new()
+                .show_errors(true)
                 .check("buggy", |_res: Resources| async move {
                     if true {
                         panic!("oops");
@@ -225,6 +233,7 @@ async fn struct_checks_and_caching() {
         .state("queue")
         .plugin(
             Health::new()
+                .show_errors(true)
                 .check(
                     "queue",
                     Threshold {
@@ -249,7 +258,7 @@ async fn struct_checks_and_caching() {
 #[tokio::test]
 async fn readiness_toggle_via_state_and_resources() {
     let c = App::new()
-        .plugin(Health::new().info("svc", "0.1.0"))
+        .plugin(Health::new().show_errors(true).info("svc", "0.1.0"))
         .post("/drain", |State(h): State<HealthState>| async move {
             h.set_ready(false);
             "draining"
@@ -276,7 +285,7 @@ async fn readiness_toggle_via_state_and_resources() {
     let warm = Arc::new(tokio::sync::Notify::new());
     let w = warm.clone();
     let c = App::new()
-        .plugin(Health::new())
+        .plugin(Health::new().show_errors(true))
         .on_startup(move |res: Resources| async move {
             let health = res.require::<HealthState>()?;
             health.set_ready(false);
@@ -302,7 +311,9 @@ async fn readiness_toggle_via_state_and_resources() {
 #[tokio::test]
 async fn shared_state_created_up_front() {
     let state = HealthState::new();
-    let c = App::new().plugin(Health::new().state(state.clone())).test();
+    let c = App::new()
+        .plugin(Health::new().show_errors(true).state(state.clone()))
+        .test();
     state.set_ready(false);
     assert_eq!(get(&c, "/health/ready").await.0, 503);
     state.set_ready(true);
@@ -314,6 +325,7 @@ async fn custom_and_disabled_paths_and_hidden_details() {
     let c = App::new()
         .plugin(
             Health::new()
+                .show_errors(true)
                 .live_path("/livez")
                 .ready_path("/readyz")
                 .path("")
@@ -345,6 +357,7 @@ async fn json_escaping_of_names_errors_and_info() {
     let c = App::new()
         .plugin(
             Health::new()
+                .show_errors(true)
                 .info("svc \"quoted\"", "1.0\n")
                 .check("we\"ird\\name", |_res: Resources| async move {
                     Err(Error::internal("line1\nline2 \"q\""))
@@ -365,6 +378,7 @@ async fn json_escaping_of_names_errors_and_info() {
 #[should_panic(expected = "duplicate health check `db`")]
 fn duplicate_check_names_panic() {
     let _ = Health::new()
+        .show_errors(true)
         .check("db", |_res: Resources| async move { Ok(()) })
         .check("db", |_res: Resources| async move { Ok(()) });
 }
@@ -372,7 +386,7 @@ fn duplicate_check_names_panic() {
 #[test]
 #[should_panic(expected = "`critical` must be called after `check`")]
 fn critical_without_check_panics() {
-    let _ = Health::new().critical(false);
+    let _ = Health::new().show_errors(true).critical(false);
 }
 
 #[tokio::test]
@@ -385,6 +399,7 @@ async fn probes_over_a_real_socket() {
         App::new()
             .plugin(
                 Health::new()
+                    .show_errors(true)
                     .state(state.clone())
                     .check("db", |_res: Resources| async move { Ok(()) }),
             )
@@ -406,4 +421,18 @@ async fn probes_over_a_real_socket() {
     assert!(res.starts_with("HTTP/1.1 503"), "{res}");
     let res = probe(addr, "/health/live").await;
     assert!(res.starts_with("HTTP/1.1 200"), "{res}");
+}
+
+#[tokio::test]
+async fn check_errors_are_hidden_by_default() {
+    let c = App::new()
+        .plugin(Health::new().check("db", |_res: Resources| async {
+            Err::<(), _>(Error::internal("connect to 10.0.0.5:5432 refused"))
+        }))
+        .test();
+    let r = c.get("/health/ready").send().await;
+    assert_eq!(r.status(), 503);
+    let body = r.text();
+    assert!(body.contains(r#""db":{"status":"down""#), "{body}");
+    assert!(!body.contains("10.0.0.5"), "{body}");
 }

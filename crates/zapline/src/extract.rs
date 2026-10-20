@@ -280,12 +280,36 @@ impl FromRequest for String {
 }
 
 #[cfg(any(feature = "json", feature = "form"))]
-fn content_type_is(req: &Request, needle: &str) -> bool {
+fn content_type_is(req: &Request, accept: fn(&str) -> bool) -> bool {
     req.head
         .headers
         .get(http::header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.contains(needle))
+        .is_some_and(|v| accept(mime_essence(v).as_str()))
+}
+
+/// The lowercased `type/subtype` of a Content-Type, without parameters.
+/// Matching on the essence (not a substring) matters for CSRF: browsers send
+/// `text/plain; x=json` cross-origin without a CORS preflight.
+#[cfg(any(feature = "json", feature = "form"))]
+fn mime_essence(value: &str) -> String {
+    value
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+#[cfg(feature = "json")]
+fn is_json(essence: &str) -> bool {
+    essence == "application/json"
+        || (essence.starts_with("application/") && essence.ends_with("+json"))
+}
+
+#[cfg(feature = "form")]
+fn is_form(essence: &str) -> bool {
+    essence == "application/x-www-form-urlencoded"
 }
 
 #[cfg(any(feature = "json", feature = "form"))]
@@ -307,7 +331,7 @@ newtype!(
 #[cfg(feature = "json")]
 impl<T: DeserializeOwned + Send> FromRequest for Json<T> {
     async fn from_request(req: Request) -> Result<Self, Error> {
-        if !content_type_is(&req, "json") {
+        if !content_type_is(&req, is_json) {
             return Err(unsupported_media_type(
                 "expected `Content-Type: application/json`",
             ));
@@ -382,7 +406,7 @@ newtype!(
 #[cfg(feature = "form")]
 impl<T: DeserializeOwned + Send> FromRequest for Form<T> {
     async fn from_request(req: Request) -> Result<Self, Error> {
-        if !content_type_is(&req, "application/x-www-form-urlencoded") {
+        if !content_type_is(&req, is_form) {
             return Err(unsupported_media_type(
                 "expected `Content-Type: application/x-www-form-urlencoded`",
             ));

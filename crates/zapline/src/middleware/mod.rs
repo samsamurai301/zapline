@@ -101,6 +101,8 @@ pub use catch_panic::CatchPanic;
 pub use compression::{Compression, CompressionLevel};
 pub use limit::ConcurrencyLimit;
 pub use normalize_path::NormalizePath;
-pub use rate_limit::{RateLimit, RateLimitKey, RateLimitPolicy, TrustedProxies};
+pub use rate_limit::{
+    Cidr, ClientIpHeader, RateLimit, RateLimitKey, RateLimitPolicy, TrustedProxies,
+};
 pub use request_id::{RequestId, SetRequestId};
 pub use security_headers::SecurityHeaders;
