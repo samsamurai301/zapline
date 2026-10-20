@@ -164,7 +164,7 @@ Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own har
 
 ## Project status
 
-zapline is **0.1, pre-release**. The API may change before 1.0. Planned next:
+zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830 tests, an adversarial security review whose findings were fixed, and a compile-checked guide. [ROADMAP.md](ROADMAP.md) lists deferred items and next steps. Planned next:
 
 - [ ] WebSockets over HTTP/2 (RFC 8441), WebTransport
 - [ ] Pluggable distributed stores for rate limiting and sessions (Redis)
