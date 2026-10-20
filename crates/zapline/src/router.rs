@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use http::header::ALLOW;
-use http::{HeaderValue, Method};
+use http::{Extensions, HeaderValue, Method};
 
 use crate::handler::{boxed, BoxEndpoint, BoxFuture, Endpoint, Handler};
 use crate::middleware::{Middleware, Wrapped};
@@ -17,24 +17,56 @@ pub trait IntoRoutes {
     fn into_routes(self, routes: Routes) -> Routes;
 }
 
+/// A registered route: method, path pattern and typed metadata.
+///
+/// Plugins read the full table at build time (see
+/// [`App::on_build`](crate::App::on_build)); middleware and handlers read the
+/// matched route at request time via [`Request::route`].
+#[derive(Debug)]
+pub struct RouteInfo {
+    method: Option<Method>,
+    path: String,
+    meta: Extensions,
+}
+
+impl RouteInfo {
+    /// `None` for routes registered with `any`.
+    pub fn method(&self) -> Option<&Method> {
+        self.method.as_ref()
+    }
+    /// The path pattern, e.g. `/users/{id}`.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    /// Typed metadata attached with [`Routes::meta`] / [`Routes::meta_all`].
+    pub fn meta<T: Send + Sync + 'static>(&self) -> Option<&T> {
+        self.meta.get::<T>()
+    }
+    pub fn meta_map(&self) -> &Extensions {
+        &self.meta
+    }
+}
+
 #[derive(Clone)]
 enum MethodKey {
     Any,
     One(Method),
 }
 
-struct Entry {
+pub(crate) struct Entry {
     method: MethodKey,
     path: String,
     endpoint: BoxEndpoint,
+    meta: Extensions,
 }
 
-/// A group of routes, optionally sharing middleware. Nest it under a prefix
-/// with [`Routes::nest`] or [`App::nest`](crate::App::nest).
+/// A group of routes, optionally sharing middleware and metadata. Nest it
+/// under a prefix with [`Routes::nest`] or [`App::nest`](crate::App::nest).
 #[derive(Default)]
 pub struct Routes {
     entries: Vec<Entry>,
     middleware: Vec<Arc<dyn Middleware>>,
+    defaults: Extensions,
 }
 
 macro_rules! method_fns {
@@ -54,16 +86,23 @@ impl Routes {
     method_fns!(get => GET, post => POST, put => PUT, patch => PATCH,
                 delete => DELETE, head => HEAD, options => OPTIONS);
 
-    pub fn route<H: Handler<T>, T: 'static>(
+    pub fn route<H: Handler<T>, T: 'static>(self, method: Method, path: &str, handler: H) -> Self {
+        self.route_with(method, path, handler, Extensions::new())
+    }
+
+    /// Register a route together with its metadata (used by the route macros).
+    pub fn route_with<H: Handler<T>, T: 'static>(
         mut self,
         method: Method,
         path: &str,
         handler: H,
+        meta: Extensions,
     ) -> Self {
         self.entries.push(Entry {
             method: MethodKey::One(method),
             path: normalize(path),
             endpoint: boxed(handler),
+            meta,
         });
         self
     }
@@ -74,8 +113,59 @@ impl Routes {
             method: MethodKey::Any,
             path: normalize(path),
             endpoint: boxed(handler),
+            meta: Extensions::new(),
         });
         self
+    }
+
+    /// Register a pre-built endpoint (for plugins that construct endpoints
+    /// dynamically).
+    pub fn endpoint(
+        mut self,
+        method: Option<Method>,
+        path: &str,
+        endpoint: Arc<dyn Endpoint>,
+    ) -> Self {
+        self.entries.push(Entry {
+            method: method.map_or(MethodKey::Any, MethodKey::One),
+            path: normalize(path),
+            endpoint,
+            meta: Extensions::new(),
+        });
+        self
+    }
+
+    /// Attach typed metadata to the most recently registered route.
+    ///
+    /// # Panics
+    /// If no route has been registered on this `Routes` yet.
+    pub fn meta<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.last_meta_mut().insert(value);
+        self
+    }
+
+    /// Mutable access to the metadata of the most recently registered route.
+    ///
+    /// # Panics
+    /// If no route has been registered on this `Routes` yet.
+    pub fn last_meta_mut(&mut self) -> &mut Extensions {
+        &mut self
+            .entries
+            .last_mut()
+            .expect("`meta` must be called after registering a route")
+            .meta
+    }
+
+    /// Attach metadata to every route in this group (routes keep their own
+    /// value if they set one explicitly).
+    pub fn meta_all<T: Clone + Send + Sync + 'static>(mut self, value: T) -> Self {
+        self.defaults.insert(value);
+        self
+    }
+
+    /// Group-default metadata, for plugins that need read-modify-write access.
+    pub fn defaults_mut(&mut self) -> &mut Extensions {
+        &mut self.defaults
     }
 
     /// Add macro-annotated handlers, other `Routes`, or tuples of them.
@@ -104,46 +194,33 @@ impl Routes {
         self.nest("/", routes)
     }
 
-    /// Bake group middleware into each endpoint.
-    fn finish(self) -> Vec<Entry> {
-        if self.middleware.is_empty() {
-            return self.entries;
-        }
-        let chain: Arc<[Arc<dyn Middleware>]> = self.middleware.into();
-        self.entries
-            .into_iter()
-            .map(|e| Entry {
-                endpoint: Arc::new(Wrapped {
-                    chain: chain.clone(),
-                    endpoint: e.endpoint,
-                }),
-                ..e
-            })
-            .collect()
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 
-    pub(crate) fn build(self, fallback: Option<BoxEndpoint>) -> Router {
-        let mut router = Router {
-            matcher: matchit::Router::new(),
-            slots: Vec::new(),
-            fallback,
-        };
-        let mut index = std::collections::HashMap::<String, usize>::new();
-
-        for e in self.finish() {
-            let i = *index.entry(e.path.clone()).or_insert_with(|| {
-                if let Err(err) = router.matcher.insert(e.path.clone(), router.slots.len()) {
-                    panic!("invalid route `{}`: {err}", e.path);
+    /// Bake group middleware and default metadata into each entry.
+    pub(crate) fn finish(self) -> Vec<Entry> {
+        let chain: Option<Arc<[Arc<dyn Middleware>]>> =
+            (!self.middleware.is_empty()).then(|| self.middleware.into());
+        let defaults = self.defaults;
+        let has_defaults = !defaults.is_empty();
+        self.entries
+            .into_iter()
+            .map(|mut e| {
+                if let Some(chain) = &chain {
+                    e.endpoint = Arc::new(Wrapped {
+                        chain: chain.clone(),
+                        endpoint: e.endpoint,
+                    });
                 }
-                router.slots.push(Slot::new(param_names(&e.path)));
-                router.slots.len() - 1
-            });
-            router.slots[i].set(e.method, e.endpoint, &e.path);
-        }
-        for s in &mut router.slots {
-            s.finalize();
-        }
-        router
+                if has_defaults {
+                    let mut meta = defaults.clone();
+                    meta.extend(e.meta);
+                    e.meta = meta;
+                }
+                e
+            })
+            .collect()
     }
 }
 
@@ -226,19 +303,44 @@ fn param_names(path: &str) -> &'static [&'static str] {
     Box::leak(names.into_boxed_slice())
 }
 
+/// Leak finished entries into `'static` route infos. Routes live for the
+/// lifetime of the process, so requests can point at their route for free.
+pub(crate) fn leak_entries(entries: Vec<Entry>) -> Vec<(&'static RouteInfo, BoxEndpoint)> {
+    entries
+        .into_iter()
+        .map(|e| {
+            let info: &'static RouteInfo = Box::leak(Box::new(RouteInfo {
+                method: match e.method {
+                    MethodKey::Any => None,
+                    MethodKey::One(m) => Some(m),
+                },
+                path: e.path,
+                meta: e.meta,
+            }));
+            (info, e.endpoint)
+        })
+        .collect()
+}
+
+#[derive(Clone)]
+struct Ep {
+    endpoint: BoxEndpoint,
+    info: &'static RouteInfo,
+}
+
 /// Per-path handlers, with the common methods in fixed fields so dispatch is
 /// a match instead of a search.
 struct Slot {
     names: &'static [&'static str],
-    get: Option<BoxEndpoint>,
-    post: Option<BoxEndpoint>,
-    put: Option<BoxEndpoint>,
-    patch: Option<BoxEndpoint>,
-    delete: Option<BoxEndpoint>,
-    head: Option<BoxEndpoint>,
-    options: Option<BoxEndpoint>,
-    other: Vec<(Method, BoxEndpoint)>,
-    any: Option<BoxEndpoint>,
+    get: Option<Ep>,
+    post: Option<Ep>,
+    put: Option<Ep>,
+    patch: Option<Ep>,
+    delete: Option<Ep>,
+    head: Option<Ep>,
+    options: Option<Ep>,
+    other: Vec<(Method, Ep)>,
+    any: Option<Ep>,
     allow: HeaderValue,
 }
 
@@ -259,10 +361,11 @@ impl Slot {
         }
     }
 
-    fn set(&mut self, method: MethodKey, ep: BoxEndpoint, path: &str) {
-        let slot = match method {
-            MethodKey::Any => &mut self.any,
-            MethodKey::One(m) => match m {
+    fn set(&mut self, ep: Ep) {
+        let path = ep.info.path();
+        let slot = match ep.info.method() {
+            None => &mut self.any,
+            Some(m) => match *m {
                 Method::GET => &mut self.get,
                 Method::POST => &mut self.post,
                 Method::PUT => &mut self.put,
@@ -270,17 +373,18 @@ impl Slot {
                 Method::DELETE => &mut self.delete,
                 Method::HEAD => &mut self.head,
                 Method::OPTIONS => &mut self.options,
-                m => {
-                    if self.other.iter().any(|(o, _)| *o == m) {
+                ref m => {
+                    if self.other.iter().any(|(o, _)| o == m) {
                         panic!("duplicate route: {m} {path}");
                     }
-                    self.other.push((m, ep));
+                    self.other.push((m.clone(), ep));
                     return;
                 }
             },
         };
         if slot.is_some() {
-            panic!("duplicate route for `{path}`");
+            let m = ep.info.method().map_or("ANY", |m| m.as_str());
+            panic!("duplicate route: {m} {path}");
         }
         *slot = Some(ep);
     }
@@ -313,7 +417,7 @@ impl Slot {
     }
 
     #[inline]
-    fn find(&self, m: &Method) -> Option<&BoxEndpoint> {
+    fn find(&self, m: &Method) -> Option<&Ep> {
         let ep = match *m {
             Method::GET => self.get.as_ref(),
             Method::POST => self.post.as_ref(),
@@ -342,6 +446,32 @@ pub(crate) enum Routed {
 }
 
 impl Router {
+    pub(crate) fn new(
+        routes: Vec<(&'static RouteInfo, BoxEndpoint)>,
+        fallback: Option<BoxEndpoint>,
+    ) -> Router {
+        let mut router = Router {
+            matcher: matchit::Router::new(),
+            slots: Vec::new(),
+            fallback,
+        };
+        let mut index = std::collections::HashMap::<&str, usize>::new();
+        for (info, endpoint) in routes {
+            let i = *index.entry(info.path()).or_insert_with(|| {
+                if let Err(err) = router.matcher.insert(info.path(), router.slots.len()) {
+                    panic!("invalid route `{}`: {err}", info.path());
+                }
+                router.slots.push(Slot::new(param_names(info.path())));
+                router.slots.len() - 1
+            });
+            router.slots[i].set(Ep { endpoint, info });
+        }
+        for s in &mut router.slots {
+            s.finalize();
+        }
+        router
+    }
+
     #[inline]
     pub(crate) fn route(&self, mut req: Request) -> Routed {
         let path = req.head.uri.path();
@@ -365,7 +495,10 @@ impl Router {
             }
         };
         match ep {
-            Some(ep) => Routed::Pending(ep.call(req)),
+            Some(ep) => {
+                req.route = Some(ep.info);
+                Routed::Pending(ep.endpoint.call(req))
+            }
             None => {
                 let mut res =
                     Error::new(http::StatusCode::METHOD_NOT_ALLOWED, "method not allowed")

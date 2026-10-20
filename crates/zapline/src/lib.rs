@@ -24,25 +24,68 @@
 //! }
 //! ```
 
+// ---- core -----------------------------------------------------------------
 mod app;
 mod body;
 mod error;
 pub mod extract;
 mod handler;
+pub mod lifecycle;
 pub mod middleware;
 mod request;
 mod response;
 mod router;
-mod server;
+pub mod server;
 pub mod test;
 
-pub use app::{App, ServerConfig, DEFAULT_BODY_LIMIT};
-pub use body::{Body, BoxError};
-pub use error::{Error, Result};
+#[doc(hidden)]
+pub mod __private;
+
+// ---- API docs & validation ---------------------------------------------------
+#[cfg(feature = "openapi")]
+pub mod openapi;
+#[cfg(feature = "validate")]
+pub mod validate;
+
+// ---- protocols & content -----------------------------------------------------
+#[cfg(feature = "fs")]
+pub mod fs;
+#[cfg(feature = "multipart")]
+pub mod multipart;
+pub mod sse;
+#[cfg(feature = "tls")]
+pub mod tls;
+#[cfg(feature = "ws")]
+pub mod ws;
+
+// ---- security ----------------------------------------------------------------
+pub mod auth;
+#[cfg(feature = "cookies")]
+pub mod cookies;
+#[cfg(feature = "cookies")]
+pub mod session;
+
+// ---- application structure ---------------------------------------------------
+#[cfg(feature = "config")]
+pub mod config;
+pub mod di;
+pub mod tasks;
+
+// ---- observability -----------------------------------------------------------
+pub mod health;
+pub mod metrics;
+#[cfg(feature = "tracing")]
+pub mod telemetry;
+
+pub use app::{App, Plugin, DEFAULT_BODY_LIMIT, ENV_PRINT_ROUTES};
+pub use body::{Body, BoxError, ReqBody};
+pub use error::{Error, ErrorReport, Result};
 pub use handler::{Endpoint, Handler};
-pub use request::Request;
+pub use lifecycle::Resources;
+pub use request::{ConnInfo, Request};
 pub use response::{Html, IntoResponse, Redirect, Response};
-pub use router::{IntoRoutes, Routes};
+pub use router::{IntoRoutes, RouteInfo, Routes};
+pub use server::ServerConfig;
 
 pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
@@ -58,14 +101,15 @@ pub mod prelude {
     pub use crate::extract::Json;
     #[cfg(feature = "query")]
     pub use crate::extract::Query;
-    pub use crate::extract::{Extension, Path, State};
+    pub use crate::extract::{Extension, MatchedPath, Path, State};
     pub use crate::middleware::Next;
     #[cfg(feature = "macros")]
     pub use crate::{delete, get, patch, post, put, route};
     pub use crate::{
-        App, Bytes, Error, HeaderMap, HeaderValue, Html, IntoResponse, Method, Redirect, Request,
-        Response, Result, Routes, StatusCode, Uri,
+        App, Bytes, ConnInfo, Error, HeaderMap, HeaderValue, Html, IntoResponse, Method, Plugin,
+        Redirect, Request, Resources, Response, Result, Routes, StatusCode, Uri,
     };
+    // WP prelude additions are applied during integration.
 }
 
 #[cfg(feature = "json")]

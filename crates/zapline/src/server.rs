@@ -15,11 +15,42 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 
-use crate::app::{AppInner, ResponseFuture, ServerConfig};
+use crate::app::{AppInner, ResponseFuture};
 use crate::body::ReqBody;
+use crate::request::ConnInfo;
+
+/// Server tuning knobs. The defaults are what the benchmarks use.
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ServerConfig {
+    /// Worker threads, each with its own runtime and `SO_REUSEPORT` listener.
+    /// Defaults to the number of available CPUs.
+    pub workers: Option<usize>,
+    /// Abort connections that do not send complete headers in time
+    /// (slowloris protection). `None` disables it.
+    pub header_read_timeout: Option<Duration>,
+    /// TCP listen backlog.
+    pub backlog: i32,
+    /// Print the listening address on startup.
+    pub banner: bool,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        ServerConfig {
+            workers: None,
+            header_read_timeout: Some(Duration::from_secs(30)),
+            backlog: 4096,
+            banner: true,
+        }
+    }
+}
 
 #[derive(Clone)]
-struct Service(Arc<AppInner>);
+struct Service {
+    app: Arc<AppInner>,
+    conn: ConnInfo,
+}
 
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
     type Response = crate::Response;
@@ -28,7 +59,7 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
 
     #[inline]
     fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
-        self.0.handle(req.map(ReqBody::Incoming))
+        self.app.handle(req.map(ReqBody::Incoming), self.conn)
     }
 }
 
@@ -124,9 +155,9 @@ pub(crate) async fn serve(
     listener: TcpListener,
     config: Arc<ServerConfig>,
 ) -> io::Result<()> {
-    let service = Service(app);
+    let local_addr = listener.local_addr().ok();
     loop {
-        let (stream, _) = match listener.accept().await {
+        let (stream, remote_addr) = match listener.accept().await {
             Ok(s) => s,
             Err(e) if is_transient(&e) => {
                 // e.g. EMFILE: back off instead of spinning.
@@ -136,7 +167,14 @@ pub(crate) async fn serve(
             Err(e) => return Err(e),
         };
         let _ = stream.set_nodelay(true);
-        let service = service.clone();
+        let service = Service {
+            app: app.clone(),
+            conn: ConnInfo {
+                remote_addr: Some(remote_addr),
+                local_addr,
+                secure: false,
+            },
+        };
         let header_timeout = config.header_read_timeout;
         tokio::spawn(async move {
             let mut builder = http1::Builder::new();
@@ -146,9 +184,10 @@ pub(crate) async fn serve(
             } else {
                 builder.header_read_timeout(None);
             }
-            let _ = builder
-                .serve_connection(TokioIo::new(stream), service)
-                .await;
+            let conn = builder.serve_connection(TokioIo::new(stream), service);
+            #[cfg(feature = "ws")]
+            let conn = conn.with_upgrades();
+            let _ = conn.await;
         });
     }
 }

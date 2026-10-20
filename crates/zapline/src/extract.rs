@@ -69,6 +69,33 @@ impl FromRequestParts for HeaderMap {
     }
 }
 
+impl FromRequestParts for crate::request::ConnInfo {
+    #[inline]
+    async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
+        Ok(req.conn)
+    }
+}
+
+/// The matched route pattern, e.g. `/users/{id}`. Fails with 500 when used
+/// outside a matched route (e.g. in a fallback handler).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchedPath(pub &'static str);
+
+impl MatchedPath {
+    pub fn as_str(&self) -> &'static str {
+        self.0
+    }
+}
+
+impl FromRequestParts for MatchedPath {
+    #[inline]
+    async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
+        req.matched_path()
+            .map(MatchedPath)
+            .ok_or_else(|| Error::internal("no matched route for this request"))
+    }
+}
+
 /// Optional extraction never fails: `None` when the inner extractor errors.
 impl<T: FromRequestParts> FromRequestParts for Option<T> {
     #[inline]
@@ -228,8 +255,7 @@ newtype!(
 impl<T: DeserializeOwned + Send> FromRequest for Json<T> {
     async fn from_request(req: Request) -> Result<Self, Error> {
         if !content_type_is(&req, "json") {
-            return Err(Error::new(
-                http::StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            return Err(Error::unsupported_media_type(
                 "expected `Content-Type: application/json`",
             ));
         }

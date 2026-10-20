@@ -2,16 +2,20 @@
 
 use std::any::{Any, TypeId};
 use std::borrow::Cow;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{HeaderMap, Method, Uri};
 
 use crate::body::ReqBody;
+use crate::router::RouteInfo;
+
+pub(crate) type StateEntry = (TypeId, Arc<dyn Any + Send + Sync>);
 
 /// Application-wide data shared by every request.
 pub(crate) struct Shared {
-    pub(crate) states: Arc<[(TypeId, Box<dyn Any + Send + Sync>)]>,
+    pub(crate) states: Arc<[StateEntry]>,
     pub(crate) body_limit: usize,
 }
 
@@ -69,6 +73,21 @@ pub struct Request {
     pub(crate) body: Option<ReqBody>,
     pub(crate) params: Params,
     pub(crate) shared: Arc<Shared>,
+    pub(crate) route: Option<&'static RouteInfo>,
+    pub(crate) conn: ConnInfo,
+}
+
+/// Connection-level information about where a request came from.
+///
+/// Also usable as an extractor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ConnInfo {
+    /// Peer address (`None` for in-process test requests).
+    pub remote_addr: Option<SocketAddr>,
+    /// Local address the connection was accepted on.
+    pub local_addr: Option<SocketAddr>,
+    /// Whether the connection is TLS-encrypted.
+    pub secure: bool,
 }
 
 impl Request {
@@ -109,6 +128,51 @@ impl Request {
     /// runs before routing.
     pub fn set_uri(&mut self, uri: Uri) {
         self.head.uri = uri;
+    }
+
+    /// The route that matched this request. `None` in global middleware
+    /// (which runs before routing) and for fallback/404 requests.
+    #[inline]
+    pub fn route(&self) -> Option<&'static RouteInfo> {
+        self.route
+    }
+
+    /// The matched path pattern, e.g. `/users/{id}`.
+    #[inline]
+    pub fn matched_path(&self) -> Option<&'static str> {
+        self.route.map(|r| r.path())
+    }
+
+    /// Connection information (peer address, TLS).
+    #[inline]
+    pub fn conn(&self) -> &ConnInfo {
+        &self.conn
+    }
+
+    #[inline]
+    pub fn remote_addr(&self) -> Option<SocketAddr> {
+        self.conn.remote_addr
+    }
+
+    /// The request head (method, URI, version, headers, extensions).
+    #[inline]
+    pub fn head(&self) -> &http::request::Parts {
+        &self.head
+    }
+
+    #[inline]
+    pub fn head_mut(&mut self) -> &mut http::request::Parts {
+        &mut self.head
+    }
+
+    /// Take the raw body (for streaming). Returns `None` if already taken.
+    pub fn take_body(&mut self) -> Option<ReqBody> {
+        self.body.take()
+    }
+
+    /// The configured maximum buffered body size for this app.
+    pub fn body_limit(&self) -> usize {
+        self.shared.body_limit
     }
 
     /// A route parameter by name, percent-decoded.

@@ -1,0 +1,13 @@
+[package]
+name = "zapline-cli"
+description = "Command-line tooling for the zapline web framework"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "zapline"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,35 +1,87 @@
 [package]
 name = "zapline"
-description = "A fast, low-boilerplate Rust web framework"
+description = "A fast, batteries-included Rust web framework: FastAPI ergonomics, enterprise structure, top-tier performance"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+keywords = ["web", "http", "framework", "openapi", "async"]
+categories = ["web-programming::http-server", "asynchronous"]
 
 [features]
-default = ["macros", "json", "query", "form"]
+default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
+full = [
+    "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies",
+]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
 query = ["dep:serde_urlencoded"]
 form = ["dep:serde_urlencoded"]
+openapi = ["json", "dep:schemars"]
+validate = ["dep:validator"]
+config = ["dep:toml"]
+tracing = ["dep:tracing", "dep:tracing-subscriber"]
+http2 = ["hyper/http2", "hyper-util/http2", "hyper-util/server-auto"]
+tls = ["dep:tokio-rustls"]
+ws = ["dep:tokio-tungstenite"]
+fs = ["dep:mime_guess", "dep:tokio-util"]
+multipart = ["dep:multer"]
+compression = ["dep:async-compression", "dep:tokio-util"]
+jwt = ["json", "dep:jsonwebtoken"]
+cookies = ["dep:cookie"]
 
 [dependencies]
 zapline-macros = { path = "../zapline-macros", version = "0.1.0", optional = true }
+
+# core (always on)
 bytes = "1"
 http = "1"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
-hyper-util = { version = "0.1", features = ["tokio"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "signal", "sync"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "server-graceful"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "net", "time", "macros", "signal", "sync", "fs", "io-util"] }
 socket2 = { version = "0.6", features = ["all"] }
 matchit = "0.8"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
+percent-encoding = "2"
+futures-util = { version = "0.3", default-features = false, features = ["std", "sink"] }
+futures-core = "0.3"
+pin-project-lite = "0.2"
+fastrand = "2"
+base64 = "0.23"
+httpdate = "1"
+
+# optional
 serde_json = { version = "1", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
-percent-encoding = "2"
+schemars = { version = "1", optional = true }
+validator = { version = "0.21", optional = true, features = ["derive"] }
+toml = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true, features = ["env-filter", "fmt", "json"] }
+tokio-rustls = { version = "0.26", optional = true, default-features = false, features = ["ring", "tls12"] }
+tokio-tungstenite = { version = "0.30", optional = true, default-features = false, features = ["handshake"] }
+mime_guess = { version = "2", optional = true }
+tokio-util = { version = "0.7", optional = true, features = ["io"] }
+multer = { version = "3", optional = true }
+async-compression = { version = "0.4", optional = true, features = ["tokio", "gzip", "brotli", "zstd", "deflate"] }
+jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["rust_crypto", "use_pem"] }
+cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
 
 [dev-dependencies]
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+schemars = "1"
+validator = { version = "0.21", features = ["derive"] }
+futures-util = "0.3"
+tempfile = "3"
+rcgen = "0.14"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+
+[package.metadata.docs.rs]
+all-features = true

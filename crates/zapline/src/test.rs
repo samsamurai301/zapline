@@ -11,30 +11,108 @@
 //! # }
 //! ```
 
-use std::sync::Arc;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::BodyExt;
 
-use crate::app::AppInner;
+use crate::app::{AppInner, Prepared};
 use crate::body::ReqBody;
+use crate::lifecycle::{Lifecycle, Resources};
+use crate::request::ConnInfo;
+use crate::router::RouteInfo;
 
+struct Started {
+    app: AppInner,
+    lifecycle: tokio::sync::Mutex<Lifecycle>,
+    resources: Resources,
+}
+
+struct Inner {
+    prepared: Mutex<Option<Prepared>>,
+    started: tokio::sync::OnceCell<Started>,
+    table: Vec<&'static RouteInfo>,
+}
+
+/// In-process client. Cheap to clone; clones share one app instance.
 #[derive(Clone)]
 pub struct TestClient {
-    app: Arc<AppInner>,
+    inner: Arc<Inner>,
 }
 
 impl TestClient {
-    pub(crate) fn new(app: Arc<AppInner>) -> Self {
-        TestClient { app }
+    pub(crate) fn new(prepared: Prepared) -> Self {
+        let table = prepared.table.clone();
+        TestClient {
+            inner: Arc::new(Inner {
+                prepared: Mutex::new(Some(prepared)),
+                started: tokio::sync::OnceCell::new(),
+                table,
+            }),
+        }
+    }
+
+    /// Run startup hooks now (they otherwise run on the first request).
+    ///
+    /// # Panics
+    /// If a startup hook fails.
+    pub async fn start(&self) -> &Self {
+        self.started().await;
+        self
+    }
+
+    async fn started(&self) -> &Started {
+        self.inner
+            .started
+            .get_or_init(|| async {
+                let prepared = self
+                    .inner
+                    .prepared
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .expect("test app already started");
+                match prepared.start().await {
+                    Ok(r) => Started {
+                        app: r.app,
+                        lifecycle: tokio::sync::Mutex::new(r.lifecycle),
+                        resources: r.resources,
+                    },
+                    Err(e) => panic!("startup failed: {e}"),
+                }
+            })
+            .await
+    }
+
+    /// Application resources (state) after startup.
+    pub async fn resources(&self) -> Resources {
+        self.started().await.resources.clone()
+    }
+
+    /// Run shutdown hooks.
+    pub async fn shutdown(&self) {
+        if let Some(s) = self.inner.started.get() {
+            s.lifecycle.lock().await.run_shutdown(&s.resources).await;
+        }
+    }
+
+    /// The final route table (after build hooks).
+    pub fn routes(&self) -> &[&'static RouteInfo] {
+        &self.inner.table
     }
 
     pub fn request(&self, method: Method, uri: &str) -> TestRequest {
         TestRequest {
-            app: self.app.clone(),
+            client: self.clone(),
             builder: http::Request::builder().method(method).uri(uri),
             body: Bytes::new(),
+            conn: ConnInfo {
+                remote_addr: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
+                local_addr: None,
+                secure: false,
+            },
         }
     }
     pub fn get(&self, uri: &str) -> TestRequest {
@@ -56,9 +134,10 @@ impl TestClient {
 
 #[must_use = "call .send().await to perform the request"]
 pub struct TestRequest {
-    app: Arc<AppInner>,
-    builder: http::request::Builder,
-    body: Bytes,
+    client: TestClient,
+    pub(crate) builder: http::request::Builder,
+    pub(crate) body: Bytes,
+    pub(crate) conn: ConnInfo,
 }
 
 impl TestRequest {
@@ -70,6 +149,17 @@ impl TestRequest {
         <HeaderValue as TryFrom<V>>::Error: Into<http::Error>,
     {
         self.builder = self.builder.header(key, value);
+        self
+    }
+
+    /// `Authorization: Bearer <token>`.
+    pub fn bearer(self, token: &str) -> Self {
+        self.header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    /// Pretend the request came from this peer address.
+    pub fn remote_addr(mut self, addr: SocketAddr) -> Self {
+        self.conn.remote_addr = Some(addr);
         self
     }
 
@@ -100,7 +190,12 @@ impl TestRequest {
             .builder
             .body(ReqBody::Full(self.body))
             .expect("invalid test request");
-        let res = self.app.handle(req).await.unwrap_or_else(|e| match e {});
+        let started = self.client.started().await;
+        let res = started
+            .app
+            .handle(req, self.conn)
+            .await
+            .unwrap_or_else(|e| match e {});
         let (parts, body) = res.into_parts();
         let body = body
             .collect()
