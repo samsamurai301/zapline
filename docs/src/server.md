@@ -69,3 +69,4 @@ Invalid combinations are rejected at startup with `ErrorKind::InvalidInput`.
 
 - With `pipeline_flush` on (the default, needed for pipelined throughput), hyper 1.12 closes the connection on malformed or oversized request heads without sending the 400/431 response. Set `pipeline_flush = false` if you need those responses.
 - Upgraded WebSocket connections and individual HTTP/2 streams aren't tracked by the drain. With `App::run` they end when the workers stop.
+- A WebSocket connection gives back its `max_connections` slot when it upgrades, so long-lived sockets aren't counted against that limit. Bound them in your handler, for example with a semaphore in app state.
