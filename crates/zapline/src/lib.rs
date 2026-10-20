@@ -155,7 +155,9 @@ pub use openapi::JsonSchema;
 pub use request::{ConnInfo, Request};
 pub use response::{Html, IntoResponse, Redirect, Response};
 pub use router::{EndpointLayers, IntoRoutes, RouteInfo, Routes};
-pub use server::ServerConfig;
+pub use server::{shutdown_signal, RuntimeMode, ServerConfig};
+#[cfg(feature = "tls")]
+pub use tls::TlsConfig;
 
 pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
