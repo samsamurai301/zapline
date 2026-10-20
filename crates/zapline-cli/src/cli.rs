@@ -1,0 +1,418 @@
+//! Command-line definition (clap).
+
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
+
+use crate::generate::HandlerMethod;
+use crate::templates::Template;
+
+const ABOUT: &str = "Project scaffolding, code generation and dev tooling for zapline";
+
+const LONG_ABOUT: &str = "\
+Project scaffolding, code generation and dev tooling for zapline.
+
+Create a project, run it with live reload, add resources, inspect the route table
+and export the OpenAPI document, all from one tool.";
+
+const EXAMPLES: &str = "\
+Examples:
+  zapline new my-api                       Create an API project (docs, validation, Docker, CI)
+  zapline new hello --template minimal     Create a tiny single-route project
+  zapline new shop --template full         Add config layers, DI, metrics, tracing, hardened middleware
+  zapline dev                              Rebuild and restart on every change
+  zapline dev -- --port 9000               Pass arguments to your app
+  zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
+  zapline g handler ping --method get      Add a single route
+  zapline g middleware audit               Add a middleware function
+  zapline routes                           Print the route table
+  zapline openapi -o docs/openapi.json     Export the OpenAPI document
+  zapline doctor                           Check your toolchain
+  zapline bench http://localhost:8080/     Load test with wrk
+
+Also available as a cargo subcommand: cargo zapline <command>";
+
+/// The `zapline` command.
+#[derive(Debug, Parser)]
+#[command(
+    name = "zapline",
+    version,
+    about = ABOUT,
+    long_about = LONG_ABOUT,
+    after_long_help = EXAMPLES,
+    arg_required_else_help = true,
+    propagate_version = true
+)]
+pub struct Cli {
+    /// Run as if started in DIR (like `git -C`)
+    #[arg(short = 'C', long, global = true, value_name = "DIR")]
+    pub dir: Option<PathBuf>,
+
+    #[allow(missing_docs)]
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// All subcommands.
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Create a new project
+    #[command(after_long_help = "\
+Templates:
+  minimal  Hello-world route with an in-process test
+  api      Structured REST API: routes, models, validation, OpenAPI docs, Dockerfile, CI (default)
+  full     api plus layered config, DI, health probes, Prometheus metrics, tracing,
+           security headers, request IDs, CORS, rate limiting, background tasks
+
+Examples:
+  zapline new my-api
+  zapline new my-api --template full --path ~/code
+  zapline new hello --template minimal --no-git")]
+    New(NewArgs),
+
+    /// Generate code in the current project
+    #[command(visible_alias = "g")]
+    Generate(GenerateArgs),
+
+    /// Rebuild and restart the app whenever files change
+    #[command(after_long_help = "\
+Watches src/, config/, templates/, Cargo.toml and build.rs (ignoring target/ and editor
+temp files), rebuilds after the changes settle, and restarts the binary. The old process
+gets SIGTERM and is killed after 5 seconds if it does not exit. If a build fails, the
+previous version keeps running.
+
+Examples:
+  zapline dev
+  zapline dev --bin server
+  zapline dev -- --port 9000")]
+    Dev(DevArgs),
+
+    /// Print the app's route table
+    #[command(after_long_help = "\
+Runs the app with ZAPLINE_PRINT_ROUTES=1; `App::run` prints its routes and exits.
+
+Examples:
+  zapline routes
+  zapline routes --json | jq '.[].path'")]
+    Routes(RoutesArgs),
+
+    /// Export the app's OpenAPI document
+    #[command(after_long_help = "\
+Runs the app with ZAPLINE_EXPORT_OPENAPI=<path>; the OpenAPI plugin writes the document
+and the app exits. The file is only replaced when the export succeeds.
+
+Examples:
+  zapline openapi
+  zapline openapi -o docs/openapi.json")]
+    Openapi(OpenapiArgs),
+
+    /// Check that the tools zapline relies on are installed
+    Doctor,
+
+    /// Load-test a URL with wrk
+    #[command(after_long_help = "\
+Benchmark a release build for meaningful numbers: `cargo run --release`.
+
+Examples:
+  zapline bench http://localhost:8080/
+  zapline bench http://localhost:8080/users -c 128 -d 30s -t 2")]
+    Bench(BenchArgs),
+}
+
+/// Arguments of `zapline new`.
+#[derive(Debug, Args)]
+pub struct NewArgs {
+    /// Project name, also used as the crate name and directory name
+    pub name: String,
+
+    /// Project layout
+    #[arg(short, long, value_enum, default_value = "api")]
+    pub template: Template,
+
+    /// Parent directory in which to create the project
+    #[arg(long, value_name = "DIR", default_value = ".")]
+    pub path: PathBuf,
+
+    /// Depend on a local checkout of zapline (the `crates/zapline` directory) instead of crates.io
+    #[arg(long, value_name = "PATH")]
+    pub zapline_path: Option<PathBuf>,
+
+    /// Do not run `git init`
+    #[arg(long)]
+    pub no_git: bool,
+}
+
+/// Arguments of `zapline generate`.
+#[derive(Debug, Args)]
+pub struct GenerateArgs {
+    #[allow(missing_docs)]
+    #[command(subcommand)]
+    pub kind: GenerateKind,
+
+    /// Overwrite files that already exist
+    #[arg(short, long, global = true)]
+    pub force: bool,
+}
+
+/// What to generate.
+#[derive(Debug, Subcommand)]
+pub enum GenerateKind {
+    /// A resource: model, CRUD handlers, in-memory store and tests
+    #[command(after_long_help = "\
+Creates src/routes/<plural>.rs and tests/<plural>.rs. When src/routes/mod.rs contains the
+`// zapline:routes:start` / `// zapline:routes:end` markers (the api and full templates do),
+the module is declared and mounted automatically; otherwise you get instructions.
+
+The name can be singular or plural and in any case style: post, Posts, blog-post, BlogPosts.
+
+Examples:
+  zapline generate resource post
+  zapline g resource blog-post
+  zapline g resource person --plural people")]
+    Resource {
+        /// Resource name, e.g. `post` or `blog-post`
+        name: String,
+        /// Plural form, for irregular nouns the built-in rules get wrong
+        #[arg(long, value_name = "WORD")]
+        plural: Option<String>,
+    },
+
+    /// A single route handler in src/routes/<name>.rs
+    #[command(after_long_help = "\
+Examples:
+  zapline generate handler ping
+  zapline g handler send_email --method post --path /emails
+  zapline g handler get_item --path /items/{id}")]
+    Handler {
+        /// Handler name, e.g. `ping`
+        name: String,
+        /// HTTP method
+        #[arg(short, long, value_enum, default_value = "get")]
+        method: HandlerMethod,
+        /// Route path [default: /<name in kebab-case>]
+        #[arg(short, long, value_name = "PATH")]
+        path: Option<String>,
+    },
+
+    /// A middleware function in src/middleware/<name>.rs
+    Middleware {
+        /// Middleware name, e.g. `audit`
+        name: String,
+    },
+}
+
+/// Arguments of `zapline dev`.
+#[derive(Debug, Args)]
+pub struct DevArgs {
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+
+    /// Build in release mode
+    #[arg(long)]
+    pub release: bool,
+
+    /// How long (ms) files must stay quiet before rebuilding
+    #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]
+    pub debounce_ms: u64,
+
+    /// Arguments passed to the app (after `--`)
+    #[arg(last = true, value_name = "APP_ARGS")]
+    pub app_args: Vec<String>,
+}
+
+/// Arguments of `zapline routes`.
+#[derive(Debug, Args)]
+pub struct RoutesArgs {
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+
+    /// Print the raw JSON instead of a table
+    #[arg(long)]
+    pub json: bool,
+}
+
+/// Arguments of `zapline openapi`.
+#[derive(Debug, Args)]
+pub struct OpenapiArgs {
+    /// File to write
+    #[arg(short, long, value_name = "FILE", default_value = "openapi.json")]
+    pub output: PathBuf,
+
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+}
+
+/// Arguments of `zapline bench`.
+#[derive(Debug, Args)]
+pub struct BenchArgs {
+    /// URL to benchmark, e.g. http://localhost:8080/
+    pub url: String,
+
+    /// Open connections
+    #[arg(short, long, default_value_t = 256)]
+    pub connections: usize,
+
+    /// Test duration: 10s, 2m, 1h
+    #[arg(short, long, default_value = "10s")]
+    pub duration: String,
+
+    /// wrk threads [default: CPU count, at most 4]
+    #[arg(short, long)]
+    pub threads: Option<usize>,
+
+    /// Print wrk's own report instead of the summary
+    #[arg(long)]
+    pub raw: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory;
+
+    #[test]
+    fn the_cli_definition_is_consistent() {
+        Cli::command().debug_assert();
+    }
+
+    fn parse(args: &[&str]) -> Cli {
+        Cli::try_parse_from(std::iter::once("zapline").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn new_defaults() {
+        let Command::New(a) = parse(&["new", "my-app"]).command else {
+            panic!()
+        };
+        assert_eq!(a.name, "my-app");
+        assert_eq!(a.template, Template::Api);
+        assert_eq!(a.path, PathBuf::from("."));
+        assert!(!a.no_git);
+        assert!(a.zapline_path.is_none());
+    }
+
+    #[test]
+    fn new_with_options() {
+        let Command::New(a) = parse(&[
+            "new",
+            "x",
+            "--template",
+            "full",
+            "--path",
+            "/tmp",
+            "--zapline-path",
+            "/z",
+            "--no-git",
+        ])
+        .command
+        else {
+            panic!()
+        };
+        assert_eq!(a.template, Template::Full);
+        assert_eq!(a.path, PathBuf::from("/tmp"));
+        assert_eq!(a.zapline_path, Some(PathBuf::from("/z")));
+        assert!(a.no_git);
+        assert!(Cli::try_parse_from(["zapline", "new", "x", "-t", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn generate_has_an_alias_and_nested_commands() {
+        for head in ["generate", "g"] {
+            let cli = parse(&[head, "resource", "post", "--plural", "posts", "--force"]);
+            let Command::Generate(g) = cli.command else {
+                panic!()
+            };
+            assert!(g.force);
+            let GenerateKind::Resource { name, plural } = g.kind else {
+                panic!()
+            };
+            assert_eq!(name, "post");
+            assert_eq!(plural.as_deref(), Some("posts"));
+        }
+        let Command::Generate(g) =
+            parse(&["g", "handler", "ping", "-m", "post", "-p", "/x"]).command
+        else {
+            panic!()
+        };
+        let GenerateKind::Handler { name, method, path } = g.kind else {
+            panic!()
+        };
+        assert_eq!(
+            (name.as_str(), method, path.as_deref()),
+            ("ping", HandlerMethod::Post, Some("/x"))
+        );
+        let Command::Generate(g) = parse(&["g", "middleware", "audit"]).command else {
+            panic!()
+        };
+        assert!(matches!(g.kind, GenerateKind::Middleware { .. }));
+    }
+
+    #[test]
+    fn dev_passes_arguments_after_double_dash() {
+        let Command::Dev(d) = parse(&["dev", "--bin", "server", "--", "--port", "9000"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(d.bin.as_deref(), Some("server"));
+        assert_eq!(d.app_args, ["--port", "9000"]);
+        assert_eq!(d.debounce_ms, 300);
+    }
+
+    #[test]
+    fn other_commands_parse() {
+        let Command::Routes(r) = parse(&["routes", "--json", "--bin", "a"]).command else {
+            panic!()
+        };
+        assert!(r.json);
+        assert_eq!(r.bin.as_deref(), Some("a"));
+        let Command::Openapi(o) = parse(&["openapi"]).command else {
+            panic!()
+        };
+        assert_eq!(o.output, PathBuf::from("openapi.json"));
+        let Command::Openapi(o) = parse(&["openapi", "-o", "x/spec.json"]).command else {
+            panic!()
+        };
+        assert_eq!(o.output, PathBuf::from("x/spec.json"));
+        let Command::Bench(b) =
+            parse(&["bench", "http://x", "-c", "10", "-d", "5s", "-t", "2"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(
+            (b.connections, b.duration.as_str(), b.threads),
+            (10, "5s", Some(2))
+        );
+        assert!(matches!(parse(&["doctor"]).command, Command::Doctor));
+    }
+
+    #[test]
+    fn global_dir_option_works_anywhere() {
+        assert_eq!(
+            parse(&["-C", "/p", "routes"]).dir,
+            Some(PathBuf::from("/p"))
+        );
+        assert_eq!(
+            parse(&["routes", "-C", "/p"]).dir,
+            Some(PathBuf::from("/p"))
+        );
+    }
+
+    #[test]
+    fn no_arguments_shows_help() {
+        let err = Cli::try_parse_from(["zapline"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
+    }
+
+    #[test]
+    fn version_is_available() {
+        let err = Cli::try_parse_from(["zapline", "--version"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(err.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+}

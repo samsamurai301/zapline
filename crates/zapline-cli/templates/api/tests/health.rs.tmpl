@@ -1,0 +1,21 @@
+use @@crate_name@@::app;
+use serde_json::Value;
+
+#[tokio::test]
+async fn health_reports_ok() {
+    let client = app().test();
+    let res = client.get("/health").send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>()["status"], "ok");
+}
+
+#[tokio::test]
+async fn openapi_document_lists_the_routes() {
+    let client = app().test();
+    let res = client.get("/openapi.json").send().await;
+    assert_eq!(res.status(), 200);
+    let doc: Value = res.json();
+    assert!(doc["paths"]["/health"].is_object());
+    assert!(doc["paths"]["/users"].is_object());
+    assert!(doc["paths"]["/users/{id}"].is_object());
+}

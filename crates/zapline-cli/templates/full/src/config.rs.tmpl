@@ -1,0 +1,42 @@
+//! Typed application settings, layered from files and the environment.
+//!
+//! Lowest to highest priority:
+//!
+//! 1. `config/default.toml`
+//! 2. `config/{APP_ENV}.toml` (`APP_ENV` defaults to `development`)
+//! 3. environment variables named `APP__SECTION__KEY`, e.g. `APP__SERVER__PORT=9000`
+
+use serde::Deserialize;
+use zapline::config::{Config, ConfigError};
+
+/// All settings of the service. Add sections here and in `config/default.toml`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Settings {
+    pub app: AppSettings,
+    pub server: ServerSettings,
+}
+
+/// General information about the service.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AppSettings {
+    pub name: String,
+}
+
+/// Where the HTTP server listens.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerSettings {
+    pub host: String,
+    pub port: u16,
+}
+
+impl Settings {
+    /// Loads the layered configuration and deserializes it.
+    pub fn load() -> Result<Settings, ConfigError> {
+        Config::load()?.extract()
+    }
+
+    /// The `host:port` string to bind.
+    pub fn addr(&self) -> String {
+        format!("{}:{}", self.server.host, self.server.port)
+    }
+}

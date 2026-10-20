@@ -1,0 +1,56 @@
+# @@name@@
+
+A REST API built with [zapline](https://github.com/your-org/zapline): typed
+routes, request validation, and OpenAPI docs generated from your code.
+
+```sh
+zapline dev          # rebuild and restart on every change
+cargo run            # or run once
+cargo test           # in-process tests, no sockets
+```
+
+Then open:
+
+- <http://localhost:8080/docs>: interactive API docs (Swagger UI)
+- <http://localhost:8080/openapi.json>: the OpenAPI 3.1 document
+- <http://localhost:8080/health>: liveness probe
+
+```sh
+curl -X POST localhost:8080/users \
+  -H 'content-type: application/json' \
+  -d '{"name":"Ada","email":"ada@example.com"}'
+```
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `src/lib.rs` | `app()`: builds the `App` (OpenAPI docs + routes) |
+| `src/main.rs` | Serves `app()`; set `ADDR` to change the bind address (see `.env.example`) |
+| `src/models.rs` | Request and response types with validation rules |
+| `src/routes/` | One module per resource; each exposes `mount(app)` |
+| `tests/` | Integration tests using `app().test()` |
+
+## Adding endpoints
+
+```sh
+zapline generate resource post      # src/routes/posts.rs + tests/posts.rs, mounted for you
+zapline generate handler ping       # a single route
+zapline routes                      # print the route table
+zapline openapi -o openapi.json     # export the OpenAPI document
+```
+
+## Docker
+
+```sh
+docker build -t @@name@@ .
+docker run --rm -p 8080:8080 @@name@@
+```
+
+The image is a multi-stage build: a Rust toolchain stage compiles the binary and
+a slim Debian image runs it as a non-root user.
+
+## CI
+
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy -D warnings`
+and `cargo test` on every push and pull request.

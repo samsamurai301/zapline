@@ -1,0 +1,15 @@
+use @@crate_name@@::middleware::@@name@@;
+use zapline::App;
+
+#[tokio::test]
+async fn @@name@@_wraps_responses() {
+    let client = App::new()
+        .get("/", || async { "ok" })
+        .wrap(@@name@@::@@name@@)
+        .test();
+
+    let res = client.get("/").send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text(), "ok");
+    assert_eq!(res.header("x-@@kebab@@"), Some("applied"));
+}

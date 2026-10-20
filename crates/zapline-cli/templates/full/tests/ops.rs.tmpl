@@ -1,0 +1,52 @@
+//! Operational endpoints and cross-cutting middleware.
+
+use @@crate_name@@::app;
+use @@crate_name@@::config::Settings;
+use serde_json::Value;
+use zapline::test::TestClient;
+
+fn client() -> TestClient {
+    let settings = Settings::load().expect("config/default.toml loads");
+    app(&settings).test()
+}
+
+#[tokio::test]
+async fn settings_load_from_config_files() {
+    let settings = Settings::load().expect("config/default.toml loads");
+    assert_eq!(settings.app.name, "@@name@@");
+    assert!(!settings.addr().is_empty());
+}
+
+#[tokio::test]
+async fn liveness_and_readiness_probes() {
+    let client = client();
+    assert_eq!(client.get("/health/live").send().await.status(), 200);
+    assert_eq!(client.get("/health/ready").send().await.status(), 200);
+}
+
+#[tokio::test]
+async fn metrics_are_exposed() {
+    let client = client();
+    client.get("/health/live").send().await;
+    let res = client.get("/metrics").send().await;
+    assert_eq!(res.status(), 200);
+    assert!(!res.text().is_empty());
+}
+
+#[tokio::test]
+async fn responses_carry_request_ids_and_security_headers() {
+    let client = client();
+    let res = client.get("/health/live").send().await;
+    assert!(res.header("x-request-id").is_some());
+    assert_eq!(res.header("x-content-type-options"), Some("nosniff"));
+}
+
+#[tokio::test]
+async fn openapi_document_lists_the_routes() {
+    let client = client();
+    let res = client.get("/openapi.json").send().await;
+    assert_eq!(res.status(), 200);
+    let doc: Value = res.json();
+    assert!(doc["paths"]["/users"].is_object());
+    assert!(doc["paths"]["/users/{id}"].is_object());
+}

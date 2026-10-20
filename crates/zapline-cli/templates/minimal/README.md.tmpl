@@ -1,0 +1,27 @@
+# @@name@@
+
+A minimal [zapline](https://github.com/your-org/zapline) app.
+
+```sh
+zapline dev          # rebuild and restart on every change
+cargo run            # or run it once on http://localhost:8080
+cargo test           # in-process tests, no sockets
+```
+
+Try it:
+
+```sh
+curl localhost:8080/
+curl localhost:8080/hello/world
+```
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `src/lib.rs` | Routes and `app()`, which builds the `App` |
+| `src/main.rs` | Serves `app()`; set `ADDR` to change the bind address |
+| `tests/api.rs` | Integration tests using `app().test()` |
+
+Need more structure (modules, OpenAPI docs, validation)? Create a project with
+`zapline new --template api`, or add pieces here with `zapline generate`.

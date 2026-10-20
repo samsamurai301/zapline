@@ -1,0 +1,22 @@
+//! `@@name@@` middleware.
+//!
+//! Register it for every request (it runs before routing, so it also sees
+//! 404s) with `app.wrap(middleware::@@name@@::@@name@@)`, or for a group of
+//! routes with `Routes::wrap`, where `req.route()` is available.
+
+use zapline::header::HeaderName;
+use zapline::prelude::*;
+
+/// TODO: describe what this middleware does.
+pub async fn @@name@@(req: Request, next: Next) -> Response {
+    // Before the handler: inspect `req`, or answer early, e.g.
+    // `return Error::forbidden().into_response();`
+    let mut res = next.run(req).await;
+
+    // After the handler: adjust the response.
+    res.headers_mut().insert(
+        HeaderName::from_static("x-@@kebab@@"),
+        HeaderValue::from_static("applied"),
+    );
+    res
+}

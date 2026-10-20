@@ -1,0 +1,18 @@
+//! HTTP routes, one module per resource.
+//!
+//! `zapline generate resource <name>` creates a new module and registers it
+//! between the markers below. Each module exposes `mount(app) -> App`, which
+//! adds its routes and any state it needs. Health probes and metrics come from
+//! plugins registered in `lib.rs`.
+
+use zapline::prelude::*;
+
+pub mod users;
+
+/// Registers every route module on the app.
+pub fn install(mut app: App) -> App {
+    // zapline:routes:start
+    app = app.plugin(users::mount);
+    // zapline:routes:end
+    app
+}

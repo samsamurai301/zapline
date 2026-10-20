@@ -1,0 +1,57 @@
+//! @@name@@: a production-minded zapline service.
+//!
+//! The binary (`src/main.rs`) only serves [`app`]. Tests build the same app and
+//! drive it in-process with `app(&settings).test()`.
+
+pub mod config;
+pub mod models;
+pub mod repository;
+pub mod routes;
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use zapline::health::Health;
+use zapline::metrics::Metrics;
+use zapline::middleware::{
+    CatchPanic, Compression, Cors, RateLimit, SecurityHeaders, SetRequestId,
+};
+use zapline::openapi::OpenApi;
+use zapline::prelude::*;
+use zapline::telemetry;
+
+use crate::config::Settings;
+use crate::repository::{MemUserRepository, UserRepository};
+
+/// Builds the application: dependencies, probes, metrics, middleware, routes.
+pub fn app(settings: &Settings) -> App {
+    App::new()
+        // Serves /openapi.json, with Swagger UI at /docs.
+        .openapi(OpenApi::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        // Dependency injection: register once, inject with `Dep<dyn UserRepository>`.
+        // Swap in a database-backed repository here; no route changes needed.
+        .provide_dyn::<dyn UserRepository>(Arc::new(MemUserRepository::default()))
+        // Kubernetes-style probes at /health/live and /health/ready. Add a check
+        // per dependency, e.g. a database ping.
+        .plugin(Health::new().check("repository", |_res: Resources| async move { Ok(()) }))
+        // Prometheus metrics at /metrics.
+        .plugin(Metrics::new())
+        // Middleware runs in the order added (the first one is outermost).
+        .wrap(SetRequestId::new())
+        .wrap(telemetry::Trace::new())
+        .wrap(SecurityHeaders::default())
+        // Restrict origins before going to production.
+        .wrap(Cors::permissive())
+        .wrap(RateLimit::per_ip(100, Duration::from_secs(60)))
+        .wrap(Compression::new())
+        .wrap(CatchPanic::new())
+        // Runs after the server stops accepting connections.
+        .on_shutdown({
+            let name = settings.app.name.clone();
+            move |_res| async move { tracing::info!(%name, "shut down cleanly") }
+        })
+        .plugin(routes::install)
+}

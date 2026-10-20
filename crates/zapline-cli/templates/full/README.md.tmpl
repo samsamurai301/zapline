@@ -1,0 +1,88 @@
+# @@name@@
+
+A production-minded service built with [zapline](https://github.com/your-org/zapline):
+typed routes, validation, OpenAPI docs, layered configuration, dependency
+injection, health probes, Prometheus metrics, tracing and a hardened middleware
+stack.
+
+```sh
+zapline dev          # rebuild and restart on every change
+cargo run            # or run once
+cargo test           # in-process tests, no sockets
+```
+
+| URL | What |
+|---|---|
+| <http://localhost:8080/docs> | Swagger UI |
+| <http://localhost:8080/openapi.json> | OpenAPI 3.1 document |
+| <http://localhost:8080/health/live> | Liveness probe |
+| <http://localhost:8080/health/ready> | Readiness probe (runs the registered checks) |
+| <http://localhost:8080/metrics> | Prometheus metrics |
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `src/lib.rs` | `app(&settings)`: wires dependencies, probes, metrics, middleware, routes |
+| `src/main.rs` | Loads settings, starts tracing, serves the app |
+| `src/config.rs` | Typed `Settings` |
+| `config/*.toml` | Layered configuration files |
+| `src/repository.rs` | `UserRepository` trait and an in-memory implementation |
+| `src/models.rs` | Request and response types with validation rules |
+| `src/routes/` | One module per resource; each exposes `mount(app)` |
+| `tests/` | Integration tests using `app(&settings).test()` |
+
+## Configuration
+
+Settings are layered, lowest priority first:
+
+1. `config/default.toml`
+2. `config/{APP_ENV}.toml`: `APP_ENV` defaults to `development`; the Docker image uses `production`
+3. environment variables named `APP__SECTION__KEY`, for example `APP__SERVER__PORT=9000`
+
+Add a field to `Settings` in `src/config.rs` and a default in
+`config/default.toml`, and it is available everywhere. Never commit secrets:
+supply them through the environment.
+
+## Dependency injection
+
+`src/lib.rs` registers the repository once:
+
+```rust
+.provide_dyn::<dyn UserRepository>(Arc::new(MemUserRepository::default()))
+```
+
+Handlers ask for it with `repo: Dep<dyn UserRepository>`. Implement the trait
+for your database and change that one line.
+
+## Middleware stack
+
+Request IDs, tracing, security headers, CORS, per-IP rate limiting (100
+requests/minute), response compression and panic catching are installed in
+`src/lib.rs`. `Cors::permissive()` is a development default: restrict the
+allowed origins before you deploy.
+
+## Adding endpoints
+
+```sh
+zapline generate resource post      # src/routes/posts.rs + tests/posts.rs, mounted for you
+zapline generate handler ping       # a single route
+zapline routes                      # print the route table
+zapline openapi -o openapi.json     # export the OpenAPI document
+```
+
+## Docker
+
+```sh
+docker build -t @@name@@ .
+docker run --rm -p 8080:8080 @@name@@
+```
+
+A multi-stage build compiles the binary, then a slim Debian image runs it as a
+non-root user with `APP_ENV=production`. Point your orchestrator's probes at
+`/health/live` and `/health/ready`, and Prometheus at `/metrics`.
+
+## CI
+
+`.github/workflows/ci.yml` runs `cargo fmt --check`, `cargo clippy -D warnings`
+and `cargo test` on every push and pull request.

@@ -1,0 +1,155 @@
+//! `@@pascal@@` resource: CRUD endpoints under `@@path@@`, backed by an in-memory store.
+//!
+//! The store lives in `State`. Replace `@@pascal@@Store` with a database-backed
+//! implementation when you are ready: the handlers only call its methods.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use serde::{Deserialize, Serialize};
+use zapline::openapi::JsonSchema;
+use zapline::prelude::*;
+use zapline::validate::{Valid, Validate};
+
+/// Largest page `GET @@path@@` returns.
+const MAX_PAGE: usize = 200;
+
+/// A stored @@human@@.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct @@pascal@@ {
+    pub id: u64,
+    pub name: String,
+}
+
+/// Payload for creating or replacing a @@human@@. Add your own fields here.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+pub struct New@@pascal@@ {
+    #[validate(length(min = 1, max = 200))]
+    pub name: String,
+}
+
+/// Query parameters for `GET @@path@@`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct List@@pascal_plural@@Query {
+    /// Maximum number of items to return (default 50, at most 200).
+    pub limit: Option<usize>,
+    /// Number of items to skip (default 0).
+    pub offset: Option<usize>,
+}
+
+#[derive(Default)]
+struct Inner {
+    last_id: u64,
+    items: BTreeMap<u64, @@pascal@@>,
+}
+
+/// Thread-safe in-memory store. Clones share the same data.
+#[derive(Clone, Default)]
+pub struct @@pascal@@Store(Arc<RwLock<Inner>>);
+
+impl @@pascal@@Store {
+    // A poisoned lock only means another request panicked mid-update; the map
+    // itself is still consistent, so keep serving instead of failing forever.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn list(&self, offset: usize, limit: usize) -> Vec<@@pascal@@> {
+        let inner = self.read();
+        let page = inner.items.values().skip(offset).take(limit);
+        page.cloned().collect()
+    }
+
+    fn get(&self, id: u64) -> Option<@@pascal@@> {
+        self.read().items.get(&id).cloned()
+    }
+
+    fn create(&self, new: New@@pascal@@) -> @@pascal@@ {
+        let mut inner = self.write();
+        inner.last_id += 1;
+        let item = @@pascal@@ {
+            id: inner.last_id,
+            name: new.name,
+        };
+        inner.items.insert(item.id, item.clone());
+        item
+    }
+
+    fn replace(&self, id: u64, new: New@@pascal@@) -> Option<@@pascal@@> {
+        let mut inner = self.write();
+        let item = inner.items.get_mut(&id)?;
+        item.name = new.name;
+        Some(item.clone())
+    }
+
+    fn delete(&self, id: u64) -> bool {
+        self.write().items.remove(&id).is_some()
+    }
+}
+
+/// List @@plural_human@@, optionally paginated with `?limit=` and `?offset=`.
+#[get("@@path@@")]
+async fn list_@@plural@@(
+    State(store): State<@@pascal@@Store>,
+    Query(page): Query<List@@pascal_plural@@Query>,
+) -> Json<Vec<@@pascal@@>> {
+    let limit = page.limit.unwrap_or(50).min(MAX_PAGE);
+    Json(store.list(page.offset.unwrap_or(0), limit))
+}
+
+/// Fetch one @@human@@ by id.
+#[get("@@path@@/{id}")]
+async fn get_@@singular@@(
+    State(store): State<@@pascal@@Store>,
+    Path(id): Path<u64>,
+) -> Result<Json<@@pascal@@>> {
+    store.get(id).map(Json).ok_or_else(Error::not_found)
+}
+
+/// Create a @@human@@.
+#[post("@@path@@")]
+async fn create_@@singular@@(
+    State(store): State<@@pascal@@Store>,
+    Valid(Json(new)): Valid<Json<New@@pascal@@>>,
+) -> (StatusCode, Json<@@pascal@@>) {
+    (StatusCode::CREATED, Json(store.create(new)))
+}
+
+/// Replace a @@human@@.
+#[put("@@path@@/{id}")]
+async fn replace_@@singular@@(
+    State(store): State<@@pascal@@Store>,
+    Path(id): Path<u64>,
+    Valid(Json(new)): Valid<Json<New@@pascal@@>>,
+) -> Result<Json<@@pascal@@>> {
+    let item = store.replace(id, new).ok_or_else(Error::not_found)?;
+    Ok(Json(item))
+}
+
+/// Delete a @@human@@.
+#[delete("@@path@@/{id}")]
+async fn delete_@@singular@@(
+    State(store): State<@@pascal@@Store>,
+    Path(id): Path<u64>,
+) -> Result<StatusCode> {
+    if store.delete(id) {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(Error::not_found())
+    }
+}
+
+/// Adds the `@@path@@` routes and their store.
+pub fn mount(app: App) -> App {
+    app.state(@@pascal@@Store::default()).mount((
+        list_@@plural@@,
+        get_@@singular@@,
+        create_@@singular@@,
+        replace_@@singular@@,
+        delete_@@singular@@,
+    ))
+}

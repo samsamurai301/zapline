@@ -1,0 +1,22 @@
+//! Liveness endpoint for load balancers and orchestrators.
+
+use serde::Serialize;
+use zapline::openapi::JsonSchema;
+use zapline::prelude::*;
+
+/// Body of `GET /health`.
+#[derive(Serialize, JsonSchema)]
+pub struct HealthStatus {
+    pub status: &'static str,
+}
+
+/// Liveness probe: answers 200 while the process is up.
+#[get("/health")]
+async fn health() -> Json<HealthStatus> {
+    Json(HealthStatus { status: "ok" })
+}
+
+/// Adds the health route.
+pub fn mount(app: App) -> App {
+    app.mount(health)
+}

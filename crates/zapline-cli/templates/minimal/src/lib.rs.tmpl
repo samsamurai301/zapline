@@ -1,0 +1,23 @@
+//! @@name@@: a minimal zapline app.
+//!
+//! The binary (`src/main.rs`) only serves [`app`]. Tests build the same app and
+//! drive it in-process with `app().test()`, no sockets involved.
+
+use zapline::prelude::*;
+
+/// `GET /`: a plain-text greeting.
+#[get("/")]
+async fn index() -> &'static str {
+    "Hello from @@name@@!"
+}
+
+/// `GET /hello/{name}`: greets `name`. Path parameters are parsed for you.
+#[get("/hello/{name}")]
+async fn hello(Path(name): Path<String>) -> String {
+    format!("Hello, {name}!")
+}
+
+/// Builds the application.
+pub fn app() -> App {
+    App::new().mount((index, hello))
+}
