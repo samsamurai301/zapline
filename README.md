@@ -1,182 +1,182 @@
 # zapline
 
-**A fast, low-boilerplate web framework for Rust.** Write plain `async fn`s; zapline handles the routing, parsing, errors, and the server.
+**The productive, batteries-included Rust web framework: FastAPI ergonomics, enterprise structure, and top-of-the-chart performance.**
 
 ```rust
+use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[get("/hello/{name}")]
-async fn hello(Path(name): Path<String>) -> String {
-    format!("Hello, {name}!")
+#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+struct NewUser {
+    #[validate(length(min = 1, max = 64))]
+    name: String,
+    #[validate(email)]
+    email: String,
+}
+
+/// Create a user.
+#[post("/users", tag = "users", status = 201)]
+async fn create_user(Valid(Json(user)): Valid<Json<NewUser>>) -> (StatusCode, Json<NewUser>) {
+    (StatusCode::CREATED, Json(user))
 }
 
 fn main() -> std::io::Result<()> {
-    App::new().mount(hello).run("0.0.0.0:8080")
+    App::new()
+        .mount(create_user)
+        .openapi(OpenApi::new("Users API", "1.0.0"))   // /openapi.json + Swagger UI at /docs
+        .run("0.0.0.0:8080")
 }
 ```
 
-There's no `#[tokio::main]`, no router/service/layer types to wire up, and no listener boilerplate. `run` starts a thread-per-core server sized to your CPUs.
+That's a complete service. The request body is parsed and validated, and invalid input gets a 422 with per-field details. The route is documented in OpenAPI 3.1 with interactive docs. A thread-per-core server serves it, with graceful shutdown.
 
 ## Why zapline
 
 | | |
 |---|---|
-| **Fast by construction** | Thread-per-core runtimes with `SO_REUSEPORT`, zero-allocation route params, fixed-slot method dispatch, no per-request work for features you don't use. See [benchmarks](#benchmarks). |
-| **Little boilerplate** | Route macros, typed extractors, one `Error` type that `?` works with, state without generics, and a prelude. |
-| **Flexible** | Plain closures work as handlers too. Middleware is just an `async fn(Request, Next)`. Route groups with their own middleware, custom extractors, custom fallback, or bring your own Tokio runtime with `App::serve`. |
-| **Testable** | `app.test()` gives an in-process client that runs the full pipeline with no sockets. |
-| **Open source** | MIT OR Apache-2.0. |
+| ⚡ **Fast by construction** | Thread-per-core runtimes with `SO_REUSEPORT`, zero-allocation routing, and build-time work instead of per-request work. It beats axum and actix-web on its own [benchmark suite](#benchmarks). |
+| 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
+| 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
+| 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
+| 🧩 **Pay for what you use** | Optional features are Cargo features built on public extension points. Unused features cost nothing at runtime. |
 
-## A real-ish API
+## Features at a glance
+
+| Area | What you get |
+|---|---|
+| Routing | `#[get]`/`#[post]`/... macros or builder methods, typed path params, nested groups, per-route metadata, 404/405 handling |
+| Extractors | `Path`, `Query`, `Json`, `Form`, `Bytes`, `State`, `Dep`, `Valid`, `Multipart`, `BodyStream`, `CookieJar`, `Session`, `CurrentUser`, `Jwt`, `BearerToken`, `ConnInfo`, ... |
+| API docs | OpenAPI 3.1 generated from signatures and doc comments; Swagger UI, Scalar and Redoc; security schemes from auth policies; export with `zapline openapi` |
+| Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` derives, returning `422` with `[{field, code, message}]` |
+| App structure | `Dep<T>` DI with trait objects and async factories, `Config::load()` (TOML layers + env + `.env` + profiles), `on_startup`/`on_shutdown`, plugins |
+| Background work | `BackgroundTasks` after the response, `App::schedule(Schedule::every(..))`, long-running workers with shutdown tokens |
+| Security | Bearer, Basic and API-key extractors; JWT (HS/RS/ES); `Authenticate` + `CurrentUser`; `.require_roles/.require_scopes` guards; cookies; sessions; CSRF |
+| Middleware | CORS, compression (br/zstd/gzip), rate limiting (per IP/key/route), request IDs, security headers, timeouts, catch-panic, load shedding, path normalization |
+| Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed), multipart uploads |
+| Observability | `tracing` spans per request, Prometheus `/metrics` with route labels, `/health/live` and `/health/ready` with checks |
+| Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
+| Tooling | `zapline new` (minimal, api and full templates), `generate`, `dev` (auto-restart), `routes`, `openapi`, `doctor`, `bench` |
+
+## Getting started
+
+```sh
+cargo install --path crates/zapline-cli      # provides `zapline` and `cargo zapline`
+zapline new my-api                           # --template minimal | api | full
+cd my-api && zapline dev                     # rebuilds and restarts on change
+```
+
+Or add it to an existing project:
+
+```toml
+[dependencies]
+zapline = "0.1"                                  # default features: macros, json, query, form, openapi, validate, config, tracing
+serde = { version = "1", features = ["derive"] }
+schemars = "1"                                   # for #[derive(JsonSchema)]
+validator = { version = "0.21", features = ["derive"] }
+```
+
+Enable more with features such as `ws`, `fs`, `multipart`, `compression`, `jwt`, `cookies`, `tls` and `http2`, or turn on everything with `full`.
+
+## A tour
 
 ```rust
-use std::sync::{Arc, RwLock};
-use serde::{Deserialize, Serialize};
-use zapline::middleware::{Cors, Logger};
+use std::sync::Arc;
+use std::time::Duration;
+use zapline::auth::{Authenticate, Claims, CurrentUser, JwtConfig};
+use zapline::health::Health;
+use zapline::metrics::Metrics;
+use zapline::middleware::{Cors, RateLimit, SecurityHeaders, SetRequestId};
 use zapline::prelude::*;
+use zapline::tasks::Schedule;
 
-#[derive(Clone, Serialize)]
-struct Todo { id: u64, title: String, done: bool }
-
-#[derive(Deserialize)]
-struct NewTodo { title: String }
-
-#[derive(Clone, Default)]
-struct Db(Arc<RwLock<Vec<Todo>>>);
-
-#[get("/todos/{id}")]
-async fn get_todo(State(db): State<Db>, Path(id): Path<u64>) -> Option<Json<Todo>> {
-    db.0.read().unwrap().iter().find(|t| t.id == id).cloned().map(Json)   // None -> 404
+trait UserRepo: Send + Sync {
+    fn name(&self, id: u64) -> Option<String>;
 }
 
-#[post("/todos")]
-async fn create(State(db): State<Db>, Json(new): Json<NewTodo>) -> Result<(StatusCode, Json<Todo>)> {
-    if new.title.is_empty() {
-        return Err(Error::unprocessable("title must not be empty"));       // -> 422 JSON error
-    }
-    let mut db = db.0.write().unwrap();
-    let todo = Todo { id: db.len() as u64 + 1, title: new.title, done: false };
-    db.push(todo.clone());
-    Ok((StatusCode::CREATED, Json(todo)))
+/// Look up a user by id.
+#[get("/users/{id}", tag = "users")]
+async fn get_user(repo: Dep<dyn UserRepo>, Path(id): Path<u64>) -> Result<String> {
+    repo.name(id).ok_or_else(|| Error::not_found().with_code("user_not_found"))
 }
 
-async fn auth(req: Request, next: Next) -> Response {
-    match req.headers().get("authorization") {
-        Some(_) => next.run(req).await,
-        None => Error::unauthorized().into_response(),
-    }
+#[get("/me")]
+async fn me(CurrentUser(claims): CurrentUser<Claims>) -> String {
+    claims.sub
 }
 
-fn main() -> std::io::Result<()> {
-    let api = Routes::new().mount((get_todo, create)).wrap(auth);   // group middleware
+fn app(repo: Arc<dyn UserRepo>, jwt_secret: &str) -> App {
+    let api = Routes::new()
+        .mount((get_user, me))
+        .delete("/users/{id}", || async { StatusCode::NO_CONTENT })
+        .require_roles(["admin"])                             // guard: fails closed
+        .wrap(Authenticate::jwt());                           // JWT for the whole group
 
     App::new()
-        .state(Db::default())
-        .wrap(Logger)                                              // global middleware
+        .provide_dyn::<dyn UserRepo>(repo)                     // dependency injection
+        .jwt(JwtConfig::hs256(jwt_secret))
+        .wrap(SetRequestId::new())
+        .wrap(SecurityHeaders::default())
         .wrap(Cors::permissive())
-        .get("/health", || async { "ok" })
+        .wrap(RateLimit::per_ip(100, Duration::from_secs(60)))
         .nest("/api", api)
-        .run("0.0.0.0:8080")
+        .schedule(Schedule::every(Duration::from_secs(300)), |_res| async { /* cleanup */ })
+        .plugin(Health::new())                                 // /health/live, /health/ready
+        .plugin(Metrics::new())                                // /metrics
+        .openapi(OpenApi::new("Tour", "1.0.0").bearer_auth("bearerAuth"))
 }
 ```
 
-The full version is in [`examples/rest_api.rs`](examples/rest_api.rs).
+Testing it needs no sockets:
 
-## Guide
-
-### Handlers
-Any `async fn` (or closure returning a future) with up to 12 arguments. Every argument except the last must be a `FromRequestParts` extractor. The last one may consume the body.
-
-### Extractors
-
-| Extractor | What it gives you |
-|---|---|
-| `Path<T>` | Route params: `Path<u64>`, `Path<(String, u32)>`, or a `Deserialize` struct. Percent-decoded. |
-| `Query<T>` | Query string via serde |
-| `Json<T>` | JSON body (checks `Content-Type`, enforces the body limit) |
-| `Form<T>` | URL-encoded form body |
-| `Bytes`, `String` | Raw body |
-| `State<T>` | App state registered with `.state(value)`. Register as many types as you like. |
-| `Extension<T>` | A value inserted by middleware |
-| `Method`, `Uri`, `HeaderMap`, `Request` | Request metadata or the whole request |
-| `Option<T>` / `Result<T, Error>` | Make any extractor optional, or handle its error yourself |
-
-To write your own, implement `FromRequestParts`:
-
-```rust
-struct ApiKey(String);
-
-impl zapline::extract::FromRequestParts for ApiKey {
-    async fn from_request_parts(req: &mut Request) -> Result<Self> {
-        req.headers().get("x-api-key")
-            .and_then(|v| v.to_str().ok())
-            .map(|v| ApiKey(v.to_owned()))
-            .ok_or_else(Error::unauthorized)
-    }
-}
-```
-
-### Responses
-Return anything that implements `IntoResponse`: `&str`, `String`, `Bytes`, `Json<T>`, `Html<T>`, `Redirect`, `StatusCode`, `Option<T>` (where `None` means 404), `Result<T, E>`, `(StatusCode, T)`, `([(header, value); N], T)`, or a raw `Response`.
-
-### Errors
-`zapline::Result<T>` uses `zapline::Error`. Any `std::error::Error` converts with `?` into a `500`. The details are logged and **not** sent to the client. For client errors, use the constructors: `Error::bad_request(msg)`, `not_found()`, `unauthorized()`, `conflict(msg)`, `unprocessable(msg)`, or `Error::new(status, msg)`. Errors are rendered as `{"error": "..."}`.
-
-### Route macros
-`#[get]`, `#[post]`, `#[put]`, `#[patch]`, `#[delete]`, `#[head]`, `#[options]`, and `#[route("/p", method = "GET", method = "POST")]`. The annotated function becomes a zero-sized value you pass to `.mount(...)`. Pass a tuple to mount several at once. If you'd rather skip the macros, `.get("/path", handler)` works with plain functions.
-
-### Middleware
-- **Global:** `App::wrap`. Runs before routing, for every request including 404s.
-- **Group:** `Routes::wrap`. Runs after routing, only for that group.
-- **Built-in:** `Logger`, `Cors`, `Timeout`, `DefaultHeaders`.
-
-### Testing
 ```rust
 #[tokio::test]
-async fn creates_todo() {
-    let client = app().test();
-    let res = client.post("/api/todos").json(&serde_json::json!({"title": "x"})).send().await;
-    assert_eq!(res.status(), 201);
+async fn unknown_user_is_404() {
+    let client = app(Arc::new(MemRepo::default()), "secret").test();
+    let token = JwtConfig::hs256("secret").encode(&Claims::new("ada")).unwrap();
+    let res = client.get("/api/users/42").bearer(&token).send().await;
+    assert_eq!(res.status(), 404);
 }
 ```
 
-### Server
-`App::run(addr)` blocks and serves on N threads (CPU count by default, or `.workers(n)`). Each thread has its own single-threaded Tokio runtime and its own `SO_REUSEPORT` listener on Linux and FreeBSD. On other platforms it uses a multi-threaded runtime. To use your own runtime, call `App::serve(listener).await` instead. HTTP/1.1 keep-alive and pipelining are on. A 30 s header-read timeout (slowloris protection) is on by default. You can tune or disable it through `ServerConfig`.
+## Documentation
+
+- **The guide** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
+- **API reference**: `cargo doc -p zapline --all-features --open`
+- **Examples** in [`examples/examples`](examples/examples): `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
+- [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the internals and the plugin extension points.
 
 ## Benchmarks
 
-The same three endpoints are implemented identically in zapline, axum 0.8, and actix-web 4 (all using mimalloc, release + fat LTO). See [`bench/`](bench/).
+The same three endpoints are implemented identically in zapline, axum 0.8, and actix-web 4 (all with mimalloc, release + fat LTO). See [`bench/`](bench/).
 
 <!-- BENCH:START -->
 | test | zapline | axum | actix-web |
 |---|---:|---:|---:|
-| plaintext | 277311 req/s (741.13us) | 165496 req/s (1.50ms) | 244669 req/s (0.93ms) |
-| json | 242054 req/s (0.96ms) | 175400 req/s (1.43ms) | 225455 req/s (1.03ms) |
-| path-param | 229457 req/s (1.04ms) | 152483 req/s (1.67ms) | 192076 req/s (1.26ms) |
-| plaintext-pipelined-16 | 1672525 req/s (1.42ms) | 92298 req/s (24.46ms) | 1215920 req/s (1.91ms) |
+| plaintext | 277,311 req/s (741.13us) | 165,496 req/s (1.50ms) | 244,669 req/s (0.93ms) |
+| json | 242,054 req/s (0.96ms) | 175,400 req/s (1.43ms) | 225,455 req/s (1.03ms) |
+| path-param | 229,457 req/s (1.04ms) | 152,483 req/s (1.67ms) | 192,076 req/s (1.26ms) |
+| plaintext-pipelined-16 | 1,672,525 req/s (1.42ms) | 92,298 req/s (24.46ms) | 1,215,920 req/s (1.91ms) |
 
 _2 server workers on CPUs 0,1; wrk 2 threads / 256 connections on CPUs 2,3; best of 3 × 10s; 4 CPUs total, Linux 6.18.44-fc-v139._
 <!-- BENCH:END -->
 
-Reproduce with `./bench/run.sh` (needs `wrk`). Please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share one machine are useful for *relative* comparison only. They aren't comparable to TechEmpower's dedicated hardware.
+Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
 
-### Where the performance comes from
-1. **Thread-per-core + `SO_REUSEPORT`.** The kernel load-balances connections across per-core listeners. Connections never migrate, and there's no work-stealing scheduler on the hot path.
-2. **Core-local refcounts.** Each worker gets its own `Arc` handles to shared app data, so per-request clones don't bounce cache lines between cores.
-3. **Zero-alloc routing.** A radix tree (`matchit`), then a fixed-field method table. Route params are stored as byte ranges into the request path, inline for up to 4 params.
-4. **One dynamic dispatch, one allocation** per routed request (the handler future). 404/405 responses allocate no future.
-5. **Pipelining done right.** Responses to pipelined requests are flushed together (`pipeline_flush`).
-6. **Pay for what you use.** No middleware means no middleware machinery runs. Extractors you don't declare do no work.
+## Project status
 
-## Roadmap
-Contributions are welcome. These are good first big items:
-- [ ] HTTP/2 and TLS (rustls) behind features
-- [ ] Graceful shutdown
-- [ ] WebSockets and SSE helpers
-- [ ] Static file serving
-- [ ] Compression middleware
-- [ ] `tracing` integration and an OpenAPI generator from route macros
+zapline is **0.1, pre-release**. The API may change before 1.0. Planned next:
+
+- [ ] WebSockets over HTTP/2 (RFC 8441), WebTransport
+- [ ] Pluggable distributed stores for rate limiting and sessions (Redis)
+- [ ] Full cron expressions for scheduled jobs
+- [ ] OpenTelemetry OTLP exporter
 - [ ] TechEmpower Framework Benchmarks submission (with DB tests)
+- [ ] Database integration guides (sqlx, SeaORM, Diesel)
+
+## Contributing
+
+Contributions are very welcome. Run `./scripts/check.sh` before opening a PR; it runs fmt, clippy, the test suite, the feature matrix, the examples and the docs. Performance-sensitive changes should include before/after `./bench/run.sh` numbers. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
+
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option.
