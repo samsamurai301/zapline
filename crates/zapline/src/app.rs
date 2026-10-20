@@ -291,8 +291,13 @@ impl App {
         }
     }
 
-    /// Bind `addr` and serve on a pool of per-core runtimes until shutdown.
-    /// This blocks the calling thread; no `#[tokio::main]` needed.
+    /// Bind `addr` and serve on a pool of per-core runtimes. This blocks the
+    /// calling thread; no `#[tokio::main]` needed.
+    ///
+    /// Serves until SIGINT/SIGTERM (Ctrl-C on Windows), then stops accepting,
+    /// drains in-flight requests (up to [`ServerConfig::shutdown_timeout`]),
+    /// and runs the shutdown hooks. A second signal forces an immediate stop.
+    /// Use [`App::run_with_shutdown`] for a custom trigger.
     ///
     /// Startup hooks run on a small "system" runtime that lives as long as
     /// the server, so resources they create (pools, background jobs) keep
@@ -312,6 +317,10 @@ impl App {
     }
 
     /// Serve on an existing listener from inside your own Tokio runtime.
+    ///
+    /// Like [`run`](Self::run), stops gracefully on SIGINT/SIGTERM. Use
+    /// [`App::serve_with_shutdown`] for a custom trigger, or pass
+    /// `std::future::pending()` to it to opt out of signal handling.
     pub async fn serve(self, listener: tokio::net::TcpListener) -> std::io::Result<()> {
         let mut app = self;
         let options = crate::server::take_options(&mut app);
