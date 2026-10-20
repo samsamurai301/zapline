@@ -902,3 +902,33 @@ async fn guard_policies_marks_routes_verified() {
         403
     );
 }
+
+#[tokio::test]
+async fn every_401_carries_a_challenge() {
+    // No Authenticate at all: the fail-closed policy layer and CurrentUser
+    // still answer with a challenge (RFC 9110 requires one on 401).
+    let c = App::new()
+        .get("/policy", || async { "x" })
+        .require_auth()
+        .get("/me", whoami)
+        .test();
+    assert_eq!(
+        c.get("/policy").send().await.header("www-authenticate"),
+        Some("Bearer")
+    );
+    assert_eq!(
+        c.get("/me").send().await.header("www-authenticate"),
+        Some("Bearer")
+    );
+
+    // A global Authenticate's challenge is reused by the guard.
+    let c = App::new()
+        .wrap(Authenticate::new(HeaderAuth::new()))
+        .wrap_route(Guard::<User>::policies())
+        .get("/admin", || async { "admin" })
+        .require_auth()
+        .test();
+    let r = c.get("/admin").send().await;
+    assert_eq!(r.status(), 401);
+    assert_eq!(r.header("www-authenticate"), Some("X-User"));
+}

@@ -241,7 +241,9 @@ impl App {
     }
 
     /// Customize how every error response (extractor rejections, handler
-    /// errors, 404/405) is rendered.
+    /// errors, 404/405) is rendered. Headers of the original error response
+    /// (e.g. `WWW-Authenticate`, `Allow`, `Retry-After`) are kept unless the
+    /// new response sets them.
     pub fn error_handler<F>(self, f: F) -> Self
     where
         F: Fn(&ErrorReport) -> Response + Send + Sync + 'static,
@@ -251,10 +253,25 @@ impl App {
             let f = f.clone();
             async move {
                 let res = next.run(req).await;
-                match res.extensions().get::<ErrorReport>() {
-                    Some(report) => f(report),
-                    None => res,
+                let Some(report) = res.extensions().get::<ErrorReport>() else {
+                    return res;
+                };
+                let mut new = f(report);
+                // Keep protocol headers of the original error (WWW-Authenticate,
+                // Allow, Retry-After, Set-Cookie, ...) unless the handler set them.
+                let new_headers = new.headers_mut();
+                for name in res.headers().keys() {
+                    if name == http::header::CONTENT_TYPE
+                        || name == http::header::CONTENT_LENGTH
+                        || new_headers.contains_key(name)
+                    {
+                        continue;
+                    }
+                    for v in res.headers().get_all(name) {
+                        new_headers.append(name.clone(), v.clone());
+                    }
                 }
+                new
             }
         })
     }

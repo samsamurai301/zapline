@@ -261,7 +261,7 @@ impl Middleware for PolicyEnforcer {
         }
         let authenticated = ext.get::<UserAuthenticated>().is_some();
         let err = if !authenticated {
-            missing_credentials(None)
+            missing_credentials(Some(super::challenge_for(&req)))
         } else if !policy.has_permissions() {
             return next.run(req);
         } else {
@@ -536,6 +536,11 @@ impl<U: Clone + Send + Sync + 'static> Middleware for Guard<U> {
                 }
                 next.run(req)
             }
+            // Checks only fail with 401 when there is no user: answer with the
+            // challenge of the `Authenticate` middleware that ran, if any.
+            Err(e) if e.status() == http::StatusCode::UNAUTHORIZED => Box::pin(ready(
+                missing_credentials(Some(super::challenge_for(&req))).into_response(),
+            )),
             Err(e) => Box::pin(ready(e.into_response())),
         }
     }

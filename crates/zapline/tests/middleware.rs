@@ -716,7 +716,7 @@ async fn cors_preflight_details() {
 #[tokio::test]
 async fn cors_credentials_echo_instead_of_wildcards() {
     let c = cors_app(
-        Cors::permissive()
+        Cors::origins(["https://a.com", "https://b.com"])
             .allow_credentials()
             .expose_headers("x-request-id"),
     );
@@ -880,4 +880,24 @@ async fn compression_composes_with_the_stack() {
     assert!(r.header("x-request-id").is_some());
     assert_eq!(r.header("x-frame-options"), Some("DENY"));
     assert!(r.bytes().len() < 200);
+}
+
+#[test]
+#[should_panic(expected = "allow_credentials() with any origin")]
+fn cors_permissive_with_credentials_is_a_configuration_error() {
+    let _ = Cors::permissive().allow_credentials();
+}
+
+#[tokio::test]
+async fn cors_credentials_never_reflect_unlisted_or_null_origins() {
+    let c = cors_app(Cors::origins(["https://a.com"]).allow_credentials());
+    for origin in ["https://evil.example", "null"] {
+        let r = c.get("/x").header("origin", origin).send().await;
+        assert_eq!(r.header("access-control-allow-origin"), None, "{origin}");
+        assert_eq!(
+            r.header("access-control-allow-credentials"),
+            None,
+            "{origin}"
+        );
+    }
 }

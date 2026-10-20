@@ -380,13 +380,13 @@ fn app() -> App {
 | `Cors::origins([..])` | Only the listed origins. Panics on an invalid value. |
 | `.allow_origin_fn(\|origin\| bool)` | Also allow origins for which the function returns `true` (for example preview deployments) |
 | `.allow_methods("GET, POST")`, `.allow_headers("content-type, authorization")` | The preflight answers (`*` allows any) |
-| `.allow_credentials()` | Allow cookies and `Authorization` headers. With any-origin configurations the request origin is echoed instead of `*`, as the spec requires. |
+| `.allow_credentials()` | Allow cookies and `Authorization` headers; the matched origin is echoed instead of `*`, as the spec requires. Panics on `Cors::permissive()` (any origin): set `Cors::origins([..])` or `.allow_origin_fn(..)` first. |
 | `.expose_headers("..")` | Response headers that scripts may read (`x-request-id`, `ratelimit-remaining`, ...) |
 | `.max_age(duration)` | How long browsers cache a preflight (default 24 hours) |
 
 Things to know:
 
-- **Never combine `Cors::permissive()` with `.allow_credentials()`.** The origin is echoed back, so *any* website can then call your API with your users' cookies. Credentials go with an explicit `Cors::origins([..])` list.
+- **Credentials require an origin allow-list.** `Cors::permissive().allow_credentials()` panics at startup, because echoing any origin with credentials would let *any* website call your API with your users' cookies. Use an explicit `Cors::origins([..])` list.
 - CORS is enforced by browsers. The server still runs the request; only the response headers decide whether a script may read the result. It is not authentication.
 - Responses that depend on the `Origin` get `Vary: origin`.
 - Put `Cors` **outside** rate limiting, concurrency limits and authentication, so a `429`, `503` or `401` still carries CORS headers. Otherwise the browser reports an opaque CORS error instead of your real error.

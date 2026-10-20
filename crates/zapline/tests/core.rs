@@ -311,3 +311,30 @@ async fn error_keeps_repeated_headers() {
     assert_eq!(values, ["Bearer", "Basic realm=\"x\""]);
     assert_eq!(r.header("retry-after"), Some("1"));
 }
+
+#[tokio::test]
+async fn error_handler_keeps_protocol_headers() {
+    let c = App::new()
+        .get("/x", || async { "x" })
+        .get("/auth", || async {
+            Err::<(), _>(
+                Error::unauthorized()
+                    .with_header(
+                        http::header::WWW_AUTHENTICATE,
+                        HeaderValue::from_static("Basic realm=\"x\""),
+                    )
+                    .with_header(http::header::SET_COOKIE, HeaderValue::from_static("a=1"))
+                    .with_header(http::header::SET_COOKIE, HeaderValue::from_static("b=2")),
+            )
+        })
+        .error_handler(|e: &ErrorReport| (e.status, "custom").into_response())
+        .test();
+    let r = c.get("/auth").send().await;
+    assert_eq!(r.text(), "custom");
+    assert_eq!(r.header("content-type"), Some("text/plain; charset=utf-8"));
+    assert_eq!(r.header("www-authenticate"), Some("Basic realm=\"x\""));
+    assert_eq!(r.headers().get_all("set-cookie").iter().count(), 2);
+    let r = c.post("/x").send().await;
+    assert_eq!(r.status(), 405);
+    assert_eq!(r.header("allow"), Some("GET, HEAD"));
+}

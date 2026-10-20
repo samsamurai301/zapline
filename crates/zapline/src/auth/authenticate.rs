@@ -177,6 +177,9 @@ impl<A: Authenticator> Authenticate<A> {
 
     /// Run the authenticator for `req`: the user, or the rejection.
     async fn run(&self, req: &mut Request) -> Result<()> {
+        if let Some(c) = &self.challenge {
+            req.extensions_mut().insert(super::AuthChallenge(c.clone()));
+        }
         let policy = req.route().map(RoutePolicy::of).unwrap_or_default();
         let user = match self.authenticator.authenticate(req).await {
             Ok(user) => user,
@@ -288,6 +291,6 @@ impl<U: Clone + Send + Sync + 'static> FromRequestParts for CurrentUser<U> {
         req.extensions()
             .get::<CurrentUser<U>>()
             .cloned()
-            .ok_or_else(|| missing_credentials(None))
+            .ok_or_else(|| missing_credentials(Some(super::challenge_for(req))))
     }
 }

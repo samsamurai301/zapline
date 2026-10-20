@@ -487,3 +487,62 @@ async fn real_socket_uses_peer_address() {
     assert!(out.contains("HTTP/1.1 429 Too Many Requests"), "{out}");
     assert!(out.contains("retry-after: "), "{out}");
 }
+
+#[tokio::test]
+async fn forwarded_hops_are_decoded_lazily_and_canonicalized() {
+    let proxies = Arc::new(TrustedProxies::new(["10.0.0.0/8"]));
+    let forwarded = Arc::new(TrustedProxies::new(["10.0.0.0/8"]).header(ClientIpHeader::Forwarded));
+    let c = App::new()
+        .get("/xff", move |req: Request| {
+            let p = proxies.clone();
+            async move { p.client_ip(&req).unwrap().to_string() }
+        })
+        .get("/fwd", move |req: Request| {
+            let p = forwarded.clone();
+            async move { p.client_ip(&req).unwrap().to_string() }
+        })
+        .test();
+
+    // Client-written invalid bytes on the left must not hide the hop the
+    // trusted proxy appended on the right.
+    let r = c
+        .get("/xff")
+        .remote_addr(addr("10.0.0.1:1"))
+        .header(
+            "x-forwarded-for",
+            HeaderValue::from_bytes(b"\xff, 6.6.6.6").unwrap(),
+        )
+        .send()
+        .await;
+    assert_eq!(r.text(), "6.6.6.6");
+
+    // Bracketed IPv4-mapped addresses are IPv4 clients, not one IPv6 /64.
+    let r = c
+        .get("/xff")
+        .remote_addr(addr("10.0.0.1:1"))
+        .header("x-forwarded-for", "[::ffff:1.2.3.4]:5555")
+        .send()
+        .await;
+    assert_eq!(r.text(), "1.2.3.4");
+    let r = c
+        .get("/fwd")
+        .remote_addr(addr("10.0.0.1:1"))
+        .header("forwarded", r#"for="[::ffff:5.6.7.8]""#)
+        .send()
+        .await;
+    assert_eq!(r.text(), "5.6.7.8");
+}
+
+#[tokio::test]
+async fn ipv4_mapped_clients_get_separate_buckets() {
+    let c = app(RateLimit::per_ip(1, Duration::from_secs(60)).trust_forwarded_for(["10.0.0.0/8"]));
+    let send = |client: &'static str| {
+        c.get("/")
+            .remote_addr(addr("10.0.0.1:1"))
+            .header("x-forwarded-for", format!("[::ffff:{client}]:443"))
+            .send()
+    };
+    assert_eq!(send("1.1.1.1").await.status(), 200);
+    assert_eq!(send("2.2.2.2").await.status(), 200);
+    assert_eq!(send("1.1.1.1").await.status(), 429);
+}

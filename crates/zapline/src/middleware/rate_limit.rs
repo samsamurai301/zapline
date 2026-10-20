@@ -405,13 +405,14 @@ impl TrustedProxies {
             .as_ref()
             .unwrap_or(&ClientIpHeader::XForwardedFor)
         {
+            // Walk raw bytes right to left and decode only the hops actually
+            // reached: client-written bytes on the left of a header line
+            // (e.g. invalid UTF-8) must not hide the hops our proxies added.
             ClientIpHeader::XForwardedFor => {
                 for value in headers.get_all("x-forwarded-for").iter().rev() {
-                    let Ok(value) = value.to_str() else {
-                        return Some(last);
-                    };
-                    for hop in value.rsplit(',') {
-                        match self.next_hop(parse_ip(hop), &mut last) {
+                    for hop in value.as_bytes().rsplit(|b| *b == b',') {
+                        let ip = std::str::from_utf8(hop).ok().and_then(parse_ip);
+                        match self.next_hop(ip, &mut last) {
                             Some(found) => return found,
                             None => continue,
                         }
@@ -420,11 +421,9 @@ impl TrustedProxies {
             }
             ClientIpHeader::Forwarded => {
                 for value in headers.get_all(http::header::FORWARDED).iter().rev() {
-                    let Ok(value) = value.to_str() else {
-                        return Some(last);
-                    };
-                    for element in value.rsplit(',') {
-                        match self.next_hop(forwarded_for(element), &mut last) {
+                    for element in value.as_bytes().rsplit(|b| *b == b',') {
+                        let ip = std::str::from_utf8(element).ok().and_then(forwarded_for);
+                        match self.next_hop(ip, &mut last) {
                             Some(found) => return found,
                             None => continue,
                         }
@@ -464,7 +463,12 @@ fn parse_ip(s: &str) -> Option<IpAddr> {
     let s = s.trim().trim_matches('"');
     if let Some(rest) = s.strip_prefix('[') {
         let end = rest.find(']')?;
-        return rest[..end].parse::<Ipv6Addr>().ok().map(IpAddr::V6);
+        // `[::ffff:1.2.3.4]` is how RFC 7239 writes IPv4 clients seen on
+        // dual-stack sockets: canonicalize it to the IPv4 address.
+        return rest[..end]
+            .parse::<Ipv6Addr>()
+            .ok()
+            .map(|v6| IpAddr::V6(v6).to_canonical());
     }
     s.parse::<IpAddr>()
         .ok()
@@ -825,8 +829,8 @@ impl RateLimit {
         1u8.hash(h);
         // Unknown peers (e.g. Unix sockets) share one bucket.
         if let Some(ip) = self.client_ip(req) {
-            match ip {
-                IpAddr::V6(_) => mask(ip, self.ipv6_prefix).hash(h),
+            match ip.to_canonical() {
+                ip @ IpAddr::V6(_) => mask(ip, self.ipv6_prefix).hash(h),
                 v4 => v4.hash(h),
             }
         }

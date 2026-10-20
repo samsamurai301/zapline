@@ -110,6 +110,19 @@ pub(crate) fn missing_credentials(challenge: Option<HeaderValue>) -> Error {
     }
 }
 
+/// Request marker: the challenge of the `Authenticate` middleware that ran,
+/// so later 401s (guards, policies, `CurrentUser`) can send the same one.
+#[derive(Clone, Debug)]
+pub(crate) struct AuthChallenge(pub(crate) HeaderValue);
+
+/// The `WWW-Authenticate` challenge for a 401 on `req`: the one set by
+/// `Authenticate`, else `Bearer` (a 401 must always carry a challenge).
+pub(crate) fn challenge_for(req: &crate::Request) -> HeaderValue {
+    req.extensions()
+        .get::<AuthChallenge>()
+        .map_or_else(|| HeaderValue::from_static("Bearer"), |c| c.0.clone())
+}
+
 /// `403 forbidden`.
 pub(crate) fn forbidden() -> Error {
     Error::forbidden().with_code(codes::FORBIDDEN)

@@ -192,10 +192,21 @@ impl Cors {
         self
     }
 
-    /// Allow cookies and auth headers. With any-origin configs the request
-    /// origin is echoed instead of `*`, and `*` method/header lists echo the
-    /// request, as the spec requires.
+    /// Allow cookies and auth headers. The matched request origin is echoed
+    /// and `*` method/header lists echo the request, as the spec requires.
+    ///
+    /// # Panics
+    /// When no origin restriction is configured yet (`Cors::permissive()`):
+    /// echoing *any* origin with credentials would let every website read
+    /// your users' authenticated responses. Configure [`Cors::origins`] or
+    /// [`allow_origin_fn`](Self::allow_origin_fn) first; an explicit
+    /// `allow_origin_fn(|_| true)` remains possible if you really mean it.
     pub fn allow_credentials(mut self) -> Self {
+        assert!(
+            !self.any_origin(),
+            "Cors::allow_credentials() with any origin would expose authenticated responses \
+             to every website; use Cors::origins([..]) or .allow_origin_fn(..) before it"
+        );
         self.credentials = true;
         self
     }
