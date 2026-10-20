@@ -1,69 +1,684 @@
-//! Thread-per-core HTTP/1.1 server.
+//! The HTTP server: thread-per-core runtimes, HTTP/1.1 and HTTP/2, TLS,
+//! graceful shutdown and connection limits.
 //!
-//! Each worker thread owns a single-threaded Tokio runtime and its own
-//! `SO_REUSEPORT` listener, so the kernel spreads connections across cores and
-//! a connection never migrates between threads (no work-stealing overhead, no
-//! cross-core cache traffic on the hot path).
+//! [`App::run`] is all most apps need. It serves until SIGINT or SIGTERM
+//! (Ctrl-C on Windows), then stops accepting, lets in-flight requests finish
+//! (for up to [`ServerConfig::shutdown_timeout`]), closes the remaining
+//! connections and runs the shutdown hooks. A second signal skips the wait.
+//!
+//! ```no_run
+//! use std::time::Duration;
+//! use zapline::prelude::*;
+//!
+//! fn main() -> std::io::Result<()> {
+//!     App::new()
+//!         .get("/", || async { "hi" })
+//!         .shutdown_timeout(Duration::from_secs(10))
+//!         .max_connections(10_000)
+//!         .run("0.0.0.0:8080")
+//! }
+//! ```
+//!
+//! By default ([`RuntimeMode::PerCore`]) each worker thread owns a
+//! single-threaded Tokio runtime and its own `SO_REUSEPORT` listener, so the
+//! kernel spreads connections across cores and a connection never migrates
+//! between threads (no work-stealing overhead, no cross-core cache traffic on
+//! the hot path).
 
+mod conn;
+mod shutdown;
+
+use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
+use std::net::{SocketAddr, ToSocketAddrs};
+#[cfg(unix)]
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use hyper::server::conn::http1;
-use hyper_util::rt::{TokioIo, TokioTimer};
 use socket2::{Domain, Protocol, Socket, Type};
 use tokio::net::TcpListener;
 
-use crate::app::{AppInner, ResponseFuture};
-use crate::body::ReqBody;
-use crate::request::ConnInfo;
+use crate::app::{App, AppInner, Prepared, Running};
+use crate::handler::BoxFuture;
 
-/// Server tuning knobs. The defaults are what the benchmarks use.
+#[cfg(feature = "tls")]
+pub(crate) use self::conn::TlsEntry;
+use self::conn::{Proto, Worker};
+use self::shutdown::{Signal, Trigger};
+
+/// Whether this platform load-balances `SO_REUSEPORT` listeners.
+const REUSEPORT_BALANCES: bool = cfg!(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "freebsd"
+));
+
+/// How worker threads and connections are scheduled.
+///
+/// ```no_run
+/// use zapline::prelude::*;
+/// use zapline::server::RuntimeMode;
+///
+/// # fn main() -> std::io::Result<()> {
+/// App::new()
+///     .get("/", || async { "hi" })
+///     .runtime(RuntimeMode::MultiThread)
+///     .run("0.0.0.0:8080")
+/// # }
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum RuntimeMode {
+    /// One single-threaded runtime and one `SO_REUSEPORT` listener per
+    /// worker; connections never move between threads. The fastest mode for
+    /// typical request/response work, and the default on Linux, Android and
+    /// FreeBSD. Elsewhere (no `SO_REUSEPORT` load balancing) TCP servers fall
+    /// back to [`MultiThread`](Self::MultiThread).
+    PerCore,
+    /// One listener on a shared work-stealing runtime with `workers` threads.
+    /// Better when load per connection is very uneven, or when handlers share
+    /// heavy I/O resources (connection pools, long-lived clients) that should
+    /// be driven from any thread.
+    MultiThread,
+}
+
+impl Default for RuntimeMode {
+    fn default() -> Self {
+        if REUSEPORT_BALANCES {
+            RuntimeMode::PerCore
+        } else {
+            RuntimeMode::MultiThread
+        }
+    }
+}
+
+/// Server tuning knobs. The defaults are production-ready and are what the
+/// benchmarks use.
+///
+/// Set fields through [`App::server_config_mut`] or the matching `App`
+/// builder methods ([`App::workers`], [`App::runtime`], [`App::http2`],
+/// [`App::max_connections`], [`App::shutdown_timeout`], `App::tls`):
+///
+/// ```
+/// use std::time::Duration;
+/// use zapline::prelude::*;
+///
+/// let mut app = App::new().max_connections(5_000);
+/// let config = app.server_config_mut();
+/// config.keep_alive = false;
+/// config.max_header_size = Some(16 * 1024);
+/// config.header_read_timeout = Some(Duration::from_secs(10));
+/// ```
 #[derive(Clone, Debug)]
 #[non_exhaustive]
 pub struct ServerConfig {
-    /// Worker threads, each with its own runtime and `SO_REUSEPORT` listener.
-    /// Defaults to the number of available CPUs.
+    /// Worker threads. Defaults to the number of available CPUs.
     pub workers: Option<usize>,
-    /// Abort connections that do not send complete headers in time
-    /// (slowloris protection). `None` disables it.
+    /// How workers schedule connections (default: [`RuntimeMode::PerCore`]
+    /// where supported). Ignored by [`App::serve`], which uses your runtime.
+    pub runtime: RuntimeMode,
+    /// Abort connections that do not send complete request headers in time
+    /// (slowloris protection); also bounds HTTP/2 detection. `None` disables
+    /// it. Default: 30s.
     pub header_read_timeout: Option<Duration>,
-    /// TCP listen backlog.
+    /// TCP listen backlog. Default: 4096.
     pub backlog: i32,
-    /// Print the listening address on startup.
+    /// Print one startup line (address, workers, runtime, protocols) and a
+    /// line when shutdown starts. Default: `true`. [`App::serve`] never
+    /// prints the startup line.
     pub banner: bool,
+    /// HTTP/1.1 keep-alive. Default: `true`.
+    pub keep_alive: bool,
+    /// Batch responses to pipelined HTTP/1.1 requests into fewer writes, a
+    /// large win for pipelining clients. Trade-off (hyper 1.x): a malformed
+    /// or oversized request head then closes the connection without the
+    /// automatic `400`/`431` response. Default: `true`.
+    pub pipeline_flush: bool,
+    /// Maximum open connections per accept loop: per worker in
+    /// [`RuntimeMode::PerCore`], in total otherwise. At the limit the server
+    /// stops accepting until a connection closes (the kernel backlog queues
+    /// new ones). Default: unlimited.
+    pub max_connections: Option<usize>,
+    /// Maximum size in bytes of an HTTP/1.1 request head (request line and
+    /// headers); larger heads are rejected (see `pipeline_flush`). `None`
+    /// (default): bounded by `max_buf_size`.
+    pub max_header_size: Option<usize>,
+    /// Maximum number of HTTP/1.1 request headers. `None` (default): 100.
+    /// Setting it moves header parsing to the heap (about 5% slower).
+    pub max_headers: Option<usize>,
+    /// Maximum HTTP/1.1 read buffer per connection, at least 8192 bytes.
+    /// `None` (default): about 400 KiB.
+    pub max_buf_size: Option<usize>,
+    /// Serve HTTP/2 next to HTTP/1.1: h2c with prior knowledge on plain
+    /// connections and ALPN `h2` over TLS. `false` means HTTP/1.1 only.
+    /// Default: `true` when the `http2` feature is enabled.
+    pub http2: bool,
+    /// Maximum concurrent streams per HTTP/2 connection. `None`: 200.
+    pub http2_max_concurrent_streams: Option<u32>,
+    /// Send HTTP/2 keep-alive pings at this interval (and close connections
+    /// that stop answering). Default: disabled.
+    pub http2_keep_alive_interval: Option<Duration>,
+    /// On shutdown, how long to wait for in-flight requests before closing
+    /// the remaining connections. Default: 30s.
+    pub shutdown_timeout: Duration,
+    /// Abort TLS handshakes that take longer than this. Default: 10s.
+    pub tls_handshake_timeout: Duration,
+    /// Terminate TLS on every connection (see [`crate::tls`]).
+    #[cfg(feature = "tls")]
+    pub tls: Option<crate::tls::TlsConfig>,
 }
 
 impl Default for ServerConfig {
     fn default() -> Self {
         ServerConfig {
             workers: None,
+            runtime: RuntimeMode::default(),
             header_read_timeout: Some(Duration::from_secs(30)),
             backlog: 4096,
             banner: true,
+            keep_alive: true,
+            pipeline_flush: true,
+            max_connections: None,
+            max_header_size: None,
+            max_headers: None,
+            max_buf_size: None,
+            http2: cfg!(feature = "http2"),
+            http2_max_concurrent_streams: None,
+            http2_keep_alive_interval: None,
+            shutdown_timeout: Duration::from_secs(30),
+            tls_handshake_timeout: Duration::from_secs(10),
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 }
 
-#[derive(Clone)]
-struct Service {
-    app: Arc<AppInner>,
-    conn: ConnInfo,
-}
+impl ServerConfig {
+    fn is_tls(&self) -> bool {
+        #[cfg(feature = "tls")]
+        return self.tls.is_some();
+        #[cfg(not(feature = "tls"))]
+        false
+    }
 
-impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
-    type Response = crate::Response;
-    type Error = std::convert::Infallible;
-    type Future = ResponseFuture;
+    fn worker_count(&self) -> usize {
+        self.workers
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()))
+            .max(1)
+    }
 
-    #[inline]
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
-        self.app.handle(req.map(ReqBody::Incoming), self.conn)
+    fn protocols(&self) -> &'static str {
+        match (self.http2, self.is_tls()) {
+            (true, true) => "HTTP/1.1 + HTTP/2, TLS",
+            (true, false) => "HTTP/1.1 + h2c",
+            (false, true) => "HTTP/1.1, TLS",
+            (false, false) => "HTTP/1.1",
+        }
     }
 }
 
-fn bind(addr: SocketAddr, backlog: i32, reuse_port: bool) -> io::Result<std::net::TcpListener> {
+/// Reject configurations that would fail (or panic) later.
+pub(crate) fn check_config(config: &ServerConfig) -> io::Result<()> {
+    let invalid = |msg: &str| Err(io::Error::new(io::ErrorKind::InvalidInput, msg.to_owned()));
+    if config.max_buf_size.is_some_and(|n| n < 8192) {
+        return invalid("ServerConfig::max_buf_size must be at least 8192 bytes");
+    }
+    if config.max_connections == Some(0) {
+        return invalid("ServerConfig::max_connections must be at least 1");
+    }
+    if config.http2 && !cfg!(feature = "http2") {
+        return invalid("HTTP/2 requires zapline's `http2` feature");
+    }
+    if config.http2_max_concurrent_streams == Some(0) {
+        return invalid("ServerConfig::http2_max_concurrent_streams must be at least 1");
+    }
+    Ok(())
+}
+
+/// Resolves on SIGINT or SIGTERM (Ctrl-C on non-unix platforms). This is
+/// what [`App::run`] and [`App::serve`] stop on; combine it with your own
+/// signals for [`App::run_with_shutdown`].
+///
+/// If the signal handlers cannot be installed, it never resolves.
+///
+/// ```no_run
+/// # use zapline::prelude::*;
+/// # async fn demo(listener: tokio::net::TcpListener) -> std::io::Result<()> {
+/// let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+/// let stop = async move {
+///     tokio::select! {
+///         _ = zapline::server::shutdown_signal() => {}
+///         _ = rx => {}
+///     }
+/// };
+/// App::new().serve_with_shutdown(listener, stop).await
+/// # }
+/// ```
+pub async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        match (
+            signal(SignalKind::interrupt()),
+            signal(SignalKind::terminate()),
+        ) {
+            (Ok(mut int), Ok(mut term)) => {
+                tokio::select! {
+                    _ = int.recv() => {}
+                    _ = term.recv() => {}
+                }
+            }
+            _ => std::future::pending().await,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if tokio::signal::ctrl_c().await.is_err() {
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+// ---- App builder methods -------------------------------------------------------
+
+impl App {
+    /// Choose how workers schedule connections (see [`RuntimeMode`]).
+    pub fn runtime(mut self, mode: RuntimeMode) -> Self {
+        self.config.runtime = mode;
+        self
+    }
+
+    /// Serve HTTP/2 (h2c with prior knowledge, and ALPN `h2` over TLS) next
+    /// to HTTP/1.1. On by default with the `http2` feature; enabling it
+    /// without that feature makes `run`/`serve` fail with `InvalidInput`.
+    pub fn http2(mut self, enabled: bool) -> Self {
+        self.config.http2 = enabled;
+        self
+    }
+
+    /// How long shutdown waits for in-flight requests before closing the
+    /// remaining connections (default 30s).
+    pub fn shutdown_timeout(mut self, timeout: Duration) -> Self {
+        self.config.shutdown_timeout = timeout;
+        self
+    }
+
+    /// Cap open connections per worker (in total for
+    /// [`RuntimeMode::MultiThread`] and [`App::serve`]). At the limit the
+    /// server stops accepting until a connection closes.
+    pub fn max_connections(mut self, n: usize) -> Self {
+        self.config.max_connections = Some(n.max(1));
+        self
+    }
+
+    /// Like [`App::run`], but shuts down gracefully when `signal` resolves
+    /// instead of on SIGINT/SIGTERM.
+    ///
+    /// ```no_run
+    /// use std::time::Duration;
+    /// use zapline::prelude::*;
+    ///
+    /// fn main() -> std::io::Result<()> {
+    ///     let stop = tokio::time::sleep(Duration::from_secs(60)); // or a channel, a signal...
+    ///     App::new()
+    ///         .get("/", || async { "hi" })
+    ///         .run_with_shutdown("0.0.0.0:8080", stop)
+    /// }
+    /// ```
+    pub fn run_with_shutdown<F>(self, addr: impl ToSocketAddrs, signal: F) -> io::Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut app = self;
+        stash(&mut app, |o| o.shutdown = Some(Box::pin(signal)));
+        app.run(addr)
+    }
+
+    /// Like [`App::serve`], but shuts down gracefully when `signal` resolves
+    /// instead of on SIGINT/SIGTERM. Returns once every connection is closed
+    /// and the shutdown hooks have run.
+    ///
+    /// ```no_run
+    /// # use zapline::prelude::*;
+    /// # async fn demo() -> std::io::Result<()> {
+    /// let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    /// let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+    /// let server = tokio::spawn(
+    ///     App::new()
+    ///         .get("/", || async { "hi" })
+    ///         .serve_with_shutdown(listener, async { let _ = stopped.await; }),
+    /// );
+    /// // ...
+    /// let _ = stop.send(());
+    /// server.await.unwrap()?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn serve_with_shutdown<F>(self, listener: TcpListener, signal: F) -> io::Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut app = self;
+        stash(&mut app, |o| o.shutdown = Some(Box::pin(signal)));
+        app.serve(listener).await
+    }
+
+    /// Serve on a Unix domain socket (e.g. behind nginx) until SIGINT or
+    /// SIGTERM. A stale socket file from an earlier run is replaced; the file
+    /// is removed on shutdown. [`ConnInfo::remote_addr`] is `None`.
+    ///
+    /// [`ConnInfo::remote_addr`]: crate::ConnInfo::remote_addr
+    #[cfg(unix)]
+    pub fn run_unix(self, path: impl AsRef<Path>) -> io::Result<()> {
+        let mut app = self;
+        let path = path.as_ref().to_path_buf();
+        stash(&mut app, |o| o.unix = Some((path, serve_unix)));
+        app.run(SocketAddr::from(([127, 0, 0, 1], 0)))
+    }
+
+    /// [`App::run_unix`] with a custom shutdown signal.
+    #[cfg(unix)]
+    pub fn run_unix_with_shutdown<F>(self, path: impl AsRef<Path>, signal: F) -> io::Result<()>
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let mut app = self;
+        stash(&mut app, |o| o.shutdown = Some(Box::pin(signal)));
+        app.run_unix(path)
+    }
+}
+
+// ---- plumbing between the App builders and App::run / App::serve ------------------
+
+/// Options set by the `App::*_with_shutdown` / `App::run_unix` builders,
+/// carried in the app's extensions so `App::run` stays the one entry point.
+#[derive(Clone, Default)]
+struct RunOptions(Arc<Mutex<Options>>);
+
+#[derive(Default)]
+pub(crate) struct Options {
+    /// `None`: stop on SIGINT/SIGTERM.
+    pub(crate) shutdown: Option<BoxFuture<()>>,
+    /// Set by `App::run_unix`: listen here instead of on the TCP address.
+    #[cfg(unix)]
+    unix: Option<(PathBuf, ServeUnix)>,
+}
+
+/// Serves a Unix listener. Only `App::run_unix` creates one, so apps that
+/// never call it do not contain the Unix-socket connection code (see
+/// `server::conn` on why that matters for the TCP hot path).
+#[cfg(unix)]
+type ServeUnix = fn(std::os::unix::net::UnixListener, Worker) -> BoxFuture<io::Result<()>>;
+
+#[cfg(unix)]
+fn serve_unix(
+    listener: std::os::unix::net::UnixListener,
+    worker: Worker,
+) -> BoxFuture<io::Result<()>> {
+    Box::pin(
+        async move { conn::serve(tokio::net::UnixListener::from_std(listener)?, worker).await },
+    )
+}
+
+fn stash(app: &mut App, f: impl FnOnce(&mut Options)) {
+    let opts = app.extensions_mut().get_or_insert_default::<RunOptions>();
+    f(&mut opts.0.lock().unwrap_or_else(PoisonError::into_inner));
+}
+
+/// Remove the run options stashed by the builders (defaults if none).
+pub(crate) fn take_options(app: &mut App) -> Options {
+    app.extensions_mut()
+        .remove::<RunOptions>()
+        .map(|o| std::mem::take(&mut *o.0.lock().unwrap_or_else(PoisonError::into_inner)))
+        .unwrap_or_default()
+}
+
+/// Where `App::run` listens.
+enum Bind {
+    Tcp(SocketAddr),
+    #[cfg(unix)]
+    Unix(PathBuf, ServeUnix),
+}
+
+// ---- App::run ----------------------------------------------------------------------
+
+/// Start the app and serve on worker threads until `shutdown` (or a
+/// signal), then run the shutdown hooks. Blocks the calling thread.
+pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io::Result<()> {
+    if tokio::runtime::Handle::try_current().is_ok() {
+        return Err(io::Error::other(
+            "App::run blocks and starts its own runtimes; inside an async runtime use App::serve",
+        ));
+    }
+    // Startup and shutdown hooks run on a small "system" runtime that lives
+    // as long as the server, so resources they create keep being driven.
+    let system = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("zapline-system")
+        .enable_all()
+        .build()?;
+    let Running {
+        app,
+        mut lifecycle,
+        resources,
+        config,
+    } = system
+        .block_on(prepared.start())
+        .map_err(|e| io::Error::other(format!("startup failed: {e}")))?;
+    #[cfg(unix)]
+    let bind = options
+        .unix
+        .map_or(Bind::Tcp(addr), |(path, serve)| Bind::Unix(path, serve));
+    #[cfg(not(unix))]
+    let bind = Bind::Tcp(addr);
+    let result = run_workers(app, bind, config, options.shutdown, system.handle());
+    system.block_on(lifecycle.run_shutdown(&resources));
+    result
+}
+
+/// A bound, not yet registered listener.
+enum StdListener {
+    Tcp(std::net::TcpListener),
+    #[cfg(unix)]
+    Unix(std::os::unix::net::UnixListener, ServeUnix),
+}
+
+impl StdListener {
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        match self {
+            StdListener::Tcp(l) => l.local_addr(),
+            #[cfg(unix)]
+            StdListener::Unix(..) => Err(io::Error::other("unix socket has no IP address")),
+        }
+    }
+
+    /// Register with the current runtime and serve until shutdown.
+    async fn serve(self, worker: Worker) -> io::Result<()> {
+        match self {
+            StdListener::Tcp(l) => conn::serve(TcpListener::from_std(l)?, worker).await,
+            #[cfg(unix)]
+            StdListener::Unix(l, serve) => serve(l, worker).await,
+        }
+    }
+}
+
+fn run_workers(
+    app: AppInner,
+    bind: Bind,
+    config: ServerConfig,
+    shutdown: Option<BoxFuture<()>>,
+    system: &tokio::runtime::Handle,
+) -> io::Result<()> {
+    let workers = config.worker_count();
+    let per_core = config.runtime == RuntimeMode::PerCore
+        && (REUSEPORT_BALANCES || !matches!(bind, Bind::Tcp(_)));
+    let listeners = if per_core {
+        bind_listeners(&bind, &config, workers, true)?
+    } else {
+        bind_listeners(&bind, &config, 1, false)?
+    };
+
+    if config.banner {
+        let url = match (&bind, &listeners[0]) {
+            #[cfg(unix)]
+            (Bind::Unix(path, _), _) => format!("unix:{}", path.display()),
+            (_, listener) => {
+                let scheme = if config.is_tls() { "https" } else { "http" };
+                format!("{scheme}://{}", listener.local_addr()?)
+            }
+        };
+        let mode = if per_core {
+            "thread-per-core"
+        } else {
+            "multi-threaded"
+        };
+        eprintln!(
+            "zapline listening on {url} ({workers} workers, {mode}, {})",
+            config.protocols()
+        );
+    }
+
+    let signals: Vec<Signal> = listeners.iter().map(|_| Signal::default()).collect();
+    let trigger = Trigger::new(signals.clone());
+    let driver = system.spawn(drive(
+        shutdown,
+        trigger.clone(),
+        config.banner.then_some(config.shutdown_timeout),
+    ));
+
+    let proto = Proto::new(&config);
+    let result = if per_core {
+        run_per_core(app, listeners, signals, &trigger, &proto, &config)
+    } else {
+        let worker = Worker::new(Arc::new(app), &proto, &config, signals[0].clone());
+        let listener = listeners.into_iter().next().expect("one listener");
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(workers)
+            .thread_name("zapline-worker")
+            .enable_all()
+            .build()?;
+        let result = rt.block_on(listener.serve(worker));
+        rt.shutdown_timeout(Duration::from_secs(1));
+        result
+    };
+
+    driver.abort();
+    #[cfg(unix)]
+    if let Bind::Unix(path, _) = &bind {
+        let _ = std::fs::remove_file(path);
+    }
+    result
+}
+
+fn run_per_core(
+    app: AppInner,
+    listeners: Vec<StdListener>,
+    signals: Vec<Signal>,
+    trigger: &Trigger,
+    proto: &Proto,
+    config: &ServerConfig,
+) -> io::Result<()> {
+    let mut handles = Vec::with_capacity(listeners.len());
+    let mut result = Ok(());
+    for (i, (listener, signal)) in listeners.into_iter().zip(signals).enumerate() {
+        let worker = Worker::new(Arc::new(app.for_worker()), proto, config, signal);
+        let on_error = trigger.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("zapline-worker-{i}"))
+            .spawn(move || -> io::Result<()> {
+                let result = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .and_then(|rt| {
+                        let r = rt.block_on(listener.serve(worker));
+                        rt.shutdown_timeout(Duration::from_secs(1));
+                        r
+                    });
+                if result.is_err() {
+                    // One worker failing takes the whole server down, gracefully.
+                    on_error.drain();
+                }
+                result
+            });
+        match spawned {
+            Ok(h) => handles.push(h),
+            Err(e) => {
+                trigger.drain();
+                result = Err(e);
+                break;
+            }
+        }
+    }
+    for h in handles {
+        let r = h
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("worker thread panicked")));
+        if result.is_ok() {
+            result = r;
+        }
+    }
+    result
+}
+
+/// Wait for the shutdown signal, then tell every worker to drain.
+async fn drive(shutdown: Option<BoxFuture<()>>, trigger: Trigger, announce: Option<Duration>) {
+    let announce = |msg: &str| {
+        if let Some(timeout) = announce {
+            eprintln!("zapline: {msg} (waiting up to {timeout:?} for open connections)");
+        }
+    };
+    match shutdown {
+        Some(signal) => {
+            signal.await;
+            announce("shutting down");
+            trigger.drain();
+        }
+        None => {
+            shutdown_signal().await;
+            announce("shutting down, signal again to force");
+            trigger.drain();
+            shutdown_signal().await;
+            trigger.force();
+        }
+    }
+}
+
+/// Bind `n` listeners. With `reuse_port`, TCP listeners share the port via
+/// `SO_REUSEPORT` (which also lets a new server start while an old one
+/// drains).
+fn bind_listeners(
+    bind: &Bind,
+    config: &ServerConfig,
+    n: usize,
+    reuse_port: bool,
+) -> io::Result<Vec<StdListener>> {
+    match bind {
+        Bind::Tcp(addr) => {
+            let first = bind_tcp(*addr, config.backlog, reuse_port)?;
+            // Reuse the resolved port so `:0` binds every worker to the same one.
+            let local = first.local_addr()?;
+            let mut listeners = vec![StdListener::Tcp(first)];
+            for _ in 1..n {
+                listeners.push(StdListener::Tcp(bind_tcp(local, config.backlog, true)?));
+            }
+            Ok(listeners)
+        }
+        #[cfg(unix)]
+        Bind::Unix(path, serve) => {
+            // Unix sockets have no SO_REUSEPORT balancing: workers share
+            // one socket through duplicated descriptors.
+            let first = bind_unix(path, config.backlog)?;
+            let mut listeners = Vec::with_capacity(n);
+            for _ in 1..n {
+                listeners.push(StdListener::Unix(first.try_clone()?, *serve));
+            }
+            listeners.push(StdListener::Unix(first, *serve));
+            Ok(listeners)
+        }
+    }
+}
+
+fn bind_tcp(addr: SocketAddr, backlog: i32, reuse_port: bool) -> io::Result<std::net::TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
     #[cfg(all(
@@ -73,7 +688,10 @@ fn bind(addr: SocketAddr, backlog: i32, reuse_port: bool) -> io::Result<std::net
     if reuse_port {
         socket.set_reuse_port(true)?;
     }
-    #[cfg(not(unix))]
+    #[cfg(not(all(
+        unix,
+        not(any(target_os = "solaris", target_os = "illumos", target_os = "cygwin"))
+    )))]
     let _ = reuse_port;
     socket.set_tcp_nodelay(true)?;
     socket.set_nonblocking(true)?;
@@ -82,122 +700,59 @@ fn bind(addr: SocketAddr, backlog: i32, reuse_port: bool) -> io::Result<std::net
     Ok(socket.into())
 }
 
-pub(crate) fn run(app: AppInner, addr: SocketAddr, config: ServerConfig) -> io::Result<()> {
-    let workers = config
-        .workers
-        .unwrap_or_else(|| std::thread::available_parallelism().map_or(1, |n| n.get()));
-    let config = Arc::new(config);
+#[cfg(unix)]
+fn bind_unix(path: &Path, backlog: i32) -> io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::fs::FileTypeExt;
 
-    // SO_REUSEPORT load-balances across listeners only on Linux/FreeBSD/etc.
-    // Elsewhere, fall back to one listener on a multi-threaded runtime.
-    let per_core = cfg!(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "freebsd"
-    ));
-
-    let first = bind(addr, config.backlog, per_core)?;
-    let local = first.local_addr()?;
-    if config.banner {
-        let mode = if per_core {
-            "thread-per-core"
-        } else {
-            "multi-threaded"
-        };
-        eprintln!("zapline listening on http://{local} ({workers} workers, {mode})");
-    }
-
-    if !per_core {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(workers)
-            .enable_all()
-            .build()?;
-        let app = Arc::new(app);
-        return rt.block_on(async move { serve(app, TcpListener::from_std(first)?, config).await });
-    }
-
-    let mut listeners = vec![first];
-    for _ in 1..workers {
-        // Reuse the resolved port so `:0` binds every worker to the same one.
-        listeners.push(bind(local, config.backlog, true)?);
-    }
-
-    let handles: Vec<_> = listeners
-        .into_iter()
-        .enumerate()
-        .map(|(i, std_listener)| {
-            let app = Arc::new(app.for_worker());
-            let config = config.clone();
-            std::thread::Builder::new()
-                .name(format!("zapline-worker-{i}"))
-                .spawn(move || -> io::Result<()> {
-                    let rt = tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()?;
-                    rt.block_on(async move {
-                        serve(app, TcpListener::from_std(std_listener)?, config).await
-                    })
-                })
-        })
-        .collect::<io::Result<_>>()?;
-
-    for h in handles {
-        match h.join() {
-            Ok(r) => r?,
-            Err(_) => return Err(io::Error::other("worker thread panicked")),
+    // Replace a socket file left behind by a dead server, but never a live
+    // server's socket or anything that is not a socket.
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_socket() {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("{} exists and is not a socket", path.display()),
+            ));
         }
+        if std::os::unix::net::UnixStream::connect(path).is_ok() {
+            return Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!("another server is listening on {}", path.display()),
+            ));
+        }
+        std::fs::remove_file(path)?;
     }
-    Ok(())
+    let socket = Socket::new(Domain::UNIX, Type::STREAM, None)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&socket2::SockAddr::unix(path)?)?;
+    socket.listen(backlog)?;
+    Ok(socket.into())
 }
 
+// ---- App::serve --------------------------------------------------------------------
+
+/// Start the app and serve `listener` on the current runtime until
+/// `shutdown` (or a signal), then run the shutdown hooks.
 pub(crate) async fn serve(
-    app: Arc<AppInner>,
+    prepared: Prepared,
     listener: TcpListener,
-    config: Arc<ServerConfig>,
+    shutdown: Option<BoxFuture<()>>,
 ) -> io::Result<()> {
-    let local_addr = listener.local_addr().ok();
-    loop {
-        let (stream, remote_addr) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) if is_transient(&e) => {
-                // e.g. EMFILE: back off instead of spinning.
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                continue;
-            }
-            Err(e) => return Err(e),
-        };
-        let _ = stream.set_nodelay(true);
-        let service = Service {
-            app: app.clone(),
-            conn: ConnInfo {
-                remote_addr: Some(remote_addr),
-                local_addr,
-                secure: false,
-            },
-        };
-        let header_timeout = config.header_read_timeout;
-        tokio::spawn(async move {
-            let mut builder = http1::Builder::new();
-            builder.keep_alive(true).pipeline_flush(true);
-            if let Some(t) = header_timeout {
-                builder.timer(TokioTimer::new()).header_read_timeout(t);
-            } else {
-                builder.header_read_timeout(None);
-            }
-            let conn = builder.serve_connection(TokioIo::new(stream), service);
-            #[cfg(feature = "ws")]
-            let conn = conn.with_upgrades();
-            let _ = conn.await;
-        });
-    }
-}
+    let Running {
+        app,
+        mut lifecycle,
+        resources,
+        config,
+    } = prepared
+        .start()
+        .await
+        .map_err(|e| io::Error::other(format!("startup failed: {e}")))?;
 
-fn is_transient(e: &io::Error) -> bool {
-    matches!(
-        e.kind(),
-        io::ErrorKind::ConnectionAborted
-            | io::ErrorKind::ConnectionReset
-            | io::ErrorKind::Interrupted
-            | io::ErrorKind::WouldBlock
-    ) || e.raw_os_error().is_some_and(|c| c == 24 || c == 23) // EMFILE / ENFILE
+    let signal = Signal::default();
+    let driver = tokio::spawn(drive(shutdown, Trigger::new(vec![signal.clone()]), None));
+    let worker = Worker::new(Arc::new(app), &Proto::new(&config), &config, signal);
+    let result = conn::serve(listener, worker).await;
+    driver.abort();
+
+    lifecycle.run_shutdown(&resources).await;
+    result
 }
