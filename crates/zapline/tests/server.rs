@@ -307,6 +307,35 @@ async fn pipelined_requests_are_answered_in_order() {
 }
 
 #[tokio::test]
+async fn waiting_handlers_are_woken_on_keep_alive_connections() {
+    // HTTP/1 polls each response future once before hyper does, with a
+    // no-op waker: handlers that wait (a timer, a body still in flight) must
+    // still be woken through the connection.
+    let app = App::new()
+        .get("/sleep/{ms}", |Path(ms): Path<u64>| async move {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            format!("slept {ms}")
+        })
+        .post("/echo", |body: String| async move { body });
+    let server = TestServer::spawn(app).await;
+    let mut conn = TcpStream::connect(server.addr).await.unwrap();
+    let exchange = async {
+        let slept = get_on(&mut conn, "/sleep/50").await;
+        let head = "POST /echo HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\nContent-Length: 5\r\n\r\n";
+        conn.write_all(head.as_bytes()).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        conn.write_all(b"hello").await.unwrap();
+        let echoed = read_response(&mut conn).await.unwrap();
+        (slept, echoed)
+    };
+    let (slept, echoed) = tokio::time::timeout(Duration::from_secs(5), exchange)
+        .await
+        .expect("a waiting handler was never woken");
+    assert!(slept.ends_with("slept 50"), "{slept}");
+    assert!(echoed.ends_with("hello"), "{echoed}");
+}
+
+#[tokio::test]
 async fn keep_alive_can_be_disabled() {
     let mut app = App::new().get("/", || async { "ok" });
     app.server_config_mut().keep_alive = false;

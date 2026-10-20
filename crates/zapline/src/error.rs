@@ -1,7 +1,7 @@
 //! A single error type that any `std::error::Error` converts into via `?`.
 
 use std::borrow::Cow;
-use std::fmt;
+use std::fmt::{self, Write};
 
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, StatusCode};
@@ -225,10 +225,10 @@ impl ErrorReport {
     pub fn to_json(&self) -> String {
         let mut body = String::with_capacity(32 + self.message.len());
         body.push_str(r#"{"error":"#);
-        body.push_str(&json_escape(&self.message));
+        push_json_str(&mut body, &self.message);
         if let Some(code) = &self.code {
             body.push_str(r#","code":"#);
-            body.push_str(&json_escape(code));
+            push_json_str(&mut body, code);
         }
         #[cfg(feature = "json")]
         if let Some(d) = &self.details {
@@ -318,18 +318,53 @@ fn log_server_error(
 
 pub(crate) fn json_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
+    push_json_str(&mut out, s);
     out
+}
+
+/// Append `s` to `out` as a quoted JSON string.
+pub(crate) fn push_json_str(out: &mut String, s: &str) {
+    out.push('"');
+    // Everything escaped is ASCII, so slicing at those bytes keeps
+    // multi-byte characters intact, and unescaped runs are copied whole.
+    let mut start = 0;
+    for (i, b) in s.bytes().enumerate() {
+        if !matches!(b, b'"' | b'\\' | 0..=0x1f) {
+            continue;
+        }
+        out.push_str(&s[start..i]);
+        match b {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            _ => {
+                let _ = write!(out, "\\u{b:04x}");
+            }
+        }
+        start = i + 1;
+    }
+    out.push_str(&s[start..]);
+    out.push('"');
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_escape;
+
+    #[test]
+    fn json_escape_round_trips() {
+        for s in [
+            "",
+            "not found",
+            "a\"b\\c",
+            "x\ny\r\tz\u{1}\u{1f}",
+            "é ✓ 𝄞 \"é\"",
+        ] {
+            let escaped = json_escape(s);
+            assert_eq!(serde_json::from_str::<String>(&escaped).unwrap(), s);
+        }
+        assert_eq!(json_escape("a\"\u{1}"), r#""a\"\u0001""#);
+    }
 }

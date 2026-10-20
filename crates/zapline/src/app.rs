@@ -469,6 +469,34 @@ pub(crate) enum ResponseFuture {
     Pending(crate::handler::BoxFuture<Response>),
 }
 
+impl ResponseFuture {
+    /// Poll once right away, with a no-op waker, so that a handler that does
+    /// not wait completes before hyper touches the connection again (HTTP/1).
+    ///
+    /// The request holds slices of hyper's read buffer, and hyper reads from
+    /// the connection (watching for EOF) before it first polls the response
+    /// future. A request still alive at that point leaves the buffer shared,
+    /// so the read allocates a fresh 8 KiB buffer, once per request. Polling
+    /// here runs the extractors, which consume the request, first.
+    ///
+    /// `Future::poll` only owes a wake-up to the most recent waker, and
+    /// hyper polls a pending future with the connection's waker in the same
+    /// pass (or once the previous response is written), so nothing is lost.
+    #[inline]
+    pub(crate) fn poll_now(self) -> Self {
+        match self {
+            ResponseFuture::Pending(mut fut) => {
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                match fut.as_mut().poll(&mut cx) {
+                    Poll::Ready(res) => ResponseFuture::Ready(Some(res)),
+                    Poll::Pending => ResponseFuture::Pending(fut),
+                }
+            }
+            ready => ready,
+        }
+    }
+}
+
 impl Future for ResponseFuture {
     type Output = Result<Response, std::convert::Infallible>;
 

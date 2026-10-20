@@ -14,6 +14,8 @@
 use std::future::Future;
 use std::sync::Arc;
 
+use http::header::{Entry, HeaderMap, HeaderName, HeaderValue};
+
 use crate::handler::{BoxEndpoint, BoxFuture, Endpoint};
 use crate::request::Request;
 use crate::response::{IntoResponse, Response};
@@ -79,6 +81,18 @@ impl Endpoint for Wrapped {
     #[inline]
     fn call(&self, req: Request) -> BoxFuture<Response> {
         Next::new(self.chain.clone(), self.endpoint.clone()).run(req)
+    }
+}
+
+/// Add each of `headers` that `map` does not have yet, with one lookup per
+/// header and at most one reallocation of the map.
+pub(crate) fn insert_missing(map: &mut HeaderMap, headers: &[(HeaderName, HeaderValue)]) {
+    // Only an optimization: a map at its size limit fails below as before.
+    let _ = map.try_reserve(headers.len());
+    for (name, value) in headers {
+        if let Entry::Vacant(slot) = map.entry(name) {
+            slot.insert(value.clone());
+        }
     }
 }
 

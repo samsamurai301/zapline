@@ -22,6 +22,10 @@ sudo apt-get install wrk bc     # or brew install wrk
 Environment overrides: `DURATION`, `CONNS`, `ROUNDS`, `WORKERS`,
 `SERVER_CPUS`, `CLIENT_CPUS`, `WRK_THREADS`, `OUT`.
 
+Started with `MIDDLEWARE=1`, the zapline server also installs `SetRequestId`,
+`SecurityHeaders`, `Metrics` and `Trace` (with no subscriber, so tracing is
+disabled), to measure what commonly used middleware costs per request.
+
 The script pins the server and `wrk` to disjoint CPU sets, warms each
 endpoint up, and keeps the best of `ROUNDS` runs. `plaintext-pipelined-16`
 sends 16 requests per write, like TechEmpower's plaintext test.

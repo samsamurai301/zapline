@@ -360,12 +360,7 @@ impl Middleware for DefaultHeaders {
         let fut = next.run(req);
         Box::pin(async move {
             let mut res = fut.await;
-            let h = res.headers_mut();
-            for (k, v) in headers.iter() {
-                if !h.contains_key(k) {
-                    h.insert(k.clone(), v.clone());
-                }
-            }
+            super::insert_missing(res.headers_mut(), &headers);
             res
         })
     }

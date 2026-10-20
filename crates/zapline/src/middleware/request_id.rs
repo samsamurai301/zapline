@@ -18,6 +18,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bytes::Bytes;
 use http::header::{HeaderName, HeaderValue};
 
 use super::{Middleware, Next};
@@ -246,16 +247,45 @@ fn uuid_v7() -> HeaderValue {
     v |= 0b10 << 62; // variant
     v |= rand & 0x3FFF_FFFF_FFFF_FFFF; // rand_b
 
+    // Owned by a refcounted `Bytes` from the start, so the clones for the
+    // request header, the extension and the response header allocate nothing.
+    HeaderValue::from_maybe_shared(Bytes::from_owner(hyphenated(v)))
+        .unwrap_or(HeaderValue::from_static("0"))
+}
+
+/// `v` as 32 lowercase hex digits in 8-4-4-4-12 groups.
+fn hyphenated(v: u128) -> [u8; 36] {
     const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = [0u8; 36];
+    let mut out = [b'-'; 36];
     let mut pos = 0;
-    for i in 0..32 {
-        if matches!(i, 8 | 12 | 16 | 20) {
-            out[pos] = b'-';
-            pos += 1;
+    for (i, byte) in v.to_be_bytes().into_iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            pos += 1; // keep the dash
         }
-        out[pos] = HEX[((v >> (124 - i * 4)) & 0xF) as usize];
-        pos += 1;
+        out[pos] = HEX[usize::from(byte >> 4)];
+        out[pos + 1] = HEX[usize::from(byte & 0xF)];
+        pos += 2;
     }
-    HeaderValue::from_bytes(&out).unwrap_or(HeaderValue::from_static("0"))
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hyphenated;
+
+    #[test]
+    fn hyphenated_hex() {
+        for v in [0, u128::MAX, 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210] {
+            let hex = format!("{v:032x}");
+            let (a, b, c, d, e) = (
+                &hex[..8],
+                &hex[8..12],
+                &hex[12..16],
+                &hex[16..20],
+                &hex[20..],
+            );
+            let expected = format!("{a}-{b}-{c}-{d}-{e}");
+            assert_eq!(std::str::from_utf8(&hyphenated(v)).unwrap(), expected);
+        }
+    }
 }
