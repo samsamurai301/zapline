@@ -1,0 +1,9 @@
+[book]
+title = "The zapline Guide"
+authors = ["The zapline contributors"]
+language = "en"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/your-org/zapline"
+edit-url-template = "https://github.com/your-org/zapline/edit/main/docs/{path}"
