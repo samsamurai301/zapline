@@ -33,13 +33,20 @@ fn app() -> App {
 | Method | Default | Effect |
 |---|---|---|
 | `ServeDir::new(root)` | | Serve files under `root` (relative to the working directory). The directory may be created after startup. |
-| `.index_file(name)` | `index.html` | The file served for directory requests. A directory requested without a trailing slash is redirected (`307`) to add one, so relative links in the page resolve correctly. |
+| `.index_file(name)` | `index.html` | The file served for directory requests. A directory requested without a trailing slash is redirected (`307`) to add one, so relative links in the page resolve correctly. Behind `NormalizePath::trim_trailing_slash()` the index is served at `/dir` directly instead (see below). |
 | `.no_index_file()` | | Directory requests answer `404` |
 | `.fallback_file(path)` | none | Serve this file with `200` when the requested file doesn't exist. This is how single-page apps work. Relative to the root. |
 | `.cache_control(value)` | none | Sets `Cache-Control` on file responses. Panics on an invalid value. |
 | `.precompressed_gzip()` | off | Serve `file.gz` instead of `file` when the client accepts gzip and the compressed file exists |
 | `.precompressed_br()` | off | The same for `file.br` and Brotli. Preferred over gzip at equal `q`. |
 | `.show_hidden(bool)` | `false` | Serve dotfiles and files in dot-directories |
+
+### With `NormalizePath`
+
+[`NormalizePath`](hardening.md#normalizepath) and the directory redirect disagree about trailing slashes, so `ServeDir` defers to it:
+
+- **`trim_trailing_slash()`** (the default) would turn the redirect target `/guide/` back into `/guide`, forever. Behind it, `ServeDir` serves `guide/index.html` at `/guide` directly, and `/guide/` gets the same page (rewritten, or redirected once to `/guide` in `redirect` mode). Relative links in such an index page resolve against the parent directory, so use absolute links there (or a `<base href="/guide/">`).
+- **`append_trailing_slash()`** already agrees with `ServeDir`: `/guide` becomes `/guide/`, which serves the index.
 
 ### Single-page apps
 

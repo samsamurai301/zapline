@@ -58,6 +58,34 @@ impl CountingStore {
     }
 }
 
+/// A `MemoryStore` whose next `fail_loads` loads fail (a transient outage).
+#[derive(Clone, Default)]
+struct FlakyStore {
+    inner: MemoryStore,
+    fail_loads: Arc<AtomicUsize>,
+    loads: Arc<AtomicUsize>,
+}
+
+impl SessionStore for FlakyStore {
+    async fn load(&self, id: &str) -> Result<Option<SessionRecord>> {
+        self.loads.fetch_add(1, Ordering::SeqCst);
+        let fail = self
+            .fail_loads
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .is_ok();
+        if fail {
+            return Err(Error::service_unavailable("store timeout"));
+        }
+        self.inner.load(id).await
+    }
+    async fn save(&self, id: &str, record: &SessionRecord) -> Result<()> {
+        self.inner.save(id, record).await
+    }
+    async fn delete(&self, id: &str) -> Result<()> {
+        self.inner.delete(id).await
+    }
+}
+
 /// A minimal cookie-keeping client.
 #[derive(Clone)]
 struct Browser {
@@ -504,6 +532,68 @@ async fn store_failures_surface_as_errors() {
     let r = c.post("/login").send().await;
     assert_eq!(r.status(), 503);
     assert!(set_cookies(&r).is_empty());
+}
+
+#[tokio::test]
+async fn failed_loads_never_replace_the_cookie() {
+    let store = FlakyStore::default();
+    // Public pages that greet signed-in users: the authenticator's errors
+    // are swallowed there, and the handler uses the session afterwards.
+    let auth = Authenticate::new(|req: &Request| {
+        let session = Session::current(req);
+        async move { Ok(session.await?.get::<String>("user")) }
+    });
+    let pages = Routes::new()
+        .post("/home", visit)
+        .allow_anonymous()
+        .get("/about", || async { "about" })
+        .allow_anonymous()
+        .wrap(auth);
+    let b = Browser::new(
+        app(SessionLayer::new(store.clone()))
+            .nest("/pages", pages)
+            .test(),
+    );
+    b.post("/login").await;
+    let sid = b.sid().unwrap();
+    let loads = || store.loads.load(Ordering::SeqCst);
+
+    // The store's first load fails (in the authenticator). The handler's
+    // access fails too, instead of starting a new, empty session that would
+    // overwrite the user's cookie.
+    store.fail_loads.store(1, Ordering::SeqCst);
+    let before = loads();
+    let r = b.post("/pages/home").await;
+    assert_eq!(r.status(), 503);
+    assert_eq!(r.json::<Value>()["code"], "session_store_unavailable");
+    assert!(set_cookies(&r).is_empty(), "{:?}", set_cookies(&r));
+    assert_eq!(b.sid().unwrap(), sid);
+    // Later accesses in the same request don't hit the store again.
+    assert_eq!(loads(), before + 1);
+
+    // A failure the handler never sees still leaves the cookie alone.
+    store.fail_loads.store(1, Ordering::SeqCst);
+    let r = b.get("/pages/about").await;
+    assert_eq!(r.text(), "about");
+    assert!(set_cookies(&r).is_empty());
+
+    // Direct accesses: 503, no Set-Cookie, nothing deleted or rewritten.
+    for path in ["/visit", "/logout", "/login"] {
+        store.fail_loads.store(1, Ordering::SeqCst);
+        let r = b.post(path).await;
+        assert_eq!(r.status(), 503, "{path}");
+        assert_eq!(r.json::<Value>()["code"], "session_store_unavailable");
+        assert!(set_cookies(&r).is_empty(), "{path}: {:?}", set_cookies(&r));
+    }
+    store.fail_loads.store(1, Ordering::SeqCst);
+    assert_eq!(b.get("/me").await.status(), 503);
+
+    // Once the store is back, the user is still signed in, with their data.
+    assert_eq!(b.sid().unwrap(), sid);
+    assert_eq!(store.inner.len(), 1);
+    assert_eq!(b.get("/me").await.text(), "ada");
+    assert_eq!(b.post("/pages/home").await.text(), "1");
+    assert_eq!(b.sid().unwrap(), sid);
 }
 
 #[tokio::test]

@@ -1,27 +1,54 @@
-//! CSRF protection with the double-submit cookie pattern (feature `cookies`).
+//! CSRF protection with the (signed) double-submit cookie pattern (feature
+//! `cookies`).
 
 use std::fmt;
 use std::sync::Arc;
 
-use http::header::{CONTENT_TYPE, SET_COOKIE};
-use http::{HeaderName, HeaderValue, Method, StatusCode};
+use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
+use hmac::{Hmac, Mac};
+use http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
+use sha2::Sha256;
 
 use super::constant_time_eq;
 use crate::body::ReqBody;
-use crate::cookies::{random_token, Cookie, CookieJar, SameSite};
+use crate::cookies::{random_token, Cookie, Key, SameSite};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
 use crate::middleware::{Middleware, Next};
 use crate::{Error, IntoResponse, Request, Response, Result};
 
+/// Default token cookie name. The `__Host-` prefix makes browsers refuse the
+/// cookie unless it is `Secure`, has `Path=/` and no `Domain`, so a sibling
+/// subdomain cannot plant one.
+const HOST_COOKIE_NAME: &str = "__Host-zapline.csrf";
+/// Default token cookie name without `Secure` (plain-HTTP development),
+/// where the `__Host-` prefix would make browsers drop the cookie.
+const COOKIE_NAME: &str = "zapline.csrf";
+
+/// Most cookie pairs inspected per request (as for `CookieJar`).
+const MAX_COOKIES: usize = 256;
+
+/// Random bytes in a token; signed tokens append a 32-byte HMAC-SHA256.
+const RANDOM_LEN: usize = 32;
+const SIGNED_LEN: usize = RANDOM_LEN + 32;
+
+/// Prefixed to the random bytes before computing a token's MAC. It is not
+/// UTF-8 (`0xff`), while signed cookies MAC their UTF-8 value with the same
+/// key, so no signed cookie can ever double as a CSRF token.
+const MAC_CONTEXT: &[u8] = b"\xffzapline.csrf.v1\x00";
+
 #[derive(Clone)]
 struct Config {
-    cookie_name: String,
+    /// `None`: [`HOST_COOKIE_NAME`] when `secure`, else [`COOKIE_NAME`].
+    cookie_name: Option<String>,
     header: HeaderName,
     field: Arc<str>,
     exempt: Vec<Exempt>,
     secure: bool,
     same_site: SameSite,
+    /// Signs tokens instead of the app's key.
+    key: Option<Key>,
 }
 
 #[derive(Clone)]
@@ -30,21 +57,31 @@ enum Exempt {
     Prefix(String),
 }
 
-/// Double-submit-cookie CSRF protection.
+/// Signed double-submit-cookie CSRF protection.
 ///
 /// Every response to a client without a token gets a random token cookie
-/// (default `zapline.csrf`, readable by JavaScript). Requests with unsafe
-/// methods (anything but `GET`, `HEAD`, `OPTIONS`, `TRACE`) must echo that
-/// token in the `x-csrf-token` header or, for
+/// (default `__Host-zapline.csrf`, readable by JavaScript). Requests with
+/// unsafe methods (anything but `GET`, `HEAD`, `OPTIONS`, `TRACE`) must echo
+/// that token in the `x-csrf-token` header or, for
 /// `application/x-www-form-urlencoded` bodies, the `csrf_token` field;
 /// otherwise they get `403` with code `csrf_failed`. Comparison is
 /// constant-time. Handlers render the token with [`CsrfToken`].
 ///
-/// Use it as global middleware; combine with `SameSite` cookies. In
-/// production consider `.cookie_name("__Host-csrf")`.
+/// **Register a cookie key** ([`App::cookie_key`](crate::App::cookie_key),
+/// or [`key`](Self::key)). Tokens are then `random || HMAC-SHA256(random)`
+/// and only tokens this server minted are accepted, so a cookie planted by a
+/// sibling subdomain (same site, so `SameSite` does not stop it) with a
+/// value of the attacker's choosing is useless. Without a key, tokens are
+/// unsigned random values and the `__Host-` cookie prefix is the only
+/// defense against planted cookies. When the request carries several token
+/// cookies (a planted one plus the real one), unsafe requests are rejected
+/// unless they all hold the same token.
+///
+/// Use it as global middleware; combine with `SameSite` cookies.
 ///
 /// ```
 /// use zapline::auth::{Csrf, CsrfToken};
+/// use zapline::cookies::Key;
 /// use zapline::prelude::*;
 ///
 /// async fn form(token: CsrfToken) -> Html<String> {
@@ -52,6 +89,7 @@ enum Exempt {
 /// }
 ///
 /// let app = App::new()
+///     .cookie_key(Key::generate()) // a stable secret key in production
 ///     .wrap(Csrf::new().exempt("/webhooks/*"))
 ///     .get("/form", form)
 ///     .post("/form", || async { "saved" });
@@ -72,12 +110,13 @@ impl Csrf {
     pub fn new() -> Self {
         Csrf {
             config: Arc::new(Config {
-                cookie_name: "zapline.csrf".into(),
+                cookie_name: None,
                 header: HeaderName::from_static("x-csrf-token"),
                 field: "csrf_token".into(),
                 exempt: Vec::new(),
                 secure: true,
                 same_site: SameSite::Lax,
+                key: None,
             }),
         }
     }
@@ -86,10 +125,12 @@ impl Csrf {
         Arc::make_mut(&mut self.config)
     }
 
-    /// Token cookie name (default `zapline.csrf`).
+    /// Token cookie name (default `__Host-zapline.csrf`, or `zapline.csrf`
+    /// with [`secure(false)`](Self::secure)). A `__Host-` name needs
+    /// `Secure`.
     pub fn cookie_name(mut self, name: &str) -> Self {
         assert!(!name.is_empty(), "CSRF cookie name must not be empty");
-        self.config().cookie_name = name.to_owned();
+        self.config().cookie_name = Some(name.to_owned());
         self
     }
 
@@ -120,7 +161,9 @@ impl Csrf {
         self
     }
 
-    /// The token cookie's `Secure` attribute (default `true`).
+    /// The token cookie's `Secure` attribute (default `true`). Turn it off
+    /// only for development over plain HTTP; the default cookie name then
+    /// drops its `__Host-` prefix (browsers require `Secure` for it).
     pub fn secure(mut self, secure: bool) -> Self {
         self.config().secure = secure;
         self
@@ -129,6 +172,13 @@ impl Csrf {
     /// The token cookie's `SameSite` attribute (default `Lax`).
     pub fn same_site(mut self, same_site: SameSite) -> Self {
         self.config().same_site = same_site;
+        self
+    }
+
+    /// Sign tokens with this key instead of the app's
+    /// ([`App::cookie_key`](crate::App::cookie_key)).
+    pub fn key(mut self, key: Key) -> Self {
+        self.config().key = Some(key);
         self
     }
 }
@@ -141,8 +191,16 @@ impl Config {
         })
     }
 
+    fn cookie_name(&self) -> &str {
+        match &self.cookie_name {
+            Some(name) => name,
+            None if self.secure => HOST_COOKIE_NAME,
+            None => COOKIE_NAME,
+        }
+    }
+
     fn cookie(&self, token: &str) -> Option<HeaderValue> {
-        let mut c = Cookie::new(self.cookie_name.clone(), token.to_owned());
+        let mut c = Cookie::new(self.cookie_name().to_owned(), token.to_owned());
         c.set_path("/");
         c.set_secure(self.secure);
         c.set_same_site(self.same_site);
@@ -157,11 +215,71 @@ fn is_safe(method: &Method) -> bool {
     )
 }
 
-/// Tokens are base64url of 32 random bytes.
+/// Unsigned tokens are base64url of 32 random bytes.
 fn is_token(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// Mints and verifies signed tokens: base64url of `random || tag`, where
+/// `tag` is HMAC-SHA256 of the random bytes under the key's signing half.
+struct Signer {
+    /// Keyed and fed [`MAC_CONTEXT`]; cloned per token.
+    mac: Hmac<Sha256>,
+}
+
+impl Signer {
+    fn new(key: &Key) -> Result<Self> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key.signing())
+            .map_err(|_| Error::internal("invalid CSRF signing key"))?;
+        mac.update(MAC_CONTEXT);
+        Ok(Signer { mac })
+    }
+
+    fn tag(&self, random: &[u8]) -> Hmac<Sha256> {
+        let mut mac = self.mac.clone();
+        mac.update(random);
+        mac
+    }
+
+    fn mint(&self) -> Result<String> {
+        let mut buf = [0u8; SIGNED_LEN];
+        let (random, tag) = buf.split_at_mut(RANDOM_LEN);
+        getrandom::getrandom(random).map_err(|e| {
+            Error::internal("secure random numbers are unavailable")
+                .with_source(std::io::Error::other(e.to_string()))
+        })?;
+        tag.copy_from_slice(&self.tag(random).finalize().into_bytes());
+        Ok(BASE64_URL_SAFE_NO_PAD.encode(buf))
+    }
+
+    /// Whether this server minted `token` (constant-time tag check).
+    fn verify(&self, token: &str) -> bool {
+        let Ok(bytes) = BASE64_URL_SAFE_NO_PAD.decode(token) else {
+            return false;
+        };
+        if bytes.len() != SIGNED_LEN {
+            return false;
+        }
+        let (random, tag) = bytes.split_at(RANDOM_LEN);
+        self.tag(random).verify_slice(tag).is_ok()
+    }
+}
+
+/// The values of every cookie named `name`, in request order. Browsers send
+/// all cookies whose domain and path match (most specific path first), so a
+/// cookie planted by a sibling subdomain can come ahead of ours.
+fn cookie_values<'a>(headers: &'a HeaderMap, name: &'a str) -> impl Iterator<Item = String> + 'a {
+    headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(Cookie::split_parse_encoded)
+        .take(MAX_COOKIES)
+        .flatten()
+        .filter(move |c| c.name() == name)
+        .map(|c| c.value().to_owned())
 }
 
 fn rejected() -> Error {
@@ -191,20 +309,37 @@ impl Middleware for Csrf {
 /// Verify `req` and attach its [`CsrfToken`]. Returns the request, the token
 /// and whether the token is new (needs a cookie).
 async fn check(cfg: &Config, mut req: Request) -> Result<(Request, String, bool)> {
-    let cookie = CookieJar::from_headers(req.headers())
-        .get(&cfg.cookie_name)
-        .map(|c| c.value().to_owned())
-        .filter(|t| is_token(t));
+    let signer = match cfg.key.as_ref().or_else(|| req.state::<Key>()) {
+        Some(key) => Some(Signer::new(key)?),
+        None => None,
+    };
+    // Only well-formed tokens count; with a key, only ones this server
+    // minted, so planted values of an attacker's choosing are ignored.
+    // Several different tokens mean one was planted: trust none of them.
+    let (cookie, ambiguous) = {
+        let mut tokens =
+            cookie_values(req.headers(), cfg.cookie_name()).filter(|t| match &signer {
+                Some(signer) => signer.verify(t),
+                None => is_token(t),
+            });
+        let first = tokens.next();
+        let ambiguous = first.as_ref().is_some_and(|c| tokens.any(|t| t != *c));
+        (first, ambiguous)
+    };
     if !is_safe(req.method()) && !cfg.is_exempt(req.path()) {
-        let expected = cookie.as_deref().ok_or_else(rejected)?;
+        let expected = cookie
+            .as_deref()
+            .filter(|_| !ambiguous)
+            .ok_or_else(rejected)?;
         let provided = submitted(cfg, &mut req).await?;
         if !provided.is_some_and(|p| constant_time_eq(p, expected)) {
             return Err(rejected());
         }
     }
-    let (token, fresh) = match cookie {
-        Some(t) => (t, false),
-        None => (random_token()?, true),
+    let (token, fresh) = match (cookie, &signer) {
+        (Some(t), _) => (t, false),
+        (None, Some(signer)) => (signer.mint()?, true),
+        (None, None) => (random_token()?, true),
     };
     req.extensions_mut().insert(CsrfToken {
         token: token.clone(),

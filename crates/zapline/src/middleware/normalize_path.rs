@@ -33,7 +33,9 @@ enum Slash {
 /// (default) or by redirecting the client. The query string is preserved.
 ///
 /// - [`trim_trailing_slash`](Self::trim_trailing_slash) (default):
-///   `/users/` → `/users`. The root `/` is untouched.
+///   `/users/` → `/users`. The root `/` is untouched. Directories served
+///   by `ServeDir` (feature `fs`) then answer with their index file at
+///   `/dir` instead of redirecting to `/dir/` (which would loop).
 /// - [`append_trailing_slash`](Self::append_trailing_slash): `/users` →
 ///   `/users/`. Paths whose last segment contains a `.` (like
 ///   `/app.js`) are left alone. Route patterns never end in `/`, so this
@@ -135,21 +137,30 @@ fn last_segment(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or("")
 }
 
+/// Request extension set by a [`NormalizePath`] that trims trailing
+/// slashes: handlers must not redirect `/dir` to `/dir/` (it would be
+/// trimmed again, looping forever). `ServeDir` then serves the index file
+/// directly.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TrailingSlashTrimmed;
+
 impl Middleware for NormalizePath {
     fn handle(&self, mut req: Request, next: Next) -> BoxFuture<Response> {
-        let Some(path) = self.normalize(req.path()) else {
-            return next.run(req);
-        };
-        let target = match req.query_string() {
-            Some(q) => format!("{path}?{q}"),
-            None => path,
-        };
-        if let Some(status) = self.redirect {
-            let res = redirect(status, &target).unwrap_or_else(|| next.run(req));
-            return res;
+        if let Some(path) = self.normalize(req.path()) {
+            let target = match req.query_string() {
+                Some(q) => format!("{path}?{q}"),
+                None => path,
+            };
+            if let Some(status) = self.redirect {
+                if let Some(res) = redirect(status, &target) {
+                    return res;
+                }
+            } else if let Some(uri) = with_path(req.uri(), &target) {
+                req.set_uri(uri);
+            }
         }
-        if let Some(uri) = with_path(req.uri(), &target) {
-            req.set_uri(uri);
+        if self.slash == Slash::Trim {
+            req.extensions_mut().insert(TrailingSlashTrimmed);
         }
         next.run(req)
     }
