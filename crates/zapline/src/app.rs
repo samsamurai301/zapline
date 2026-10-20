@@ -16,7 +16,7 @@ use crate::lifecycle::{shutdown_hook, startup_hook, Lifecycle, Resources};
 use crate::middleware::{Middleware, Next};
 use crate::request::{ConnInfo, Params, Request, Shared, StateEntry};
 use crate::response::Response;
-use crate::router::{leak_entries, IntoRoutes, RouteInfo, Routed, Router, Routes};
+use crate::router::{leak_entries, Entry, IntoRoutes, RouteInfo, Routed, Router, Routes};
 use crate::server::ServerConfig;
 
 /// Default maximum request body size: 2 MiB.
@@ -262,11 +262,21 @@ impl App {
     /// Finalize routes and run build hooks. Synchronous: no I/O, no startup
     /// hooks — safe to call from tooling.
     pub(crate) fn prepare(mut self) -> Prepared {
-        let mut infos = leak_entries(std::mem::take(&mut self.routes).finish());
+        // Route middleware (`wrap_route`) also applies to routes that build
+        // hooks add (docs, metrics, health), so it truly covers every route.
+        let mut routes = std::mem::take(&mut self.routes);
+        let route_chain = routes.take_chain();
+        let with_route_chain = |mut entries: Vec<Entry>| {
+            if let Some(chain) = &route_chain {
+                entries.iter_mut().for_each(|e| e.push_group(chain.clone()));
+            }
+            entries
+        };
+        let mut infos = leak_entries(with_route_chain(routes.finish()));
         for hook in std::mem::take(&mut self.build_hooks) {
             let table: Vec<&'static RouteInfo> = infos.iter().map(|(i, _)| *i).collect();
             let extra = hook(&table);
-            infos.extend(leak_entries(extra.finish()));
+            infos.extend(leak_entries(with_route_chain(extra.finish())));
         }
         let table = infos.iter().map(|(i, _)| *i).collect();
         let router = Arc::new(Router::new(infos, self.fallback));

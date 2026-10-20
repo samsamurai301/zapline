@@ -53,6 +53,13 @@ enum MethodKey {
     One(Method),
 }
 
+impl Entry {
+    /// Wrap this entry in an outer group chain.
+    pub(crate) fn push_group(&mut self, chain: Arc<[Arc<dyn Middleware>]>) {
+        self.groups.push(chain);
+    }
+}
+
 pub(crate) struct Entry {
     method: MethodKey,
     path: String,
@@ -246,6 +253,12 @@ impl Routes {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    /// Remove and return this group's middleware chain.
+    pub(crate) fn take_chain(&mut self) -> Option<Arc<[Arc<dyn Middleware>]>> {
+        let mw = std::mem::take(&mut self.middleware);
+        (!mw.is_empty()).then(|| mw.into())
     }
 
     /// Record group middleware and merge default metadata into each entry.
