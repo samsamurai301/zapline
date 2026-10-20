@@ -292,42 +292,21 @@ impl App {
             .to_socket_addrs()?
             .next()
             .ok_or_else(|| std::io::Error::other("no address to bind"))?;
-        let prepared = self.prepare();
+        let mut app = self;
+        let options = crate::server::take_options(&mut app);
+        let checked = crate::server::check_config(&app.config);
+        let prepared = app.prepare();
         prepared.maybe_print_routes();
-
-        let system = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .thread_name("zapline-system")
-            .enable_all()
-            .build()?;
-        let Running {
-            app,
-            mut lifecycle,
-            resources,
-            config,
-        } = system
-            .block_on(prepared.start())
-            .map_err(|e| std::io::Error::other(format!("startup failed: {e}")))?;
-        let result = crate::server::run(app, addr, config);
-        system.block_on(lifecycle.run_shutdown(&resources));
-        result
+        checked?;
+        crate::server::run(prepared, addr, options)
     }
 
     /// Serve on an existing listener from inside your own Tokio runtime.
     pub async fn serve(self, listener: tokio::net::TcpListener) -> std::io::Result<()> {
-        let prepared = self.prepare();
-        let Running {
-            app,
-            mut lifecycle,
-            resources,
-            config,
-        } = prepared
-            .start()
-            .await
-            .map_err(|e| std::io::Error::other(format!("startup failed: {e}")))?;
-        let result = crate::server::serve(Arc::new(app), listener, Arc::new(config)).await;
-        lifecycle.run_shutdown(&resources).await;
-        result
+        let mut app = self;
+        let options = crate::server::take_options(&mut app);
+        crate::server::check_config(&app.config)?;
+        crate::server::serve(app.prepare(), listener, options.shutdown).await
     }
 
     /// An in-process client for tests; no sockets involved. Startup hooks run
