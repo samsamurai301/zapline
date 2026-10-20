@@ -96,3 +96,11 @@ pub mod request_id;
 pub mod security_headers;
 
 // WP-MIDDLEWARE re-exports (owned by the middleware work package)
+pub use catch_panic::CatchPanic;
+#[cfg(feature = "compression")]
+pub use compression::{Compression, CompressionLevel};
+pub use limit::ConcurrencyLimit;
+pub use normalize_path::NormalizePath;
+pub use rate_limit::{RateLimit, RateLimitKey, RateLimitPolicy, TrustedProxies};
+pub use request_id::{RequestId, SetRequestId};
+pub use security_headers::SecurityHeaders;
