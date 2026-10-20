@@ -1,0 +1,13 @@
+//! HTTP routes, one module per resource.
+//!
+//! `zapline generate resource <name>` adds modules here and registers them
+//! between the markers below. Install them all with `.plugin(routes::install)`.
+
+use zapline::prelude::*;
+
+/// Registers every route module on the app.
+pub fn install(mut app: App) -> App {
+    // zapline:routes:start
+    // zapline:routes:end
+    app
+}

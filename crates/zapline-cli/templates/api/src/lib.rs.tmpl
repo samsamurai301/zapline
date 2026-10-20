@@ -1,0 +1,21 @@
+//! @@name@@: a zapline API.
+//!
+//! The binary (`src/main.rs`) only serves [`app`]. Tests build the same app and
+//! drive it in-process with `app().test()`, no sockets involved.
+
+pub mod models;
+pub mod routes;
+
+use zapline::openapi::OpenApi;
+use zapline::prelude::*;
+
+/// Builds the application: OpenAPI docs plus every route module.
+pub fn app() -> App {
+    App::new()
+        // Serves /openapi.json, with Swagger UI at /docs.
+        .openapi(OpenApi::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .plugin(routes::install)
+}

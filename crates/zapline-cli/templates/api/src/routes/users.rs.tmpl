@@ -1,0 +1,165 @@
+//! `/users` CRUD endpoints backed by an in-memory store.
+//!
+//! The store lives in `State`, so swapping it for a database pool later only
+//! touches this file.
+
+use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use zapline::prelude::*;
+use zapline::validate::Valid;
+
+use crate::models::{NewUser, Pagination, User};
+
+/// Largest page `GET /users` returns.
+const MAX_PAGE: usize = 200;
+
+/// Domain errors raised by the store. They are turned into HTTP errors below,
+/// so handlers can simply use `?`.
+#[derive(Debug)]
+enum StoreError {
+    NotFound,
+    EmailTaken,
+}
+
+impl From<StoreError> for Error {
+    fn from(err: StoreError) -> Self {
+        match err {
+            StoreError::NotFound => Error::not_found(),
+            StoreError::EmailTaken => {
+                Error::conflict("email already registered").with_code("email_taken")
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct Inner {
+    last_id: u64,
+    users: BTreeMap<u64, User>,
+}
+
+impl Inner {
+    /// Whether a user other than `except` already has this email address.
+    fn email_taken(&self, email: &str, except: Option<u64>) -> bool {
+        let mut others = self.users.values().filter(|u| Some(u.id) != except);
+        others.any(|u| u.email == email)
+    }
+}
+
+/// Thread-safe in-memory user store. Clones share the same data.
+#[derive(Clone, Default)]
+pub struct UserStore(Arc<RwLock<Inner>>);
+
+impl UserStore {
+    // A poisoned lock only means another request panicked mid-update; the map
+    // itself is still consistent, so keep serving instead of failing forever.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn list(&self, offset: usize, limit: usize) -> Vec<User> {
+        let inner = self.read();
+        let page = inner.users.values().skip(offset).take(limit);
+        page.cloned().collect()
+    }
+
+    fn get(&self, id: u64) -> Result<User, StoreError> {
+        let inner = self.read();
+        inner.users.get(&id).cloned().ok_or(StoreError::NotFound)
+    }
+
+    fn create(&self, new: NewUser) -> Result<User, StoreError> {
+        let mut inner = self.write();
+        if inner.email_taken(&new.email, None) {
+            return Err(StoreError::EmailTaken);
+        }
+        inner.last_id += 1;
+        let user = User {
+            id: inner.last_id,
+            name: new.name,
+            email: new.email,
+        };
+        inner.users.insert(user.id, user.clone());
+        Ok(user)
+    }
+
+    fn replace(&self, id: u64, new: NewUser) -> Result<User, StoreError> {
+        let mut inner = self.write();
+        if !inner.users.contains_key(&id) {
+            return Err(StoreError::NotFound);
+        }
+        if inner.email_taken(&new.email, Some(id)) {
+            return Err(StoreError::EmailTaken);
+        }
+        let user = User {
+            id,
+            name: new.name,
+            email: new.email,
+        };
+        inner.users.insert(id, user.clone());
+        Ok(user)
+    }
+
+    fn delete(&self, id: u64) -> Result<(), StoreError> {
+        let removed = self.write().users.remove(&id);
+        removed.map(|_| ()).ok_or(StoreError::NotFound)
+    }
+}
+
+/// List users, optionally paginated with `?limit=` and `?offset=`.
+#[get("/users")]
+async fn list_users(
+    State(store): State<UserStore>,
+    Query(page): Query<Pagination>,
+) -> Json<Vec<User>> {
+    let limit = page.limit.unwrap_or(50).min(MAX_PAGE);
+    Json(store.list(page.offset.unwrap_or(0), limit))
+}
+
+/// Fetch one user by id.
+#[get("/users/{id}")]
+async fn get_user(State(store): State<UserStore>, Path(id): Path<u64>) -> Result<Json<User>> {
+    Ok(Json(store.get(id)?))
+}
+
+/// Create a user. Responds 409 if the email is already registered.
+#[post("/users")]
+async fn create_user(
+    State(store): State<UserStore>,
+    Valid(Json(new)): Valid<Json<NewUser>>,
+) -> Result<(StatusCode, Json<User>)> {
+    Ok((StatusCode::CREATED, Json(store.create(new)?)))
+}
+
+/// Replace a user.
+#[put("/users/{id}")]
+async fn replace_user(
+    State(store): State<UserStore>,
+    Path(id): Path<u64>,
+    Valid(Json(new)): Valid<Json<NewUser>>,
+) -> Result<Json<User>> {
+    Ok(Json(store.replace(id, new)?))
+}
+
+/// Delete a user.
+#[delete("/users/{id}")]
+async fn delete_user(State(store): State<UserStore>, Path(id): Path<u64>) -> Result<StatusCode> {
+    store.delete(id)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Adds the `/users` routes and their store.
+pub fn mount(app: App) -> App {
+    app.state(UserStore::default()).mount((
+        list_users,
+        get_user,
+        create_user,
+        replace_user,
+        delete_user,
+    ))
+}

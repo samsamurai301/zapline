@@ -1,0 +1,123 @@
+//! Persistence boundary.
+//!
+//! Handlers depend on the [`UserRepository`] trait (injected as
+//! `Dep<dyn UserRepository>`), so the in-memory implementation below can be
+//! replaced by a database-backed one in `lib.rs` without touching any route.
+
+use std::collections::BTreeMap;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+use async_trait::async_trait;
+use zapline::prelude::*;
+
+use crate::models::{NewUser, User};
+
+/// Errors a repository can report. They are turned into HTTP errors here, so
+/// handlers can simply use `?`.
+#[derive(Debug)]
+pub enum RepoError {
+    NotFound,
+    EmailTaken,
+}
+
+impl From<RepoError> for Error {
+    fn from(err: RepoError) -> Self {
+        match err {
+            RepoError::NotFound => Error::not_found(),
+            RepoError::EmailTaken => {
+                Error::conflict("email already registered").with_code("email_taken")
+            }
+        }
+    }
+}
+
+/// Storage operations for users.
+#[async_trait]
+pub trait UserRepository: Send + Sync + 'static {
+    async fn list(&self, offset: usize, limit: usize) -> Vec<User>;
+    async fn get(&self, id: u64) -> Result<User, RepoError>;
+    async fn create(&self, new: NewUser) -> Result<User, RepoError>;
+    async fn replace(&self, id: u64, new: NewUser) -> Result<User, RepoError>;
+    async fn delete(&self, id: u64) -> Result<(), RepoError>;
+}
+
+#[derive(Default)]
+struct Inner {
+    last_id: u64,
+    users: BTreeMap<u64, User>,
+}
+
+impl Inner {
+    /// Whether a user other than `except` already has this email address.
+    fn email_taken(&self, email: &str, except: Option<u64>) -> bool {
+        let mut others = self.users.values().filter(|u| Some(u.id) != except);
+        others.any(|u| u.email == email)
+    }
+}
+
+/// In-memory [`UserRepository`], handy for development and tests.
+#[derive(Default)]
+pub struct MemUserRepository(RwLock<Inner>);
+
+impl MemUserRepository {
+    // A poisoned lock only means another request panicked mid-update; the map
+    // itself is still consistent, so keep serving instead of failing forever.
+    fn read(&self) -> RwLockReadGuard<'_, Inner> {
+        self.0.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn write(&self) -> RwLockWriteGuard<'_, Inner> {
+        self.0.write().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+#[async_trait]
+impl UserRepository for MemUserRepository {
+    async fn list(&self, offset: usize, limit: usize) -> Vec<User> {
+        let inner = self.read();
+        let page = inner.users.values().skip(offset).take(limit);
+        page.cloned().collect()
+    }
+
+    async fn get(&self, id: u64) -> Result<User, RepoError> {
+        let inner = self.read();
+        inner.users.get(&id).cloned().ok_or(RepoError::NotFound)
+    }
+
+    async fn create(&self, new: NewUser) -> Result<User, RepoError> {
+        let mut inner = self.write();
+        if inner.email_taken(&new.email, None) {
+            return Err(RepoError::EmailTaken);
+        }
+        inner.last_id += 1;
+        let user = User {
+            id: inner.last_id,
+            name: new.name,
+            email: new.email,
+        };
+        inner.users.insert(user.id, user.clone());
+        Ok(user)
+    }
+
+    async fn replace(&self, id: u64, new: NewUser) -> Result<User, RepoError> {
+        let mut inner = self.write();
+        if !inner.users.contains_key(&id) {
+            return Err(RepoError::NotFound);
+        }
+        if inner.email_taken(&new.email, Some(id)) {
+            return Err(RepoError::EmailTaken);
+        }
+        let user = User {
+            id,
+            name: new.name,
+            email: new.email,
+        };
+        inner.users.insert(id, user.clone());
+        Ok(user)
+    }
+
+    async fn delete(&self, id: u64) -> Result<(), RepoError> {
+        let removed = self.write().users.remove(&id);
+        removed.map(|_| ()).ok_or(RepoError::NotFound)
+    }
+}

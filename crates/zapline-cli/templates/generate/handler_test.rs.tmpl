@@ -1,0 +1,9 @@
+use @@crate_name@@::routes::@@name@@;
+use zapline::App;
+
+#[tokio::test]
+async fn @@name@@_responds() {
+    let client = App::new().plugin(@@name@@::mount).test();
+    let res = client.@@method@@("@@sample_path@@").send().await;
+    assert_eq!(res.status(), @@status@@);
+}

@@ -1,0 +1,14 @@
+//! `@@METHOD@@ @@path@@`
+
+use zapline::prelude::*;
+
+/// TODO: describe what this endpoint does.
+#[@@method@@("@@path@@")]
+async fn @@name@@(@@args@@) -> @@ret@@ {
+    @@body@@
+}
+
+/// Adds the route to the app.
+pub fn mount(app: App) -> App {
+    app.mount(@@name@@)
+}

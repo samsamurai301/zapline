@@ -1,0 +1,76 @@
+//! `/users` CRUD endpoints. Storage is injected through `Dep`, so this module
+//! never knows whether users live in memory or in a database.
+
+use std::time::Duration;
+
+use zapline::di::Dep;
+use zapline::prelude::*;
+use zapline::tasks::BackgroundTasks;
+use zapline::validate::Valid;
+
+use crate::models::{NewUser, Pagination, User};
+use crate::repository::UserRepository;
+
+/// Largest page `GET /users` returns.
+const MAX_PAGE: usize = 200;
+
+/// List users, optionally paginated with `?limit=` and `?offset=`.
+#[get("/users")]
+async fn list_users(
+    repo: Dep<dyn UserRepository>,
+    Query(page): Query<Pagination>,
+) -> Json<Vec<User>> {
+    let limit = page.limit.unwrap_or(50).min(MAX_PAGE);
+    Json(repo.list(page.offset.unwrap_or(0), limit).await)
+}
+
+/// Fetch one user by id.
+#[get("/users/{id}")]
+async fn get_user(repo: Dep<dyn UserRepository>, Path(id): Path<u64>) -> Result<Json<User>> {
+    Ok(Json(repo.get(id).await?))
+}
+
+/// Create a user. Responds 409 if the email is already registered.
+#[post("/users")]
+async fn create_user(
+    repo: Dep<dyn UserRepository>,
+    tasks: BackgroundTasks,
+    Valid(Json(new)): Valid<Json<NewUser>>,
+) -> Result<(StatusCode, Json<User>)> {
+    let user = repo.create(new).await?;
+
+    // Slow side effects belong in the background: the client gets its response
+    // right away while the task keeps running.
+    let (id, email) = (user.id, user.email.clone());
+    tasks.spawn(async move { send_welcome_email(id, &email).await });
+
+    Ok((StatusCode::CREATED, Json(user)))
+}
+
+/// Replace a user.
+#[put("/users/{id}")]
+async fn replace_user(
+    repo: Dep<dyn UserRepository>,
+    Path(id): Path<u64>,
+    Valid(Json(new)): Valid<Json<NewUser>>,
+) -> Result<Json<User>> {
+    Ok(Json(repo.replace(id, new).await?))
+}
+
+/// Delete a user.
+#[delete("/users/{id}")]
+async fn delete_user(repo: Dep<dyn UserRepository>, Path(id): Path<u64>) -> Result<StatusCode> {
+    repo.delete(id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Stand-in for a slow side effect such as sending an email.
+async fn send_welcome_email(id: u64, email: &str) {
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    tracing::info!(user_id = id, %email, "welcome email sent");
+}
+
+/// Adds the `/users` routes.
+pub fn mount(app: App) -> App {
+    app.mount((list_users, get_user, create_user, replace_user, delete_user))
+}

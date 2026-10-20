@@ -1,0 +1,13 @@
+//! Binary entry point: load settings, start logging, serve the app.
+
+use @@crate_name@@::config::Settings;
+use zapline::telemetry;
+
+fn main() -> std::io::Result<()> {
+    telemetry::init();
+
+    let settings = Settings::load()?;
+    tracing::info!(name = %settings.app.name, addr = %settings.addr(), "starting");
+
+    @@crate_name@@::app(&settings).run(settings.addr())
+}

@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+
+# ---- build ----
+FROM rust:1-slim-bookworm AS builder
+WORKDIR /app
+
+# Compile dependencies first so this layer is cached until Cargo.toml changes.
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && cargo build --release \
+    && rm -rf src
+
+COPY src ./src
+# Cargo decides what to rebuild by mtime; make sure the real sources are newer.
+RUN touch src/main.rs src/lib.rs && cargo build --release
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin app
+
+COPY --from=builder /app/target/release/@@name@@ /usr/local/bin/app
+
+USER app
+ENV ADDR=0.0.0.0:8080
+EXPOSE 8080
+ENTRYPOINT ["app"]

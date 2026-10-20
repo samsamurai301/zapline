@@ -1,0 +1,24 @@
+use @@crate_name@@::app;
+
+#[tokio::test]
+async fn index_greets() {
+    let client = app().test();
+    let res = client.get("/").send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text(), "Hello from @@name@@!");
+}
+
+#[tokio::test]
+async fn hello_uses_the_path_parameter() {
+    let client = app().test();
+    let res = client.get("/hello/zapline").send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.text(), "Hello, zapline!");
+}
+
+#[tokio::test]
+async fn unknown_routes_are_404() {
+    let client = app().test();
+    let res = client.get("/nope").send().await;
+    assert_eq!(res.status(), 404);
+}

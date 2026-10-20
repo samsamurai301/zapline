@@ -1,0 +1,118 @@
+use @@crate_name@@::app;
+use serde_json::{json, Value};
+
+fn payload(name: &str, email: &str) -> Value {
+    json!({ "name": name, "email": email })
+}
+
+#[tokio::test]
+async fn create_then_fetch() {
+    let client = app().test();
+
+    let res = client
+        .post("/users")
+        .json(&payload("Ada", "ada@example.com"))
+        .send()
+        .await;
+    assert_eq!(res.status(), 201);
+    let created: Value = res.json();
+    assert_eq!(created["name"], "Ada");
+    assert_eq!(created["email"], "ada@example.com");
+
+    let id = created["id"].as_u64().expect("id is a number");
+    let res = client.get(&format!("/users/{id}")).send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>(), created);
+}
+
+#[tokio::test]
+async fn list_is_paginated() {
+    let client = app().test();
+    for i in 0..5 {
+        let body = payload(&format!("user {i}"), &format!("u{i}@example.com"));
+        let res = client.post("/users").json(&body).send().await;
+        assert_eq!(res.status(), 201);
+    }
+
+    let all: Vec<Value> = client.get("/users").send().await.json();
+    assert_eq!(all.len(), 5);
+
+    let page: Vec<Value> = client.get("/users?limit=2&offset=1").send().await.json();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0], all[1]);
+}
+
+#[tokio::test]
+async fn replace_and_delete() {
+    let client = app().test();
+    let created: Value = client
+        .post("/users")
+        .json(&payload("Ada", "ada@example.com"))
+        .send()
+        .await
+        .json();
+    let id = created["id"].as_u64().expect("id is a number");
+
+    let res = client
+        .put(&format!("/users/{id}"))
+        .json(&payload("Ada Lovelace", "ada@example.com"))
+        .send()
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>()["name"], "Ada Lovelace");
+
+    let res = client.delete(&format!("/users/{id}")).send().await;
+    assert_eq!(res.status(), 204);
+    let res = client.get(&format!("/users/{id}")).send().await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn unknown_user_is_404() {
+    let client = app().test();
+    assert_eq!(client.get("/users/42").send().await.status(), 404);
+    assert_eq!(client.delete("/users/42").send().await.status(), 404);
+    let res = client
+        .put("/users/42")
+        .json(&payload("Nobody", "nobody@example.com"))
+        .send()
+        .await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn non_numeric_id_is_a_client_error() {
+    let client = app().test();
+    let res = client.get("/users/abc").send().await;
+    assert!(res.status().is_client_error());
+}
+
+#[tokio::test]
+async fn invalid_input_is_rejected() {
+    let client = app().test();
+    for body in [
+        payload("", "ada@example.com"),
+        payload("Ada", "not-an-email"),
+    ] {
+        let res = client.post("/users").json(&body).send().await;
+        assert!(
+            res.status().is_client_error(),
+            "{body} should be rejected, got {}",
+            res.status()
+        );
+    }
+    // Nothing was stored.
+    let all: Vec<Value> = client.get("/users").send().await.json();
+    assert!(all.is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_email_conflicts() {
+    let client = app().test();
+    let body = payload("Ada", "ada@example.com");
+    assert_eq!(client.post("/users").json(&body).send().await.status(), 201);
+
+    let res = client.post("/users").json(&body).send().await;
+    assert_eq!(res.status(), 409);
+    assert_eq!(res.json::<Value>()["code"], "email_taken");
+}

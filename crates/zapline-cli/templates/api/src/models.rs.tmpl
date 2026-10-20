@@ -1,0 +1,35 @@
+//! Data types shared by the routes.
+//!
+//! `JsonSchema` feeds the generated OpenAPI document and `Validate` powers
+//! `Valid<Json<T>>`, which rejects bad input with a descriptive error before
+//! your handler runs.
+
+use serde::{Deserialize, Serialize};
+use zapline::openapi::JsonSchema;
+use zapline::validate::Validate;
+
+/// A user as stored and returned by the API.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct User {
+    pub id: u64,
+    pub name: String,
+    pub email: String,
+}
+
+/// Payload for creating or replacing a user.
+#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+pub struct NewUser {
+    #[validate(length(min = 1, max = 100))]
+    pub name: String,
+    #[validate(email)]
+    pub email: String,
+}
+
+/// Query parameters for `GET /users`.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct Pagination {
+    /// Maximum number of users to return (default 50, at most 200).
+    pub limit: Option<usize>,
+    /// Number of users to skip (default 0).
+    pub offset: Option<usize>,
+}

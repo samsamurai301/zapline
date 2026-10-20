@@ -1,0 +1,91 @@
+use @@crate_name@@::routes::@@plural@@;
+use serde_json::{json, Value};
+use zapline::test::TestClient;
+use zapline::App;
+
+fn client() -> TestClient {
+    App::new().plugin(@@plural@@::mount).test()
+}
+
+#[tokio::test]
+async fn crud_lifecycle() {
+    let client = client();
+
+    let res = client
+        .post("@@path@@")
+        .json(&json!({ "name": "first" }))
+        .send()
+        .await;
+    assert_eq!(res.status(), 201);
+    let created: Value = res.json();
+    assert_eq!(created["name"], "first");
+    let id = created["id"].as_u64().expect("id is a number");
+
+    let res = client.get(&format!("@@path@@/{id}")).send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>(), created);
+
+    let all: Vec<Value> = client.get("@@path@@").send().await.json();
+    assert_eq!(all, vec![created]);
+
+    let res = client
+        .put(&format!("@@path@@/{id}"))
+        .json(&json!({ "name": "renamed" }))
+        .send()
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>()["name"], "renamed");
+
+    let res = client.delete(&format!("@@path@@/{id}")).send().await;
+    assert_eq!(res.status(), 204);
+    let res = client.get(&format!("@@path@@/{id}")).send().await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn list_is_paginated() {
+    let client = client();
+    for i in 0..5 {
+        let body = json!({ "name": format!("item {i}") });
+        let res = client.post("@@path@@").json(&body).send().await;
+        assert_eq!(res.status(), 201);
+    }
+
+    let all: Vec<Value> = client.get("@@path@@").send().await.json();
+    assert_eq!(all.len(), 5);
+
+    let page: Vec<Value> = client
+        .get("@@path@@?limit=2&offset=1")
+        .send()
+        .await
+        .json();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0], all[1]);
+}
+
+#[tokio::test]
+async fn unknown_id_is_404() {
+    let client = client();
+    assert_eq!(client.get("@@path@@/42").send().await.status(), 404);
+    assert_eq!(client.delete("@@path@@/42").send().await.status(), 404);
+    let res = client
+        .put("@@path@@/42")
+        .json(&json!({ "name": "nobody" }))
+        .send()
+        .await;
+    assert_eq!(res.status(), 404);
+}
+
+#[tokio::test]
+async fn invalid_input_is_rejected() {
+    let client = client();
+    let res = client
+        .post("@@path@@")
+        .json(&json!({ "name": "" }))
+        .send()
+        .await;
+    assert!(res.status().is_client_error(), "got {}", res.status());
+
+    let all: Vec<Value> = client.get("@@path@@").send().await.json();
+    assert!(all.is_empty());
+}

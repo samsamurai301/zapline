@@ -1,0 +1,105 @@
+use @@crate_name@@::app;
+use @@crate_name@@::config::Settings;
+use serde_json::{json, Value};
+use zapline::test::TestClient;
+
+fn client() -> TestClient {
+    let settings = Settings::load().expect("config/default.toml loads");
+    app(&settings).test()
+}
+
+fn payload(name: &str, email: &str) -> Value {
+    json!({ "name": name, "email": email })
+}
+
+#[tokio::test]
+async fn create_then_fetch() {
+    let client = client();
+
+    let res = client
+        .post("/users")
+        .json(&payload("Ada", "ada@example.com"))
+        .send()
+        .await;
+    assert_eq!(res.status(), 201);
+    let created: Value = res.json();
+    assert_eq!(created["name"], "Ada");
+
+    let id = created["id"].as_u64().expect("id is a number");
+    let res = client.get(&format!("/users/{id}")).send().await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>(), created);
+}
+
+#[tokio::test]
+async fn list_is_paginated() {
+    let client = client();
+    for i in 0..5 {
+        let body = payload(&format!("user {i}"), &format!("u{i}@example.com"));
+        let res = client.post("/users").json(&body).send().await;
+        assert_eq!(res.status(), 201);
+    }
+
+    let all: Vec<Value> = client.get("/users").send().await.json();
+    assert_eq!(all.len(), 5);
+
+    let page: Vec<Value> = client.get("/users?limit=2&offset=1").send().await.json();
+    assert_eq!(page.len(), 2);
+    assert_eq!(page[0], all[1]);
+}
+
+#[tokio::test]
+async fn replace_and_delete() {
+    let client = client();
+    let created: Value = client
+        .post("/users")
+        .json(&payload("Ada", "ada@example.com"))
+        .send()
+        .await
+        .json();
+    let id = created["id"].as_u64().expect("id is a number");
+
+    let res = client
+        .put(&format!("/users/{id}"))
+        .json(&payload("Ada Lovelace", "ada@example.com"))
+        .send()
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.json::<Value>()["name"], "Ada Lovelace");
+
+    assert_eq!(
+        client.delete(&format!("/users/{id}")).send().await.status(),
+        204
+    );
+    assert_eq!(
+        client.get(&format!("/users/{id}")).send().await.status(),
+        404
+    );
+}
+
+#[tokio::test]
+async fn invalid_input_is_rejected() {
+    let client = client();
+    for body in [
+        payload("", "ada@example.com"),
+        payload("Ada", "not-an-email"),
+    ] {
+        let res = client.post("/users").json(&body).send().await;
+        assert!(
+            res.status().is_client_error(),
+            "{body} should be rejected, got {}",
+            res.status()
+        );
+    }
+}
+
+#[tokio::test]
+async fn duplicate_email_conflicts() {
+    let client = client();
+    let body = payload("Ada", "ada@example.com");
+    assert_eq!(client.post("/users").json(&body).send().await.status(), 201);
+
+    let res = client.post("/users").json(&body).send().await;
+    assert_eq!(res.status(), 409);
+    assert_eq!(res.json::<Value>()["code"], "email_taken");
+}
