@@ -381,9 +381,17 @@ struct Shared {
 
 #[derive(Default)]
 struct State {
-    /// Raw `Cookie` headers; parsed on first load.
+    /// Raw `Cookie` headers; parsed into `cookie_id` on first load.
     cookies: Vec<HeaderValue>,
+    parsed: bool,
+    /// The verified session id the client sent. Only a successful store
+    /// load decides what it means (until then the request is not
+    /// cookie-less).
+    cookie_id: Option<String>,
     loaded: bool,
+    /// Why loading failed, if it did. Every later access in the request
+    /// fails the same way, and the client's cookie is left alone.
+    load_error: Option<String>,
     /// The client sent a valid session cookie.
     had_cookie: bool,
     id: Option<String>,
@@ -402,7 +410,11 @@ struct State {
 /// share the same data. Changes are persisted after the handler returns.
 ///
 /// Values are stored as JSON. Without the layer, extraction fails with
-/// `500`.
+/// `500`. When the store fails to load the session, extraction (and
+/// [`Session::current`]) fails with `503` (code
+/// `session_store_unavailable`) for the rest of the request, and the
+/// client's session cookie is left untouched: a store outage never starts a
+/// new session over the user's.
 #[derive(Clone)]
 pub struct Session {
     inner: Arc<Shared>,
@@ -442,26 +454,44 @@ impl Session {
         self.inner.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Load from the store (once).
+    /// Load from the store (once). A store error fails this and every later
+    /// load in the request with `503`: the session is never mistaken for a
+    /// missing one, which would start a new session over the client's.
     async fn load(&self) -> Result<()> {
         let id = {
             let mut st = self.state();
             if st.loaded {
                 return Ok(());
             }
-            let id = self.read_cookie(&st.cookies);
-            st.cookies = Vec::new();
-            id
+            if let Some(cause) = &st.load_error {
+                return Err(store_unavailable().with_source(cause.clone()));
+            }
+            if !st.parsed {
+                let cookies = std::mem::take(&mut st.cookies);
+                st.cookie_id = self.read_cookie(&cookies);
+                st.parsed = true;
+            }
+            st.cookie_id.clone()
         };
         let record = match &id {
-            Some(id) => self.inner.store.load(id).await?,
-            None => None,
+            Some(id) => self.inner.store.load(id).await,
+            None => Ok(None),
         };
         let now = SystemTime::now();
         let mut st = self.state();
         if st.loaded {
             return Ok(());
         }
+        if let Some(cause) = &st.load_error {
+            return Err(store_unavailable().with_source(cause.clone()));
+        }
+        let record = match record {
+            Ok(record) => record,
+            Err(e) => {
+                st.load_error = Some(e.to_string());
+                return Err(store_unavailable().with_source(e));
+            }
+        };
         st.loaded = true;
         st.had_cookie = id.is_some();
         match (id, record) {
@@ -581,7 +611,8 @@ impl Session {
             delete: std::mem::take(&mut st.stale),
             ..Plan::default()
         };
-        if !st.loaded {
+        // Not loaded (or the store failed): keep the client's cookie as is.
+        if !st.loaded || st.load_error.is_some() {
             return Ok(plan);
         }
         let persist = (st.modified || st.refresh) && !(st.id.is_none() && st.data.is_empty());
@@ -668,6 +699,10 @@ fn is_session_id(s: &str) -> bool {
     s.len() == 43
         && s.bytes()
             .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn store_unavailable() -> Error {
+    Error::service_unavailable("session store unavailable").with_code("session_store_unavailable")
 }
 
 fn missing_layer() -> Error {

@@ -1,6 +1,6 @@
 # Cookies, sessions & CSRF
 
-Cookies, server-side sessions and CSRF protection for browser-facing apps. All of it needs the Cargo feature `cookies` (CSRF included; it adds the `cookie` and `getrandom` crates). The common case is a session behind a signed cookie:
+Cookies, server-side sessions and CSRF protection for browser-facing apps. All of it needs the Cargo feature `cookies` (CSRF included; it adds the `cookie`, `getrandom`, `hmac` and `sha2` crates). The common case is a session behind a signed cookie:
 
 ```rust
 use zapline::cookies::Key;
@@ -86,7 +86,7 @@ fn app() -> App {
 }
 ```
 
-`Key::generate()` creates a random key. That's fine for development, but every restart invalidates all signed and private cookies and all sessions, and each instance would use a different key. In production, load a stable key of at least 64 bytes. The same key signs sessions and protects the jars.
+`Key::generate()` creates a random key. That's fine for development, but every restart invalidates all signed and private cookies and all sessions, and each instance would use a different key. In production, load a stable key of at least 64 bytes. The same key signs sessions and CSRF tokens and protects the jars.
 
 ## Sessions
 
@@ -113,6 +113,7 @@ How it behaves:
 - **Saved only when needed.** Unchanged sessions aren't written, except to extend the expiry.
 - **Sliding expiry.** A session expires after the idle timeout (`ttl`, default 24 hours). It is saved again, with a fresh cookie, when less than half of that remains.
 - **Fixation-proof.** An unknown or expired id sent by the client is never adopted: you get a new session, and a new id is issued when data is stored. An empty new session is never stored.
+- **Store outages don't log users out.** If the store fails to load the session, every use of it in that request fails with `503` and the code `session_store_unavailable` (also when an earlier use, such as an authenticator on an `.allow_anonymous()` route, swallowed the first error). The request never falls back to a new, empty session, and its response doesn't touch the session cookie, so the user is still signed in once the store recovers.
 - Without the layer, extracting `Session` fails with `500 session_layer_missing`. Without a cookie key, the layer fails with `500 cookie_key_missing`.
 
 ### `SessionLayer` options
@@ -169,7 +170,7 @@ fn layer() -> SessionLayer {
 }
 ```
 
-A `SessionRecord` has two fields: `data` (a JSON map) and `expires_at` (a `SystemTime`). Errors from your store propagate to the client as the `Error` you return (usually map them to a `503` or `500`).
+A `SessionRecord` has two fields: `data` (a JSON map) and `expires_at` (a `SystemTime`). An error from `load` becomes `503 session_store_unavailable`, with your error kept as its source for the logs. Errors from `save` and `delete` propagate to the client as the `Error` you return (usually map them to a `503` or `500`).
 
 ### Sessions as authentication
 
@@ -244,12 +245,21 @@ async fn session_survives_a_round_trip() {
 
 ## CSRF
 
-`Csrf` is double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
+`Csrf` is signed double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`__Host-zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
+
+**Register a cookie key** with `App::cookie_key` (or give one to `.key(..)`); it is strongly recommended. Tokens are then signed: 32 random bytes followed by their HMAC-SHA256 under the key, base64url-encoded (86 characters), and only tokens this server minted are accepted. Without a key, tokens are plain random values (43 characters) and anything well-formed is accepted.
+
+Signing matters because `SameSite` doesn't stop a sibling subdomain. A page on `evil.example.com` (or a compromised `blog.example.com`) is same-site with `app.example.com`, so it can set `zapline.csrf=<chosen>; Domain=example.com; Path=/transfer`. Browsers send that cookie first, and the attacker submits the same chosen value. Three things stop this:
+
+- **Signed tokens.** A planted value of the attacker's choosing doesn't verify, so it is ignored.
+- **The `__Host-` prefix.** Browsers refuse a `__Host-` cookie unless it is `Secure`, has `Path=/` and no `Domain`, so other hosts can't set it at all. The default name has it whenever the cookie is `Secure` (the default). With `.secure(false)`, for development over plain HTTP, the default name is `zapline.csrf`, because browsers would drop a `__Host-` cookie without `Secure`.
+- **Several token cookies must agree.** If a request carries two different valid tokens, unsafe requests are rejected whichever one is submitted. A signed token isn't tied to a user, so this is what stops an attacker who plants a token the server minted for them next to the victim's (and the `__Host-` prefix stops the planting itself).
 
 Install it as global middleware and render the token with the `CsrfToken` extractor:
 
 ```rust
 use zapline::auth::{Csrf, CsrfToken};
+use zapline::cookies::Key;
 use zapline::prelude::*;
 
 async fn form(token: CsrfToken) -> Html<String> {
@@ -265,6 +275,7 @@ async fn transfer(Form(fields): Form<std::collections::HashMap<String, String>>)
 
 fn app() -> App {
     App::new()
+        .cookie_key(Key::generate())          // load a stable key in production
         .wrap(Csrf::new().exempt("/webhooks/*"))
         .get("/form", form)
         .post("/transfer", transfer)
@@ -283,12 +294,13 @@ fetch("/transfer", {
 
 | `Csrf` method | Default | Effect |
 |---|---|---|
-| `.cookie_name(name)` | `zapline.csrf` | Token cookie name. In production consider `__Host-csrf`: the cookie already has `Path=/`, `Secure` and no `Domain`. |
+| `.cookie_name(name)` | `__Host-zapline.csrf` (`zapline.csrf` with `.secure(false)`) | Token cookie name. The cookie has `Path=/` and no `Domain`; a `__Host-` name also needs `Secure`. |
 | `.header_name(name)` | `x-csrf-token` | Request header carrying the token |
 | `.form_field(name)` | `csrf_token` | URL-encoded form field carrying the token |
 | `.exempt(path)` | none | Skips the check for an exact path, or for a prefix when it ends in `*` (`"/webhooks/*"`) |
-| `.secure(bool)` | `true` | `Secure` attribute of the token cookie |
+| `.secure(bool)` | `true` | `Secure` attribute of the token cookie. Disable it only for local development; the default name then drops its `__Host-` prefix. |
 | `.same_site(SameSite)` | `Lax` | `SameSite` attribute of the token cookie |
+| `.key(key)` | the app's key | Sign tokens with this key instead of `App::cookie_key`. With neither, tokens are unsigned. |
 
 `CsrfToken` offers `as_str()`, `field_name()`, `hidden_input()` (an HTML-escaped `<input type="hidden">`) and `Display`. Without the middleware, extracting it fails with `500 csrf_layer_missing`.
 
@@ -297,4 +309,5 @@ Things to know:
 - **Forms must be URL-encoded to use the field.** `multipart/form-data` bodies are never inspected; send the token in the header instead (for example, in a `fetch` call).
 - **APIs that authenticate with an `Authorization` header don't need CSRF.** Browsers don't attach that header on their own. Apply `Csrf` only to the cookie-authenticated part of the app, for instance with `.exempt("/api/*")`, or use `Routes::wrap` on the group.
 - Exempt paths still receive a token cookie, and they are matched against the request path (before routing).
+- Changing the key (or adding one) invalidates existing tokens. Clients get a fresh token on their next safe request, and forms rendered before the change fail once with `403`.
 - Defense in depth: keep the session cookie `SameSite=Lax` (the default) or `Strict`, in addition to the token.

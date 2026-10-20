@@ -60,6 +60,7 @@ use tokio_util::io::ReaderStream;
 
 use crate::body::Body;
 use crate::handler::{BoxFuture, Handler};
+use crate::middleware::normalize_path::TrailingSlashTrimmed;
 use crate::request::{decode, Request};
 use crate::response::{IntoResponse, Response};
 use crate::router::Routes;
@@ -135,6 +136,8 @@ impl ServeDir {
     /// The file served for directory requests (default `index.html`).
     /// A request for a directory without a trailing slash is redirected
     /// (`307`) to add one, so relative links in the page resolve correctly.
+    /// Behind [`NormalizePath::trim_trailing_slash`](crate::middleware::NormalizePath::trim_trailing_slash),
+    /// which would undo that redirect, the index is served directly instead.
     pub fn index_file(mut self, name: impl Into<String>) -> Self {
         self.config().index_file = Some(name.into());
         self
@@ -593,7 +596,11 @@ async fn serve_dir(cfg: Arc<DirConfig>, req: Request) -> Response {
     let Some(rel) = sanitize(&tail, cfg.show_hidden) else {
         return Error::not_found().into_response();
     };
-    let dir_needs_slash = !rel.as_os_str().is_empty() && !tail.ends_with('/');
+    // Behind `NormalizePath::trim_trailing_slash`, `/dir/` would be trimmed
+    // back to `/dir`: serve the index there instead of redirecting forever.
+    let dir_needs_slash = !rel.as_os_str().is_empty()
+        && !tail.ends_with('/')
+        && req.extensions().get::<TrailingSlashTrimmed>().is_none();
     let encodings = cfg.opts.encodings(req.headers());
 
     let c = cfg.clone();

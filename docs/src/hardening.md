@@ -319,7 +319,7 @@ fn canonical() -> NormalizePath {
 
 | Method | Effect |
 |---|---|
-| `NormalizePath::trim_trailing_slash()` | `/users/` becomes `/users` (the default). The root `/` is untouched. |
+| `NormalizePath::trim_trailing_slash()` | `/users/` becomes `/users` (the default). The root `/` is untouched. `ServeDir` then serves a directory's index at `/dir` instead of redirecting to `/dir/`, which would loop (see [Static files](files.md#with-normalizepath)). |
 | `NormalizePath::append_trailing_slash()` | `/users` becomes `/users/`. Paths whose last segment contains a `.` (like `/app.js`) are left alone. Mostly useful with `redirect` or with catch-all handlers such as static files. |
 | `.merge_slashes(true)` | `/a//b` becomes `/a/b` |
 | `.redirect(status)` | Answer with a redirect to the normalized URL, query string preserved. Panics if `status` is not 3xx. |
@@ -458,4 +458,4 @@ Why this order:
 6. **`Compression` innermost of the global layers.** It compresses what handlers produce, and the small error bodies from the layers above skip the work. The CPU it spends is covered by the limits and the timeout.
 7. **`RateLimit` as `wrap_route`.** Only route middleware can see per-route policies like `.rate_limit(5, MINUTE)`. The cost is that unmatched requests (404s) aren't rate-limited; they allocate nothing and are cheap, and `ConcurrencyLimit` still covers floods. Use `App::wrap(RateLimit::..)` instead if you need to limit 404s, and accept that policies are ignored there.
 
-Authentication and authorization go closer to the handlers still, on route groups. See [Authentication & authorization](auth.md) for why role checks must run after routing. Add [`Csrf`](sessions.md#csrf) globally if your app serves cookie-authenticated forms. And pair this stack with `Metrics` and `Health` from [Observability](observability.md), remembering that `wrap_route` middleware also covers their routes (exempt `/healthz` and friends, as above).
+Authentication and authorization go closer to the handlers still, on route groups. See [Authentication & authorization](auth.md) for why role checks must run after routing. Add [`Csrf`](sessions.md#csrf) globally if your app serves cookie-authenticated forms, with a cookie key registered (`App::cookie_key`) so its tokens are signed. And pair this stack with `Metrics` and `Health` from [Observability](observability.md), remembering that `wrap_route` middleware also covers their routes (exempt `/healthz` and friends, as above).

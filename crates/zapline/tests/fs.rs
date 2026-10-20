@@ -8,8 +8,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use zapline::fs::{ServeDir, ServeFile, StaticFilesRoute};
+use zapline::middleware::NormalizePath;
 use zapline::prelude::*;
-use zapline::test::TestClient;
+use zapline::test::{TestClient, TestResponse};
 
 struct Fixture {
     tmp: TempDir,
@@ -583,6 +584,100 @@ async fn as_fallback_handler_and_nested() {
     );
     let meta = c.routes()[0].meta::<StaticFilesRoute>().unwrap();
     assert_eq!(meta.root, f.root.join("sub"));
+}
+
+/// GET `path` like a browser: follow redirects, giving up after 10 hops
+/// (`ERR_TOO_MANY_REDIRECTS`). Returns the final response and every
+/// `Location` visited.
+async fn browse(c: &TestClient, path: &str) -> (TestResponse, Vec<String>) {
+    let mut hops = Vec::new();
+    let mut r = c.get(path).send().await;
+    while r.status().is_redirection() {
+        assert!(hops.len() < 10, "redirect loop: {path} -> {hops:?}");
+        let next = r.header("location").unwrap().to_owned();
+        r = c.get(&next).send().await;
+        hops.push(next);
+    }
+    (r, hops)
+}
+
+#[tokio::test]
+async fn directories_behind_normalize_path_never_loop() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("docs");
+    write(&root.join("index.html"), "<h1>home</h1>");
+    write(&root.join("guide/index.html"), "<h1>guide</h1>");
+    write(&root.join("guide/intro.txt"), "intro");
+    let mounted = |mw: NormalizePath| {
+        App::new()
+            .wrap(mw)
+            .static_files("/", ServeDir::new(&root))
+            .test()
+    };
+
+    // Trimming by rewrite: `/guide/` becomes `/guide`, where the index is
+    // served directly instead of redirecting back to `/guide/`.
+    for c in [
+        mounted(NormalizePath::default()),
+        App::new()
+            .wrap(NormalizePath::trim_trailing_slash())
+            .fallback(ServeDir::new(&root))
+            .test(),
+    ] {
+        for path in ["/guide", "/guide/", "/guide?x=1", "/guide/?x=1"] {
+            let (r, hops) = browse(&c, path).await;
+            assert_eq!(
+                (r.status().as_u16(), r.text()),
+                (200, "<h1>guide</h1>".into()),
+                "{path}"
+            );
+            assert!(hops.is_empty(), "{path}: {hops:?}");
+        }
+        assert_eq!(c.get("/guide/intro.txt").send().await.text(), "intro");
+        assert_eq!(c.get("/").send().await.text(), "<h1>home</h1>");
+        assert_eq!(c.get("/missing").send().await.status(), 404);
+    }
+
+    // Trimming by redirect: one hop to the canonical `/guide`, which serves
+    // the index.
+    let c = mounted(NormalizePath::trim_trailing_slash().redirect(StatusCode::PERMANENT_REDIRECT));
+    let r = c.get("/guide/?x=1").send().await;
+    assert_eq!(r.status(), 308);
+    assert_eq!(r.header("location"), Some("/guide?x=1"));
+    for path in ["/guide", "/guide/"] {
+        let (r, hops) = browse(&c, path).await;
+        assert_eq!(
+            (r.status().as_u16(), r.text()),
+            (200, "<h1>guide</h1>".into()),
+            "{path}"
+        );
+        assert!(hops.len() <= 1, "{path}: {hops:?}");
+    }
+
+    // Appending slashes agrees with `ServeDir` already: `/guide/` is the
+    // canonical URL either way.
+    let c = mounted(NormalizePath::append_trailing_slash());
+    for path in ["/guide", "/guide/"] {
+        let (r, hops) = browse(&c, path).await;
+        assert_eq!(
+            (r.status().as_u16(), r.text()),
+            (200, "<h1>guide</h1>".into()),
+            "{path}"
+        );
+        assert!(hops.is_empty(), "{path}: {hops:?}");
+    }
+    let c =
+        mounted(NormalizePath::append_trailing_slash().redirect(StatusCode::PERMANENT_REDIRECT));
+    let (r, hops) = browse(&c, "/guide").await;
+    assert_eq!(r.text(), "<h1>guide</h1>");
+    assert_eq!(hops, ["/guide/"]);
+    assert_eq!(c.get("/guide/intro.txt").send().await.text(), "intro");
+
+    // Without `NormalizePath`, directories still redirect to add the slash.
+    let c = App::new().static_files("/", ServeDir::new(&root)).test();
+    let (r, hops) = browse(&c, "/guide").await;
+    assert_eq!(r.text(), "<h1>guide</h1>");
+    assert_eq!(hops, ["/guide/"]);
 }
 
 #[tokio::test]
