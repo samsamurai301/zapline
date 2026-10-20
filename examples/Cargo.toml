@@ -1,0 +1,18 @@
+[package]
+name = "zapline-examples"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+zapline = { path = "../crates/zapline" }
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+
+[[example]]
+name = "hello"
+path = "hello.rs"
+
+[[example]]
+name = "rest_api"
+path = "rest_api.rs"
