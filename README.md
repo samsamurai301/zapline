@@ -34,7 +34,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 
 | | |
 |---|---|
-| ⚡ **Fast by construction** | Thread-per-core runtimes with `SO_REUSEPORT`, zero-allocation routing, and build-time work instead of per-request work. It beats axum and actix-web on its own [benchmark suite](#benchmarks). |
+| ⚡ **Fast by construction** | Thread-per-core runtimes with `SO_REUSEPORT`, zero-allocation routing, and build-time work instead of per-request work. In the [benchmark suite](#benchmarks) it is 1.5× axum, on par with actix-web on trivial endpoints, and about 30% ahead of actix-web on path parameters and pipelining. |
 | 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
 | 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
 | 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
@@ -152,15 +152,15 @@ The same three endpoints are implemented identically in zapline, axum 0.8, and a
 <!-- BENCH:START -->
 | test | zapline | axum | actix-web |
 |---|---:|---:|---:|
-| plaintext | 277,311 req/s (741.13us) | 165,496 req/s (1.50ms) | 244,669 req/s (0.93ms) |
-| json | 242,054 req/s (0.96ms) | 175,400 req/s (1.43ms) | 225,455 req/s (1.03ms) |
-| path-param | 229,457 req/s (1.04ms) | 152,483 req/s (1.67ms) | 192,076 req/s (1.26ms) |
-| plaintext-pipelined-16 | 1,672,525 req/s (1.42ms) | 92,298 req/s (24.46ms) | 1,215,920 req/s (1.91ms) |
+| plaintext | 238393 req/s (0.93ms) | 158897 req/s (1.59ms) | 232987 req/s (0.99ms) |
+| json | 230154 req/s (1.00ms) | 142491 req/s (1.79ms) | 226023 req/s (1.04ms) |
+| path-param | 238642 req/s (0.98ms) | 153838 req/s (1.76ms) | 179485 req/s (1.40ms) |
+| plaintext-pipelined-16 | 1597907 req/s (1.47ms) | 92241 req/s (24.50ms) | 1221584 req/s (1.91ms) |
 
 _2 server workers on CPUs 0,1; wrk 2 threads / 256 connections on CPUs 2,3; best of 3 × 10s; 4 CPUs total, Linux 6.18.44-fc-v139._
 <!-- BENCH:END -->
 
-Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
+These numbers come from the complete framework with default features (OpenAPI, validation, tracing and so on compiled in). Features you don't use add no per-request cost. Hot-path changes are verified by instruction counts per request (callgrind), not only wall-clock time. Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
 
 ## Project status
 
