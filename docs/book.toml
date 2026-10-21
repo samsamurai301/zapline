@@ -5,5 +5,5 @@ language = "en"
 src = "src"
 
 [output.html]
-git-repository-url = "https://github.com/your-org/zapline"
-edit-url-template = "https://github.com/your-org/zapline/edit/main/docs/{path}"
+git-repository-url = "https://github.com/samsamurai301/zapline"
+edit-url-template = "https://github.com/samsamurai301/zapline/edit/main/docs/{path}"

@@ -1,6 +1,6 @@
 # Architecture
 
-zapline has a small, fast **core** (routing, extractors, responses, errors, the server) and a set of **feature modules** built only on the core's public extension points. Everything lives in one crate, and each module that pulls in a dependency sits behind a Cargo feature (see [Feature flags](features.md)). This page is the short version. The full contract is in [`ARCHITECTURE.md`](https://github.com/your-org/zapline/blob/main/ARCHITECTURE.md) at the root of the repository, which is the document to read before contributing.
+zapline has a small, fast **core** (routing, extractors, responses, errors, the server) and a set of **feature modules** built only on the core's public extension points. Everything lives in one crate, and each module that pulls in a dependency sits behind a Cargo feature (see [Feature flags](features.md)). This page is the short version. The full contract is in [`ARCHITECTURE.md`](https://github.com/samsamurai301/zapline/blob/main/ARCHITECTURE.md) at the root of the repository, which is the document to read before contributing.
 
 ## Design rules
 

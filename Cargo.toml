@@ -6,7 +6,7 @@ members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-cli", "exa
 version = "0.1.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/your-org/zapline"
+repository = "https://github.com/samsamurai301/zapline"
 rust-version = "1.88"
 
 # Faster debug builds and smaller target dirs.

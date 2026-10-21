@@ -27,7 +27,7 @@ zapline runs on **Linux, macOS and Windows**. CI builds, lints and runs the full
 3. In PowerShell:
 
 ```powershell
-git clone https://github.com/<owner>/zapline.git
+git clone https://github.com/samsamurai301/zapline.git
 cd zapline
 .\scripts\check.ps1                      # fmt, clippy, tests, feature matrix, examples, docs
 cargo install --path crates\zapline-cli  # installs zapline.exe and cargo-zapline.exe
