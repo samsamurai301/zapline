@@ -17,6 +17,11 @@ pub fn zapline_bin() -> &'static str {
 pub fn zapline() -> Command {
     let mut cmd = Command::new(zapline_bin());
     cmd.env("NO_COLOR", "1").env_remove("CLICOLOR_FORCE");
+    // Each test project lives in its own temp dir; build it there. An
+    // inherited shared target dir would let parallel tests that build
+    // same-named crates overwrite each other's binaries.
+    cmd.env_remove("CARGO_TARGET_DIR")
+        .env_remove("CARGO_BUILD_TARGET_DIR");
     cmd
 }
 
