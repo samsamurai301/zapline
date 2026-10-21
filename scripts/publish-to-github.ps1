@@ -34,7 +34,9 @@ $ErrorActionPreference = "Continue"
 
 function Info([string]$Message) { Write-Host "==> $Message" -ForegroundColor Cyan }
 function Fail([string]$Message) { Write-Host "error: $Message" -ForegroundColor Red; exit 1 }
-function Git {
+# Not named "Git": PowerShell names are case-insensitive and functions win
+# over programs, so a function called Git would capture every `git` call.
+function Invoke-Git {
     & git @args
     if ($LASTEXITCODE -ne 0) { Fail "git $($args -join ' ') failed" }
 }
@@ -54,7 +56,7 @@ if ($LASTEXITCODE -eq 0 -and $root -and (Test-Path (Join-Path $root "crates/zapl
     $target = Join-Path (Split-Path $bundle -Parent) "zapline"
     if (Test-Path $target) { Fail "$target already exists. Run the script from inside it, or move it away." }
     Info "Cloning $bundle into $target"
-    Git clone $bundle $target
+    Invoke-Git clone $bundle $target
     Set-Location $target
 }
 
@@ -99,11 +101,11 @@ if (-not $Remote) {
 
 # 3. Point origin at GitHub and push the full history.
 & git remote get-url origin *> $null
-if ($LASTEXITCODE -eq 0) { Git remote set-url origin $url } else { Git remote add origin $url }
+if ($LASTEXITCODE -eq 0) { Invoke-Git remote set-url origin $url } else { Invoke-Git remote add origin $url }
 
 Info "Pushing $branch to $url"
-Git push -u origin "${branch}:main"
-Git push origin --tags
+Invoke-Git push -u origin "${branch}:main"
+Invoke-Git push origin --tags
 
 Write-Host ""
 Write-Host "Done." -ForegroundColor Green
