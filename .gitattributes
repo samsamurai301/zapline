@@ -1,0 +1,20 @@
+# Normalize line endings: LF in the repository and in working copies on
+# every OS (Windows included), so generated code, templates, tests that
+# compare exact bytes, and shell scripts behave identically everywhere.
+* text=auto eol=lf
+
+# Windows-native scripts keep CRLF.
+*.ps1 text eol=crlf
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files.
+*.png binary
+*.jpg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.gz binary
+*.br binary
+*.zst binary

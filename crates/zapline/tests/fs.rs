@@ -13,6 +13,8 @@ use zapline::prelude::*;
 use zapline::test::{TestClient, TestResponse};
 
 struct Fixture {
+    // Keeps the directory alive; also read by the unix-only symlink tests.
+    #[cfg_attr(not(unix), allow(dead_code))]
     tmp: TempDir,
     root: PathBuf,
 }

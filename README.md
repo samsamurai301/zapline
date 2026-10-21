@@ -65,6 +65,8 @@ zapline new my-api                           # --template minimal | api | full
 cd my-api && zapline dev                     # rebuilds and restarts on change
 ```
 
+zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install --path crates\zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
+
 Or add it to an existing project:
 
 ```toml
@@ -175,7 +177,7 @@ zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830
 
 ## Contributing
 
-Contributions are very welcome. Run `./scripts/check.sh` before opening a PR; it runs fmt, clippy, the test suite, the feature matrix, the examples and the docs. Performance-sensitive changes should include before/after `./bench/run.sh` numbers. See [CONTRIBUTING.md](CONTRIBUTING.md).
+Contributions are very welcome. Run `./scripts/check.sh` (or `.\scripts\check.ps1` on Windows) before opening a PR; it runs fmt, clippy, the test suite, the feature matrix, the examples and the docs. Performance-sensitive changes should include before/after `./bench/run.sh` numbers. See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 

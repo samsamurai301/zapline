@@ -8,6 +8,8 @@ use std::time::Duration;
 
 use common::*;
 
+// Used by the unix-only `dev` tests (they send real signals).
+#[cfg_attr(not(unix), allow(dead_code))]
 const SLOW: Duration = Duration::from_secs(90);
 
 // ---- routes ---------------------------------------------------------------------------
@@ -476,7 +478,7 @@ Transfer/sec:     25.48MB";
     }
 
     #[test]
-    fn bench_without_wrk_explains_how_to_install_it() {
+    fn bench_without_a_load_generator_explains_how_to_install_one() {
         let tmp = tempfile::tempdir().unwrap();
         let empty = tmp.path().join("empty");
         fs::create_dir(&empty).unwrap();
@@ -486,8 +488,9 @@ Transfer/sec:     25.48MB";
             .output()
             .unwrap();
         let log = expect_failure(&out);
-        assert!(log.contains("`wrk` was not found"), "{log}");
-        assert!(log.contains("install"), "{log}");
+        assert!(log.contains("no load generator found"), "{log}");
+        assert!(log.contains("cargo install oha"), "{log}");
+        assert!(log.contains("apt install wrk"), "{log}");
     }
 
     #[test]

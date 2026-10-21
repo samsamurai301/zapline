@@ -272,7 +272,30 @@ pub async fn shutdown_signal() {
             _ => std::future::pending().await,
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // Ctrl-C/Ctrl-Break from a console, CTRL_CLOSE when the console window
+        // closes, and CTRL_SHUTDOWN from `docker stop` / system shutdown.
+        // Windows force-terminates soon after close/shutdown events (about
+        // 5s and 20s), so keep `shutdown_timeout` short for those setups.
+        use tokio::signal::windows::{ctrl_break, ctrl_c, ctrl_close, ctrl_shutdown};
+        match (ctrl_c(), ctrl_break(), ctrl_close(), ctrl_shutdown()) {
+            (Ok(mut c), Ok(mut b), Ok(mut close), Ok(mut shut)) => {
+                tokio::select! {
+                    _ = c.recv() => {}
+                    _ = b.recv() => {}
+                    _ = close.recv() => {}
+                    _ = shut.recv() => {}
+                }
+            }
+            _ => {
+                if tokio::signal::ctrl_c().await.is_err() {
+                    std::future::pending::<()>().await;
+                }
+            }
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         if tokio::signal::ctrl_c().await.is_err() {
             std::future::pending::<()>().await;
@@ -706,6 +729,11 @@ fn bind_listeners(
 
 fn bind_tcp(addr: SocketAddr, backlog: i32, reuse_port: bool) -> io::Result<std::net::TcpListener> {
     let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    // On Unix, SO_REUSEADDR only allows rebinding over TIME_WAIT connections.
+    // On Windows it lets *other* processes bind the same port while we listen
+    // (port hijacking), and Windows' default already allows quick restarts,
+    // so leave it off there.
+    #[cfg(unix)]
     socket.set_reuse_address(true)?;
     #[cfg(all(
         unix,

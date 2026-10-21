@@ -19,6 +19,7 @@ pub struct ProcessCollector;
 
 /// Clock ticks per second used by `/proc/<pid>/stat` (`USER_HZ`). It is 100
 /// on every mainstream Linux architecture; the Go client hard-codes it too.
+#[cfg(target_os = "linux")]
 const USER_HZ: f64 = 100.0;
 
 /// When this module was first used: the start-time fallback off Linux.

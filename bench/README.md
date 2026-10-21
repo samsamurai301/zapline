@@ -14,6 +14,8 @@ apart from the worker count and actix's backlog (set to match zapline's 4096).
 
 ## Running
 
+`run.sh` uses Linux's `taskset` to pin the server and client to separate CPUs, so it is Linux-only. On macOS or Windows, measure a single app with `zapline bench <url>`, which uses wrk or the cross-platform [oha](https://github.com/hatoo/oha) (`cargo install oha`). Publish comparison numbers from Linux, where zapline's thread-per-core runtime applies.
+
 ```sh
 sudo apt-get install wrk bc     # or brew install wrk
 ./bench/run.sh

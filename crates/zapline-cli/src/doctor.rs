@@ -163,7 +163,13 @@ pub fn run_checks() -> Vec<Check> {
             name: "wrk",
             importance: Importance::Optional,
             status: classify(probe("wrk", &["--version"]), None),
-            purpose: "needed by `zapline bench` (apt install wrk / brew install wrk)",
+            purpose: "load generator for `zapline bench` on Linux/macOS (apt install wrk / brew install wrk)",
+        },
+        Check {
+            name: "oha",
+            importance: Importance::Optional,
+            status: classify(probe("oha", &["--version"]), None),
+            purpose: "cross-platform load generator; `zapline bench` uses it when wrk is missing (cargo install oha)",
         },
     ]
 }

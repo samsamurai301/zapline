@@ -1,5 +1,7 @@
 # Quickstart
 
+> On **Windows**, install the Visual Studio C++ Build Tools first and use PowerShell. See [Platform support](platforms.md#setting-up-on-windows).
+
 ## With the CLI (recommended)
 
 ```sh

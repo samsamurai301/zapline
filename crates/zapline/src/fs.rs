@@ -556,7 +556,7 @@ fn sanitize(tail: &str, show_hidden: bool) -> Option<PathBuf> {
         if seg == ".." || seg.contains(['\\', '\0']) || (!show_hidden && seg.starts_with('.')) {
             return None;
         }
-        if cfg!(windows) && seg.contains(':') {
+        if cfg!(windows) && !windows_safe_name(seg) {
             return None;
         }
         let mut comps = Path::new(seg).components();
@@ -566,6 +566,30 @@ fn sanitize(tail: &str, show_hidden: bool) -> Option<PathBuf> {
         }
     }
     Some(out)
+}
+
+/// Whether `seg` names a regular file the same way on Windows. Rejects drive
+/// and stream separators (`:`), DOS device names (`CON`, `NUL`, `COM1`,
+/// `lpt1.txt`, ...) which open devices instead of files, and names ending in
+/// `.` or space, which Win32 silently strips (so `secret.txt.` would open
+/// `secret.txt`). Compiled everywhere so it is unit-tested on every OS.
+fn windows_safe_name(seg: &str) -> bool {
+    if seg.contains(':') || seg.ends_with(['.', ' ']) {
+        return false;
+    }
+    let stem = seg.split('.').next().unwrap_or(seg).trim_end_matches(' ');
+    let upper = stem.to_ascii_uppercase();
+    let device = matches!(
+        upper.as_str(),
+        "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+    ) || ((upper.starts_with("COM") || upper.starts_with("LPT"))
+        && upper.len() == 4
+        && upper.as_bytes()[3].is_ascii_digit())
+        || ((stem.starts_with(['C', 'c']) || stem.starts_with(['L', 'l']))
+            && stem.chars().count() == 4
+            && stem.ends_with(['\u{b9}', '\u{b2}', '\u{b3}'])
+            && matches!(upper.get(..3), Some("COM" | "LPT")));
+    !device
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +999,39 @@ impl http_body::Body for FileBody {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_names_reject_devices_streams_and_trailing_dots() {
+        for bad in [
+            "CON",
+            "con",
+            "nul.txt",
+            "Aux.html",
+            "COM1",
+            "lpt9.log",
+            "com\u{b9}",
+            "CONIN$",
+            "file.txt:stream",
+            "C:",
+            "secret.txt.",
+            "secret.txt ",
+            "index.html. ",
+        ] {
+            assert!(!windows_safe_name(bad), "{bad:?} should be rejected");
+        }
+        for good in [
+            "index.html",
+            "console.log",
+            "com10",
+            "lpt",
+            "nullable.js",
+            "a.b.c",
+            "COMMIT",
+            "configure",
+        ] {
+            assert!(windows_safe_name(good), "{good:?} should be allowed");
+        }
+    }
 
     #[test]
     fn ranges() {

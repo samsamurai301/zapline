@@ -47,5 +47,6 @@
 
 # Reference
 
+- [Platform support (Linux, macOS, Windows)](platforms.md)
 - [Feature flags](features.md)
 - [Architecture](architecture.md)

@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for helping! Before you open a PR:
+Thanks for helping! zapline is developed and tested on Linux, macOS and Windows.
+
+Run `./scripts/check.sh` (Linux/macOS) or `.\scripts\check.ps1` (Windows, PowerShell) for the full suite. Before you open a PR:
 
 1. `cargo fmt --all`
 2. `cargo clippy -p zapline -p zapline-macros --all-targets -- -D warnings`

@@ -1,4 +1,6 @@
-//! `zapline bench`: a thin wrapper over [`wrk`](https://github.com/wg/wrk).
+//! `zapline bench`: a thin wrapper over [`wrk`](https://github.com/wg/wrk),
+//! falling back to the cross-platform [`oha`](https://github.com/hatoo/oha)
+//! (e.g. on Windows, where wrk is not available).
 
 use std::io::ErrorKind;
 use std::process::Command;
@@ -74,6 +76,18 @@ pub fn configure(
 }
 
 impl BenchConfig {
+    /// The arguments passed to `oha` (no TUI, plain-text summary).
+    pub fn oha_args(&self) -> Vec<String> {
+        vec![
+            "-c".to_string(),
+            self.connections.to_string(),
+            "-z".to_string(),
+            format!("{}s", self.duration_secs),
+            "--no-tui".to_string(),
+            self.url.clone(),
+        ]
+    }
+
     /// The arguments passed to `wrk`.
     pub fn wrk_args(&self) -> Vec<String> {
         vec![
@@ -111,6 +125,8 @@ pub struct WrkSummary {
     pub socket_errors: Option<String>,
     /// Number of non-2xx/3xx responses.
     pub non_2xx: Option<u64>,
+    /// The load generator that produced the report (`wrk` when `None`).
+    pub tool: Option<&'static str>,
 }
 
 /// Parses wrk's text report.
@@ -148,6 +164,81 @@ pub fn parse_wrk_output(text: &str) -> Result<WrkSummary> {
     }
     if !found_rate {
         bail!("could not find `Requests/sec` in wrk's output");
+    }
+    Ok(s)
+}
+
+/// Parses oha's `--no-tui` text summary into the same shape as wrk's.
+pub fn parse_oha_output(text: &str) -> Result<WrkSummary> {
+    let mut s = WrkSummary {
+        tool: Some("oha"),
+        ..WrkSummary::default()
+    };
+    let mut found_rate = false;
+    let mut section = "";
+    let mut total: u64 = 0;
+    let mut non_2xx: u64 = 0;
+    let mut errors: Vec<String> = Vec::new();
+    // "0.1794 ms" -> "0.1794ms"
+    let value = |rest: &str| rest.split_whitespace().collect::<Vec<_>>().join("");
+    for raw in text.lines() {
+        let line = raw.trim();
+        if line.ends_with(':') && !raw.starts_with(' ') {
+            section = line;
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("Requests/sec:") {
+            if let Ok(v) = rest.trim().parse::<f64>() {
+                s.requests_per_sec = v;
+                found_rate = true;
+            }
+        } else if let Some(rest) = line.strip_prefix("Average:") {
+            s.latency_avg = Some(value(rest));
+        } else if let Some(rest) = line.strip_prefix("Slowest:") {
+            s.latency_max = Some(value(rest));
+        } else if let Some(rest) = line.strip_prefix("Total data:") {
+            s.data_read = Some(value(rest));
+        } else if let Some(rest) = line.strip_prefix("Total:") {
+            s.total_time = Some(value(rest));
+        } else if let Some(rest) = line.strip_prefix("Size/sec:") {
+            s.transfer_per_sec = Some(value(rest));
+        } else if section == "Response time distribution:" {
+            // "50.00% in 0.1342 ms"
+            if let Some((pct, v)) = line.split_once(" in ") {
+                let pct = pct.trim().trim_end_matches('%');
+                let pct = pct.trim_end_matches('0').trim_end_matches('.');
+                s.percentiles.push((format!("{pct}%"), value(v)));
+            }
+        } else if section == "Status code distribution:" {
+            // "[200] 354038 responses"
+            if let Some((code, rest)) = line.strip_prefix('[').and_then(|l| l.split_once(']')) {
+                let n: u64 = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+                    .unwrap_or(0);
+                total += n;
+                if !matches!(code.as_bytes().first(), Some(b'2' | b'3')) {
+                    non_2xx += n;
+                }
+            }
+        } else if section == "Error distribution:" && !line.is_empty() {
+            // Requests still in flight when the duration ends are cut off by
+            // design; that is not a server error.
+            if !line.contains("aborted due to deadline") {
+                errors.push(line.to_string());
+            }
+        }
+    }
+    if !found_rate {
+        bail!("could not find `Requests/sec` in oha's output");
+    }
+    if total > 0 {
+        s.total_requests = Some(total);
+    }
+    s.non_2xx = Some(non_2xx);
+    if !errors.is_empty() {
+        s.socket_errors = Some(errors.join(", "));
     }
     Ok(s)
 }
@@ -194,13 +285,17 @@ pub fn format_rate(v: f64) -> String {
 /// Renders the human-friendly summary.
 pub fn render_summary(cfg: &BenchConfig, s: &WrkSummary, color: bool) -> String {
     let mut out = String::new();
-    out.push_str(&ui::bold(
-        color,
-        format!(
-            "{}  ({} connections, {} threads, {}s)\n",
-            cfg.url, cfg.connections, cfg.threads, cfg.duration_secs
+    let setup = match s.tool {
+        Some(tool) => format!(
+            "{} connections, {}s, {tool}",
+            cfg.connections, cfg.duration_secs
         ),
-    ));
+        None => format!(
+            "{} connections, {} threads, {}s",
+            cfg.connections, cfg.threads, cfg.duration_secs
+        ),
+    };
+    out.push_str(&ui::bold(color, format!("{}  ({setup})\n", cfg.url)));
     out.push_str(&format!(
         "  {:<14}{}\n",
         "Requests/sec",
@@ -209,11 +304,12 @@ pub fn render_summary(cfg: &BenchConfig, s: &WrkSummary, color: bool) -> String 
     if let Some(t) = &s.transfer_per_sec {
         out.push_str(&format!("  {:<14}{t}\n", "Transfer/sec"));
     }
-    if let (Some(avg), Some(sd), Some(max)) = (&s.latency_avg, &s.latency_stdev, &s.latency_max) {
-        out.push_str(&format!(
-            "  {:<14}avg {avg}  stdev {sd}  max {max}\n",
-            "Latency"
-        ));
+    if let (Some(avg), Some(max)) = (&s.latency_avg, &s.latency_max) {
+        let stdev = s
+            .latency_stdev
+            .as_ref()
+            .map_or_else(String::new, |sd| format!("  stdev {sd}"));
+        out.push_str(&format!("  {:<14}avg {avg}{stdev}  max {max}\n", "Latency"));
     }
     if !s.percentiles.is_empty() {
         let parts: Vec<String> = s
@@ -224,6 +320,7 @@ pub fn render_summary(cfg: &BenchConfig, s: &WrkSummary, color: bool) -> String 
         out.push_str(&format!("  {:<14}{}\n", "Percentiles", parts.join("  ")));
     }
     if let (Some(n), Some(t), Some(read)) = (s.total_requests, &s.total_time, &s.data_read) {
+        // wrk and oha both report totals.
         out.push_str(&format!(
             "  {:<14}{n} requests in {t}, {read} read\n",
             "Total"
@@ -248,7 +345,7 @@ pub fn render_summary(cfg: &BenchConfig, s: &WrkSummary, color: bool) -> String 
     out
 }
 
-/// Runs wrk and prints the summary (or wrk's raw output with `raw`).
+/// Runs wrk (or oha) and prints the summary (or the tool's raw output with `raw`).
 pub fn run(cfg: &BenchConfig, raw: bool) -> Result<()> {
     ui::status(
         "Benchmarking",
@@ -257,20 +354,28 @@ pub fn run(cfg: &BenchConfig, raw: bool) -> Result<()> {
             cfg.url, cfg.duration_secs, cfg.connections
         ),
     );
-    let output = match Command::new("wrk").args(cfg.wrk_args()).output() {
-        Ok(o) => o,
-        Err(e) if e.kind() == ErrorKind::NotFound => bail!(
-            "`wrk` was not found on your PATH\n\
-             hint: install it (`apt install wrk`, `brew install wrk`, or build https://github.com/wg/wrk), \
-             then run `zapline doctor` to verify"
-        ),
+    // Prefer wrk (the standard on Linux/macOS); fall back to oha, which
+    // runs everywhere including Windows.
+    let (tool, output) = match Command::new("wrk").args(cfg.wrk_args()).output() {
+        Ok(o) => ("wrk", o),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            match Command::new("oha").args(cfg.oha_args()).output() {
+                Ok(o) => ("oha", o),
+                Err(e) if e.kind() == ErrorKind::NotFound => bail!(
+                    "no load generator found: install `wrk` (apt install wrk / brew install wrk) \
+                     or `oha` (cargo install oha, works on every OS including Windows)\n\
+                     hint: run `zapline doctor` to verify"
+                ),
+                Err(e) => return Err(e).context("failed to run oha"),
+            }
+        }
         Err(e) => return Err(e).context("failed to run wrk"),
     };
     let stdout = String::from_utf8_lossy(&output.stdout);
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         bail!(
-            "wrk failed ({}): {}",
+            "{tool} failed ({}): {}",
             output.status,
             stderr.trim().lines().last().unwrap_or("no output")
         );
@@ -279,8 +384,12 @@ pub fn run(cfg: &BenchConfig, raw: bool) -> Result<()> {
         print!("{stdout}");
         return Ok(());
     }
-    let summary =
-        parse_wrk_output(&stdout).with_context(|| format!("unexpected wrk output:\n{stdout}"))?;
+    let parsed = if tool == "oha" {
+        parse_oha_output(&stdout)
+    } else {
+        parse_wrk_output(&stdout)
+    };
+    let summary = parsed.with_context(|| format!("unexpected {tool} output:\n{stdout}"))?;
     print!("{}", render_summary(cfg, &summary, ui::stdout_color()));
     Ok(())
 }
@@ -288,6 +397,89 @@ pub fn run(cfg: &BenchConfig, raw: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Real `oha 1.16 --no-tui` output (trimmed histogram).
+    const OHA: &str = "\
+Summary:
+  Success rate:\t100.00%
+  Total:\t2003.5402 ms
+  Slowest:\t13.3386 ms
+  Fastest:\t0.0169 ms
+  Average:\t0.1794 ms
+  Requests/sec:\t176721.6810
+
+  Total data:\t4.39 MiB
+  Size/request:\t13 B
+  Size/sec:\t2.19 MiB
+
+Response time histogram:
+   0.017 ms [1]      |
+   1.349 ms [352649] |■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■■
+
+Response time distribution:
+  10.00% in 0.0649 ms
+  50.00% in 0.1342 ms
+  99.00% in 0.7389 ms
+  99.90% in 4.1072 ms
+
+Details (average, fastest, slowest):
+  DNS+dialup:\t1.0728 ms, 0.3276 ms, 2.7238 ms
+
+Status code distribution:
+  [200] 354000 responses
+  [503] 38 responses
+
+Error distribution:
+  [3] connection closed before message completed
+  [30] aborted due to deadline
+";
+
+    #[test]
+    fn parses_oha_output() {
+        let s = parse_oha_output(OHA).unwrap();
+        assert_eq!(s.tool, Some("oha"));
+        assert!((s.requests_per_sec - 176_721.681).abs() < 1e-6);
+        assert_eq!(s.latency_avg.as_deref(), Some("0.1794ms"));
+        assert_eq!(s.latency_max.as_deref(), Some("13.3386ms"));
+        assert_eq!(s.total_time.as_deref(), Some("2003.5402ms"));
+        assert_eq!(s.data_read.as_deref(), Some("4.39MiB"));
+        assert_eq!(s.transfer_per_sec.as_deref(), Some("2.19MiB"));
+        assert_eq!(
+            s.percentiles,
+            vec![
+                ("10%".to_string(), "0.0649ms".to_string()),
+                ("50%".to_string(), "0.1342ms".to_string()),
+                ("99%".to_string(), "0.7389ms".to_string()),
+                ("99.9%".to_string(), "4.1072ms".to_string()),
+            ]
+        );
+        assert_eq!(s.total_requests, Some(354_038));
+        assert_eq!(s.non_2xx, Some(38));
+        assert_eq!(
+            s.socket_errors.as_deref(),
+            Some("[3] connection closed before message completed")
+        );
+        assert!(parse_oha_output("nothing").is_err());
+    }
+
+    #[test]
+    fn renders_an_oha_summary() {
+        let cfg = configure("http://127.0.0.1:8080/", 32, "2s", None, 4).unwrap();
+        let text = render_summary(&cfg, &parse_oha_output(OHA).unwrap(), false);
+        assert!(text.contains("(32 connections, 2s, oha)"), "{text}");
+        assert!(text.contains("avg 0.1794ms  max 13.3386ms"), "{text}");
+        assert!(text.contains("p99.9 4.1072ms"), "{text}");
+        assert!(text.contains("non-2xx/3xx responses: 38"), "{text}");
+    }
+
+    #[test]
+    fn builds_oha_arguments() {
+        let cfg = configure("http://x/", 64, "10s", Some(2), 8).unwrap();
+        assert_eq!(
+            cfg.oha_args(),
+            ["-c", "64", "-z", "10s", "--no-tui", "http://x/"]
+        );
+    }
 
     const WRK: &str = "\
 Running 10s test @ http://127.0.0.1:8080/
