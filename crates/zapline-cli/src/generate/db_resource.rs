@@ -291,8 +291,8 @@ fn module(plan: &Plan<'_>) -> String {
     // Input.
     let _ = writeln!(
         s,
-        "/// Payload for creating or replacing a {} (JSON or an HTML form).",
-        n.human
+        "/// Payload for creating or replacing {} (JSON or an HTML form).",
+        n.a_human
     );
     s.push_str("#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]\n");
     let _ = writeln!(s, "pub struct New{} {{", n.pascal);
@@ -391,29 +391,29 @@ fn module(plan: &Plan<'_>) -> String {
     );
     let _ = writeln!(
         s,
-        "/// Create a {h}.\n#[post(\"{api}\", tag = \"{t}\", status = 201)]\n\
+        "/// Create {a}.\n#[post(\"{api}\", tag = \"{t}\", status = 201)]\n\
          async fn create(db: Db, Valid(Json(new)): Valid<Json<New{p}>>) -> Result<(StatusCode, Json<{p}>)> {{\n    \
          Ok((StatusCode::CREATED, Json(insert(&db, &new).await?)))\n}}\n",
-        h = n.human,
+        a = n.a_human,
         p = n.pascal,
         t = n.plural,
     );
     let _ = writeln!(
         s,
-        "/// Replace a {h}.\n#[put(\"{api}/{{id}}\", tag = \"{t}\")]\n\
+        "/// Replace {a}.\n#[put(\"{api}/{{id}}\", tag = \"{t}\")]\n\
          async fn replace(\n    db: Db,\n    Path(id): Path<i64>,\n    Valid(Json(new)): Valid<Json<New{p}>>,\n) -> Result<Json<{p}>> {{\n    \
          let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets} WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){binds}\n    .bind(id)\n    .fetch_one(&*db)\n    .await?;\n    Ok(Json(row))\n}}\n",
-        h = n.human,
+        a = n.a_human,
         p = n.pascal,
         t = n.plural,
         sets = sets.join(", "),
     );
     let _ = writeln!(
         s,
-        "/// Delete a {h}.\n#[delete(\"{api}/{{id}}\", tag = \"{t}\", status = 204)]\n\
+        "/// Delete {a}.\n#[delete(\"{api}/{{id}}\", tag = \"{t}\", status = 204)]\n\
          async fn remove(db: Db, Path(id): Path<i64>) -> Result<StatusCode> {{\n    \
          delete_row(&db, id).await?;\n    Ok(StatusCode::NO_CONTENT)\n}}\n",
-        h = n.human,
+        a = n.a_human,
         t = n.plural,
     );
 
@@ -438,19 +438,19 @@ fn module(plan: &Plan<'_>) -> String {
         );
         let _ = writeln!(
             s,
-            "/// Add a {h} from the page's form.\n#[post(\"{path}\", tag = \"pages\")]\n\
+            "/// Add {a} from the page's form.\n#[post(\"{path}\", tag = \"pages\")]\n\
              async fn create_form(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    Valid(Form(new)): Valid<Form<New{p}>>,\n) -> Result<Html<String>> {{\n    \
              insert(&db, &new).await?;\n    render(&views, &db, &hx).await\n}}\n",
-            h = n.human,
+            a = n.a_human,
             p = n.pascal,
             path = n.path,
         );
         let _ = writeln!(
             s,
-            "/// Delete a {h} from the page.\n#[delete(\"{path}/{{id}}\", tag = \"pages\")]\n\
+            "/// Delete {a} from the page.\n#[delete(\"{path}/{{id}}\", tag = \"pages\")]\n\
              async fn remove_form(views: Views, db: Db, hx: HxRequest, Path(id): Path<i64>) -> Result<Html<String>> {{\n    \
              delete_row(&db, id).await?;\n    render(&views, &db, &hx).await\n}}\n",
-            h = n.human,
+            a = n.a_human,
             path = n.path,
         );
     }

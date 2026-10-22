@@ -21,7 +21,7 @@ pub struct @@pascal@@ {
     pub name: String,
 }
 
-/// Payload for creating or replacing a @@human@@. Add your own fields here.
+/// Payload for creating or replacing @@a_human@@. Add your own fields here.
 #[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
 pub struct New@@pascal@@ {
     #[validate(length(min = 1, max = 200))]
@@ -110,7 +110,7 @@ async fn get_@@singular@@(
     store.get(id).map(Json).ok_or_else(Error::not_found)
 }
 
-/// Create a @@human@@.
+/// Create @@a_human@@.
 #[post("@@path@@")]
 async fn create_@@singular@@(
     State(store): State<@@pascal@@Store>,
@@ -119,7 +119,7 @@ async fn create_@@singular@@(
     (StatusCode::CREATED, Json(store.create(new)))
 }
 
-/// Replace a @@human@@.
+/// Replace @@a_human@@.
 #[put("@@path@@/{id}")]
 async fn replace_@@singular@@(
     State(store): State<@@pascal@@Store>,
@@ -130,7 +130,7 @@ async fn replace_@@singular@@(
     Ok(Json(item))
 }
 
-/// Delete a @@human@@.
+/// Delete @@a_human@@.
 #[delete("@@path@@/{id}")]
 async fn delete_@@singular@@(
     State(store): State<@@pascal@@Store>,

@@ -142,6 +142,12 @@ jobs:
               (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool)
             fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)
+            if [ "$t" != minimal ] && [ "$RUNNER_OS" = Linux ]; then
+              # The generated TypeScript client must type-check under the strictest settings.
+              (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" "$ROOT/target/debug/zapline" client -o web/api.ts \
+                && npx --yes -p typescript@5.9.3 tsc --noEmit --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess \
+                     --noUnusedLocals --target es2022 --lib es2022,dom --module esnext --moduleResolution bundler web/api.ts)
+            fi
             echo "::endgroup::"
           done
 

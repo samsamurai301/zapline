@@ -192,6 +192,14 @@ fn tool_list() -> Value {
             "annotations": { "readOnlyHint": true }
         },
         {
+            "name": "typescript_client",
+            "description": "Write a typed, dependency-free TypeScript client for the app's JSON API (one method per operation, interfaces per schema).",
+            "inputSchema": { "type": "object", "properties": {
+                "output": { "type": "string", "description": "File to write; default: client.ts" },
+                "bin": bin
+            }}
+        },
+        {
             "name": "openapi",
             "description": "The app's OpenAPI 3.1 document (JSON). Large; prefer `routes` for an overview.",
             "inputSchema": { "type": "object", "properties": { "bin": bin }},
@@ -317,6 +325,12 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
                 .with_context(|| format!("cannot read {}", target.display()))?;
             // Compact: pretty-printing roughly doubles the tokens.
             Ok(serde_json::from_str::<Value>(&text).map_or(text, |v| v.to_string()))
+        }
+        "typescript_client" => {
+            let project = Project::discover(here)?;
+            let output = PathBuf::from(s("output").unwrap_or("client.ts"));
+            with_build_errors(&project, || crate::client::run(&project, s("bin"), &output))?;
+            Ok(format!("wrote {}", output.display()))
         }
         _ => bail!("unknown tool `{name}`"),
     }

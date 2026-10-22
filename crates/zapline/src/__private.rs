@@ -101,6 +101,9 @@ mod imp {
             ..Doc::default()
         }
     }
+    pub fn module(doc: &mut Doc, module: &'static str) {
+        doc.module = Some(module);
+    }
     pub fn summary(doc: &mut Doc, s: &'static str) {
         doc.summary(s);
     }
@@ -149,6 +152,8 @@ mod imp {
     pub fn doc(_: &'static str) -> Doc {
         Doc
     }
+    #[inline]
+    pub fn module(_: &mut Doc, _: &'static str) {}
     #[inline]
     pub fn summary(_: &mut Doc, _: &'static str) {}
     #[inline]

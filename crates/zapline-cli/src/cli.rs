@@ -90,6 +90,7 @@ previous version keeps running.
 Examples:
   zapline dev
   zapline dev --bin server
+  zapline dev --client web/src/api.ts   Also keep a typed TypeScript client up to date
   zapline dev -- --port 9000")]
     Dev(DevArgs),
 
@@ -111,6 +112,18 @@ Examples:
   zapline openapi
   zapline openapi -o docs/openapi.json")]
     Openapi(OpenapiArgs),
+
+    /// Generate a typed TypeScript client for the app's JSON API
+    #[command(after_long_help = "\
+Exports the OpenAPI document (like `zapline openapi`) and turns it into one dependency-free
+TypeScript file: an interface per schema, and `createClient()` with one typed method per
+operation, named after its operationId. Non-2xx responses throw `ApiError` (status, code,
+details). Routes that answer with HTML are skipped. The file is only rewritten when it changes.
+
+Examples:
+  zapline client -o web/src/api.ts
+  zapline dev --client web/src/api.ts      Regenerate after every rebuild")]
+    Client(ClientArgs),
 
     /// Create and apply SQL migrations
     #[command(
@@ -283,6 +296,10 @@ pub struct DevArgs {
     #[arg(long)]
     pub release: bool,
 
+    /// Keep a TypeScript client of the API up to date (see `zapline client`)
+    #[arg(long, value_name = "FILE")]
+    pub client: Option<PathBuf>,
+
     /// How long (ms) files must stay quiet before rebuilding
     #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]
     pub debounce_ms: u64,
@@ -309,6 +326,18 @@ pub struct RoutesArgs {
 pub struct OpenapiArgs {
     /// File to write
     #[arg(short, long, value_name = "FILE", default_value = "openapi.json")]
+    pub output: PathBuf,
+
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+}
+
+/// Arguments of `zapline client`.
+#[derive(Debug, Args)]
+pub struct ClientArgs {
+    /// Where to write the client
+    #[arg(short, long, value_name = "FILE", default_value = "client.ts")]
     pub output: PathBuf,
 
     /// Binary to run [default: the package's only binary]

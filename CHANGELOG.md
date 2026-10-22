@@ -12,6 +12,7 @@ The first public release.
 - `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
 - `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
 - `zapline db new` / `zapline db migrate`.
+- `zapline client`: a typed, dependency-free TypeScript client generated from the OpenAPI document; `zapline dev --client <file>` regenerates it after every build for end-to-end types.
 - `zapline::extract::{empty_as_none, checkbox}` serde helpers for HTML forms.
 - `ZAPLINE_DEV=1` (set by `zapline dev`) shows the real cause of 500 errors.
 
@@ -23,6 +24,7 @@ The first public release.
 - `zapline check [--clippy]` and `zapline test [filter]`: cargo results condensed to one line per diagnostic and only the failing tests (222 bytes instead of 10 KB for a failing run of a scaffolded app).
 
 ### Core
+- OpenAPI operation ids for same-named handlers in different modules are prefixed with the module (`users_list`, `posts_list`) instead of numbered.
 - Radix-tree router with typed path parameters, nested route groups, per-route typed metadata, 404/405 handling and automatic HEAD.
 - Extractors: `Path`, `Query`, `Json`, `Form`, `Bytes`, `String`, `State`, `Extension`, `HeaderMap`, `Method`, `Uri`, `ConnInfo`, `MatchedPath` and `Request`, plus `Option<T>` and `Result<T, Error>` wrappers. Rejections carry stable error codes and structured details.
 - A single `Error` type that `?` works with: structured `{"error", "code", "details"}` bodies, extra headers, and a global `App::error_handler`.

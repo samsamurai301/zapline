@@ -438,6 +438,7 @@ fn expand(args: RouteArgs, item: ItemFn) -> TokenStream {
                         InputFallback as _, OutputFallback as _, ViaInput as _, ViaOutput as _,
                     };
                     let mut __doc = ::zapline::__private::doc(#name_str);
+                    ::zapline::__private::module(&mut __doc, ::core::module_path!());
                     {
                         let doc = &mut __doc;
                         #doc_stmts

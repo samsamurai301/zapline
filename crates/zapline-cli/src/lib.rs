@@ -13,6 +13,7 @@ pub mod bench;
 pub mod brief;
 pub mod build;
 pub mod cli;
+pub mod client;
 pub mod db;
 pub mod dev;
 pub mod doctor;
@@ -153,6 +154,14 @@ pub fn execute(cli: Cli) -> Result<()> {
                     release: a.release,
                     app_args: a.app_args,
                     debounce: Duration::from_millis(a.debounce_ms),
+                    client: match a.client {
+                        Some(c) => Some(openapi::resolve_output(
+                            &std::env::current_dir()
+                                .context("cannot determine the current directory")?,
+                            &c,
+                        )),
+                        None => None,
+                    },
                     ..dev::DevOptions::default()
                 },
             )
@@ -180,6 +189,10 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Test { filter } => {
             let project = Project::discover(Path::new("."))?;
             finish(brief::test(&project, filter.as_deref())?)
+        }
+        Command::Client(a) => {
+            let project = Project::discover(Path::new("."))?;
+            client::run(&project, a.bin.as_deref(), &a.output)
         }
         Command::Mcp => mcp::run(),
         Command::Doctor => doctor::run(),

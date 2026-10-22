@@ -281,6 +281,7 @@ pub fn resource_files(
         ("pascal_plural", names.pascal_plural.as_str()),
         ("path", names.path.as_str()),
         ("human", names.human.as_str()),
+        ("a_human", names.a_human.as_str()),
         ("plural_human", names.plural_human.as_str()),
         ("crate_name", crate_name),
     ];
