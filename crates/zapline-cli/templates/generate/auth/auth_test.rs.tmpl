@@ -106,6 +106,36 @@ async fn password_reset_by_email() {
     client.post("/api/auth/login").json(&creds("d@example.com", "old password")).send().await.assert_status(401);
     client.post("/api/auth/login").json(&creds("d@example.com", "new password")).send().await.assert_status(200);
 }
+
+#[tokio::test]
+async fn sessions_are_hard_to_abuse() {
+    let client = app(Database::sqlite_memory()).test();
+    let phone = client.clone().with_cookies();
+    phone.post("/api/auth/signup").json(&creds("f@example.com", "old password")).send().await.assert_status(201);
+
+    // Another site can't make the browser act with the session (CSRF).
+    phone.post("/api/auth/logout").header("sec-fetch-site", "cross-site").send().await.assert_status(403);
+    phone.get("/api/auth/me").send().await.assert_status(200);
+
+    // Resetting the password logs out every other session.
+    let laptop = client.clone().with_cookies();
+    laptop.post("/api/auth/login").json(&creds("f@example.com", "old password")).send().await.assert_status(200);
+    phone.post("/api/auth/forgot").json(&json!({ "email": "f@example.com" })).send().await.assert_status(202);
+    let token = reset_token(&phone, 0).await;
+    phone.post("/api/auth/reset").json(&json!({ "token": token, "password": "new password" })).send().await.assert_status(200);
+    phone.get("/api/auth/me").send().await.assert_status(200);
+    laptop.get("/api/auth/me").send().await.assert_status(401);
+
+    // Password guessing is rate-limited (10 a minute per client, this
+    // test's earlier sign-up, log-in and reset requests included).
+    let guesser = client.with_cookies();
+    let mut statuses = Vec::new();
+    for _ in 0..8 {
+        let res = guesser.post("/api/auth/login").json(&creds("f@example.com", "a guess!")).send().await;
+        statuses.push(res.status().as_u16());
+    }
+    assert_eq!(statuses, [401, 401, 401, 401, 401, 401, 429, 429]);
+}
 // @@html
 
 #[tokio::test]

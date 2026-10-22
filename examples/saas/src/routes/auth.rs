@@ -18,7 +18,8 @@ use zapline::db::{sqlx, Db};
 use zapline::extract::FromRequestParts;
 use zapline::jobs::Jobs;
 use zapline::mail::{Email, Mailer};
-use zapline::middleware::Next;
+use zapline::middleware::rate_limit::TrustedProxies;
+use zapline::middleware::{Next, RateLimit, SameOrigin};
 use zapline::prelude::*;
 use zapline::session::Session;
 use zapline::tasks::BackgroundTasks;
@@ -28,6 +29,9 @@ use zapline::view::{context, Hx, Views};
 
 /// Session key holding the logged-in user's id.
 const USER_ID: &str = "user_id";
+/// Session key holding `users.session_version` at log-in. Changing the
+/// password bumps the column, which logs out every other session.
+const SESSION_VERSION: &str = "session_version";
 
 /// How long a password-reset link works.
 const RESET_TTL: Duration = Duration::from_secs(60 * 60);
@@ -76,19 +80,32 @@ impl FromRequestParts for CurrentUser {
         let Some(id) = session.get::<i64>(USER_ID) else {
             return Err(login_required());
         };
-        let user = sqlx::query_as::<_, User>("SELECT id, email FROM users WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&*db)
-            .await?;
-        match user {
-            Some(user) => Ok(CurrentUser(user)),
-            // The account was deleted: forget the stale session.
-            None => {
+        let row = sqlx::query_as::<_, (i64, String, i64)>(
+            "SELECT id, email, session_version FROM users WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&*db)
+        .await?;
+        match row {
+            Some((id, email, version)) if session.get::<i64>(SESSION_VERSION) == Some(version) => {
+                Ok(CurrentUser(User { id, email }))
+            }
+            // The account was deleted, or its password changed since this
+            // session logged in: forget the session.
+            _ => {
                 session.destroy();
                 Err(login_required())
             }
         }
     }
+}
+
+/// At most 10 sign-ups, log-ins and reset requests a minute per client IP:
+/// slows password guessing and floods of reset emails. Behind a proxy, list
+/// it in `TRUSTED_PROXIES`, or every client shares the proxy's allowance.
+fn throttle() -> RateLimit {
+    let proxies = TrustedProxies::from_env().unwrap_or_else(|e| panic!("{}", e.message()));
+    RateLimit::per_ip(10, Duration::from_secs(60)).trusted_proxies(proxies)
 }
 
 fn login_required() -> Error {
@@ -100,18 +117,28 @@ pub fn mount(app: App) -> App {
     let key = key_from_env("SESSION_SECRET").unwrap_or_else(|e| panic!("{}", e.message()));
     let mailer = Mailer::from_env().unwrap_or_else(|e| panic!("{}", e.message()));
     app.cookie_key(key)
+        // Form posts and fetches from other sites can't act with a user's
+        // session cookie (403): CSRF protection without tokens in forms.
+        .wrap(SameOrigin::new())
         // `Secure` cookies in release builds (HTTPS); plain HTTP while developing.
         .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
         .mailer(mailer)
-        .mount((signup, login, logout, me, forgot, reset))
+        // Sign-up, log-in and password resets, rate-limited per client.
+        .nest(
+            "/",
+            Routes::new()
+                .mount((signup, login, forgot, reset))
+                .mount((signup_form, login_form, forgot_form, reset_form))
+                .wrap(throttle()),
+        )
+        .mount((logout, me))
         .mount((
             signup_page,
             login_page,
-            signup_form,
-            login_form,
             logout_form,
+            forgot_page,
+            reset_page,
         ))
-        .mount((forgot_page, forgot_form, reset_page, reset_form))
         .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]))
 }
 
@@ -152,7 +179,7 @@ async fn register(db: &Db, jobs: &Jobs, session: &Session, creds: &Credentials) 
     })?;
     // Sent in the background by a durable job, retried if SMTP is down.
     jobs.enqueue(SendWelcome { user_id: user.id }).await?;
-    start_session(session, &user)?;
+    start_session(db, session, &user).await?;
     Ok(user)
 }
 
@@ -174,14 +201,19 @@ async fn authenticate(db: &Db, session: &Session, creds: &Credentials) -> Result
         return Err(invalid_credentials());
     }
     let user = User { id, email };
-    start_session(session, &user)?;
+    start_session(db, session, &user).await?;
     Ok(user)
 }
 
-fn start_session(session: &Session, user: &User) -> Result<()> {
+async fn start_session(db: &Db, session: &Session, user: &User) -> Result<()> {
+    let version: i64 = sqlx::query_scalar("SELECT session_version FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_one(&**db)
+        .await?;
     // A fresh session id on login prevents session fixation.
     session.regenerate();
-    session.insert(USER_ID, user.id)
+    session.insert(USER_ID, user.id)?;
+    session.insert(SESSION_VERSION, version)
 }
 
 fn invalid_credentials() -> Error {
@@ -247,7 +279,9 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
     };
     let hash = password::hash(form.password.as_str()).await?;
     let user = sqlx::query_as::<_, User>(
-        "UPDATE users SET password_hash = $1 WHERE id = $2 RETURNING id, email",
+        // Bumping session_version logs out every session of this account.
+        "UPDATE users SET password_hash = $1, session_version = session_version + 1 \
+         WHERE id = $2 RETURNING id, email",
     )
     .bind(&hash)
     .bind(user_id)
@@ -258,7 +292,7 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
         .bind(user_id)
         .execute(&**db)
         .await?;
-    start_session(session, &user)?;
+    start_session(db, session, &user).await?;
     Ok(user)
 }
 

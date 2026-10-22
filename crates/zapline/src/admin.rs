@@ -328,12 +328,7 @@ async fn serve<DB: AdminBackend>(mut req: Request, admin: &Admin, action: Action
 
 /// Form posts must come from this site (on top of `SameSite` cookies).
 fn same_origin(req: &Request) -> bool {
-    let header = |name| req.headers().get(name).and_then(|v| v.to_str().ok());
-    match (header(http::header::ORIGIN), header(http::header::HOST)) {
-        (None, _) => true,
-        (Some(origin), Some(host)) => origin.split_once("://").map(|(_, h)| h) == Some(host),
-        (Some(_), None) => false,
-    }
+    crate::middleware::SameOrigin::new().allows(req)
 }
 
 async fn run<DB: AdminBackend>(

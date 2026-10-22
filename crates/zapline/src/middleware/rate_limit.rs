@@ -381,6 +381,42 @@ impl TrustedProxies {
         }
     }
 
+    /// The proxies listed in the `TRUSTED_PROXIES` environment variable,
+    /// comma-separated (`10.0.0.0/8, fd00::/8`); none when it is unset or
+    /// empty. Hosts such as Fly.io, Railway and Render reach the app from
+    /// private addresses, so `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7`
+    /// fits them, but only when nothing else can reach it directly.
+    ///
+    /// ```
+    /// use zapline::middleware::rate_limit::TrustedProxies;
+    ///
+    /// let proxies = TrustedProxies::from_env()?;
+    /// # Ok::<(), zapline::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// If an entry is not an IP address or network.
+    pub fn from_env() -> crate::Result<Self> {
+        let list = std::env::var("TRUSTED_PROXIES").unwrap_or_default();
+        let nets = list
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                s.parse::<Cidr>().map_err(|e| {
+                    crate::Error::internal(format!(
+                        "TRUSTED_PROXIES: {s:?} is not an address: {e:?}"
+                    ))
+                })
+            })
+            .collect::<crate::Result<Vec<Cidr>>>()?;
+        Ok(TrustedProxies {
+            nets: nets.into(),
+            header: None,
+        })
+    }
+
     /// Read the client address from this header (default `X-Forwarded-For`).
     pub fn header(mut self, header: ClientIpHeader) -> Self {
         self.header = Some(header);

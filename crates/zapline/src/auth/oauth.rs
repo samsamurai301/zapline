@@ -597,8 +597,15 @@ fn cookie_value(req: &Request, name: &str) -> Option<String> {
 }
 
 /// `/path` but not `//host` or `/\host`: safe to redirect to.
+/// A path on this site. Browsers drop tabs and newlines from URLs and read
+/// `\\` as `/`, so `/\t/evil.example` would become `//evil.example`, another
+/// site: such characters are refused anywhere in the path.
 fn is_local_path(p: &str) -> bool {
-    p.starts_with('/') && !p.starts_with("//") && !p.starts_with("/\\")
+    p.starts_with('/')
+        && !p.starts_with("//")
+        && !p
+            .bytes()
+            .any(|b| b.is_ascii_control() || b == b'\\' || b == b' ')
 }
 
 fn enc(s: &str) -> String {
@@ -655,7 +662,15 @@ mod tests {
     #[test]
     fn only_local_paths_are_followed() {
         assert!(is_local_path("/dashboard?tab=1"));
-        for bad in ["//evil.com", "/\\evil.com", "https://evil.com", "evil"] {
+        for bad in [
+            "//evil.com",
+            "/\\evil.com",
+            "https://evil.com",
+            "evil",
+            "/\t/evil.com",
+            "/\n/evil.com",
+            "/a\\b",
+        ] {
             assert!(!is_local_path(bad), "{bad}");
         }
     }

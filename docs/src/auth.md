@@ -74,7 +74,7 @@ async fn my_notes(db: Db, CurrentUser(user): CurrentUser) -> Result<Json<Vec<Not
 
 Take `Option<CurrentUser>` to serve visitors and users differently. The generated code is yours to change: it is about 200 lines with no framework magic.
 
-What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
+What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); changing the password logs out every other session (a `session_version` column); sign-up, log-in and reset requests limited to 10 a minute per client IP (set `TRUSTED_PROXIES` behind a proxy); requests from other sites refused ([`SameOrigin`](sessions.md#sameorigin-no-tokens), CSRF protection with nothing to add to forms); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
 
 ## Passwords
 

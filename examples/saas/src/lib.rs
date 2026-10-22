@@ -11,6 +11,7 @@ pub mod routes;
 use std::time::Duration;
 
 use zapline::db::{sqlx, Database, DbCheck, DefaultDb};
+use zapline::middleware::SecurityHeaders;
 use zapline::openapi::OpenApi;
 use zapline::prelude::*;
 use zapline::tasks::Schedule;
@@ -19,6 +20,8 @@ use zapline::tasks::Schedule;
 /// tests pass `Database::sqlite_memory()`.
 pub fn app(db: Database) -> App {
     App::new()
+        // Browser hardening headers (nosniff, no framing, referrer policy).
+        .wrap(SecurityHeaders::default())
         // Routes, recent requests, jobs and mail at /_dev (debug builds only).
         .dev_console()
         .database(db)

@@ -55,6 +55,15 @@ async fn only_answers_this_machine() {
         .send()
         .await
         .assert_status(404);
+    // A reverse proxy on the same machine connects from loopback, but says
+    // who the client is.
+    client
+        .get("/_dev")
+        .header("x-forwarded-for", "203.0.113.7")
+        .send()
+        .await
+        .assert_status(404);
+    client.get("/_dev").send().await.assert_status(200);
 }
 
 #[tokio::test]

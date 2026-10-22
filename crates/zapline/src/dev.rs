@@ -221,8 +221,13 @@ pub(crate) fn internal(routes: Routes) -> Routes {
 
 /// Only this machine may see the console (requests without a peer address
 /// come from [`TestClient`](crate::test::TestClient)).
+/// A request from this machine, not relayed by a proxy on it: the peer is a
+/// loopback address and no forwarding header names another client. (A
+/// reverse proxy on the same host connects from loopback too.)
 pub(crate) fn local(req: &Request) -> bool {
-    req.remote_addr().is_none_or(|a| a.ip().is_loopback())
+    const FORWARDED: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
+    req.remote_addr().is_some_and(|a| a.ip().is_loopback())
+        && !FORWARDED.iter().any(|h| req.headers().contains_key(*h))
 }
 
 async fn act(req: Request, panels: Panels) -> Response {

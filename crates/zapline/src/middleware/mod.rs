@@ -107,6 +107,7 @@ pub mod limit;
 pub mod normalize_path;
 pub mod rate_limit;
 pub mod request_id;
+mod same_origin;
 pub mod security_headers;
 
 // WP-MIDDLEWARE re-exports (owned by the middleware work package)
@@ -119,4 +120,5 @@ pub use rate_limit::{
     Cidr, ClientIpHeader, RateLimit, RateLimitKey, RateLimitPolicy, TrustedProxies,
 };
 pub use request_id::{RequestId, SetRequestId};
+pub use same_origin::SameOrigin;
 pub use security_headers::SecurityHeaders;

@@ -677,10 +677,11 @@ async fn serve_dir(cfg: Arc<DirConfig>, req: Request) -> Response {
     }
 }
 
-/// `307` to the same path with a trailing slash (leading slashes collapsed
-/// so the target can never become a protocol-relative `//host` URL).
+/// `307` to the same path with a trailing slash (leading slashes and
+/// backslashes collapsed so the target can never become a protocol-relative
+/// `//host` or `/\host` URL).
 fn redirect_slash(req: &Request) -> Response {
-    let mut location = format!("/{}/", req.path().trim_start_matches('/'));
+    let mut location = format!("/{}/", req.path().trim_start_matches(['/', '\\']));
     if let Some(q) = req.query_string() {
         location.push('?');
         location.push_str(q);

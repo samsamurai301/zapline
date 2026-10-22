@@ -28,6 +28,7 @@ fn app() -> App {
 | [`NormalizePath`](#normalizepath) | `/users` vs `/users/` vs `//users` inconsistencies | |
 | [`SetRequestId`](#setrequestid-and-requestid) | Unattributable errors | |
 | [`Cors`](#cors) | Cross-origin access you didn't intend | |
+| [`SameOrigin`](sessions.md#sameorigin-no-tokens) | Cross-site request forgery against cookie sessions | |
 | `DefaultHeaders` | Adds fixed headers (`Server`, `Cache-Control`, ...) to every response. Headers the handler set win. | |
 
 All of them are in `zapline::middleware`. Remember how middleware is arranged (see [Middleware](middleware.md)): `App::wrap` runs **before routing** for every request including 404s, and the first `wrap` is the outermost layer. `App::wrap_route` and `Routes::wrap` run **after routing** and can see the matched route and its metadata. The [last section](#a-production-stack) puts it all together.
@@ -166,6 +167,8 @@ fn limiter() -> RateLimit {
 ```
 
 List only networks you control, the exact addresses of your ingress. `limiter.client_ip(&req)` shows the address a limiter derives for a request.
+
+`TrustedProxies::from_env()` reads the list from `TRUSTED_PROXIES` (comma-separated), so it can differ between environments; `zapline g auth` uses it, and `zapline g deploy fly` and `render` set it to the private networks those hosts' proxies connect from. Trust a whole private range only when nothing else can reach the app directly.
 
 ### Per-route limits
 

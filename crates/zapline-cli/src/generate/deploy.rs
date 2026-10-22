@@ -64,7 +64,17 @@ pub struct Facts {
 }
 
 /// Settings that every target already provides, or that only matter locally.
-const PROVIDED: &[&str] = &["ADDR", "PORT", "DATABASE_URL", "REDIS_URL"];
+const PROVIDED: &[&str] = &[
+    "ADDR",
+    "PORT",
+    "DATABASE_URL",
+    "REDIS_URL",
+    "TRUSTED_PROXIES",
+];
+
+/// The host's proxy reaches the app from a private address; trusting those
+/// lets rate limits see each client's own IP (see `TrustedProxies`).
+pub const PRIVATE_NETWORKS: &str = "10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7";
 
 /// The keys of a `.env` file, in order, without duplicates.
 pub fn env_keys(env: &str) -> Vec<String> {
@@ -167,6 +177,8 @@ pub fn fly(f: &Facts) -> String {
          \n\
          [env]\n\
          \x20 PORT = \"{PORT}\"\n\
+         \x20 # Fly's proxy connects from its private network: trust it for client IPs.\n\
+         \x20 TRUSTED_PROXIES = \"{PRIVATE_NETWORKS}\"\n\
          \n\
          [http_service]\n\
          \x20 internal_port = {PORT}\n\
@@ -230,7 +242,7 @@ pub fn render_yaml(f: &Facts) -> String {
         out.push_str("    healthCheckPath: /health/ready\n");
     }
     out.push_str(&format!(
-        "    envVars:\n      - key: PORT\n        value: \"{PORT}\"\n"
+        "    envVars:\n      - key: PORT\n        value: \"{PORT}\"\n      - key: TRUSTED_PROXIES\n        value: \"{PRIVATE_NETWORKS}\"\n"
     ));
     if f.postgres {
         out.push_str(&format!(
@@ -383,6 +395,7 @@ pub fn notes(target: Target, f: &Facts) -> Vec<String> {
             let mut lines = vec![
                 "deploy to Railway: `railway up`, or connect the repository in the dashboard"
                     .to_string(),
+                format!("set the variable TRUSTED_PROXIES={PRIVATE_NETWORKS} (Railway's proxy), so rate limits see client IPs"),
             ];
             if !f.reads_port {
                 lines.push(format!(
@@ -526,6 +539,7 @@ mod tests {
         );
         assert_eq!(v["mounts"][0]["destination"].as_str(), Some(DATA_DIR));
         assert_eq!(v["env"]["PORT"].as_str(), Some("8080"));
+        assert_eq!(v["env"]["TRUSTED_PROXIES"].as_str(), Some(PRIVATE_NETWORKS));
 
         let plain: toml::Value = toml::from_str(&fly(&Facts {
             name: "x".into(),

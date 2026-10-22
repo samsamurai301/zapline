@@ -3249,7 +3249,7 @@ async fn my_notes(db: Db, CurrentUser(user): CurrentUser) -> Result<Json<Vec<Not
 
 Take `Option<CurrentUser>` to serve visitors and users differently. The generated code is yours to change: it is about 200 lines with no framework magic.
 
-What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
+What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); changing the password logs out every other session (a `session_version` column); sign-up, log-in and reset requests limited to 10 a minute per client IP (set `TRUSTED_PROXIES` behind a proxy); requests from other sites refused ([`SameOrigin`](sessions.md#sameorigin-no-tokens), CSRF protection with nothing to add to forms); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
 
 ## Passwords
 
@@ -4013,6 +4013,29 @@ async fn session_survives_a_round_trip() {
 
 ## CSRF
 
+There are two ways to stop cross-site request forgery. Most apps want the first.
+
+### `SameOrigin`: no tokens
+
+`SameOrigin` (no feature needed) refuses unsafe requests (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) that a browser sent on behalf of another site, with `403 cross_origin`. It reads the headers browsers add themselves: `Sec-Fetch-Site` (every current browser), otherwise `Origin`, which must match the request's host. Requests with neither are not from a browser (curl, API clients, tests) and pass. Nothing changes in your forms, htmx attributes or `fetch` calls. `zapline g auth` installs it.
+
+```rust
+use zapline::middleware::SameOrigin;
+use zapline::prelude::*;
+
+fn app() -> App {
+    App::new()
+        .wrap(SameOrigin::new()
+            .allow(["https://app.example.com"])   // a front end on another origin, with cookies
+            .exempt(["/webhooks/"]))              // callbacks other services send
+        .post("/transfer", || async { "sent" })
+}
+```
+
+It also stops sibling subdomains (`Sec-Fetch-Site: same-site`), which `SameSite=Lax` cookies let through. Keep `GET` handlers free of side effects: they always pass. Browsers that send neither header (versions from before 2020) are left to `SameSite` cookies; if you must support them fully, use `Csrf`.
+
+### `Csrf`: signed tokens
+
 `Csrf` is signed double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`__Host-zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
 
 **Register a cookie key** with `App::cookie_key` (or give one to `.key(..)`); it is strongly recommended. Tokens are then signed: 32 random bytes followed by their HMAC-SHA256 under the key, base64url-encoded (86 characters), and only tokens this server minted are accepted. Without a key, tokens are plain random values (43 characters) and anything well-formed is accepted.
@@ -4115,6 +4138,7 @@ fn app() -> App {
 | [`NormalizePath`](#normalizepath) | `/users` vs `/users/` vs `//users` inconsistencies | |
 | [`SetRequestId`](#setrequestid-and-requestid) | Unattributable errors | |
 | [`Cors`](#cors) | Cross-origin access you didn't intend | |
+| [`SameOrigin`](sessions.md#sameorigin-no-tokens) | Cross-site request forgery against cookie sessions | |
 | `DefaultHeaders` | Adds fixed headers (`Server`, `Cache-Control`, ...) to every response. Headers the handler set win. | |
 
 All of them are in `zapline::middleware`. Remember how middleware is arranged (see [Middleware](middleware.md)): `App::wrap` runs **before routing** for every request including 404s, and the first `wrap` is the outermost layer. `App::wrap_route` and `Routes::wrap` run **after routing** and can see the matched route and its metadata. The [last section](#a-production-stack) puts it all together.
@@ -4253,6 +4277,8 @@ fn limiter() -> RateLimit {
 ```
 
 List only networks you control, the exact addresses of your ingress. `limiter.client_ip(&req)` shows the address a limiter derives for a request.
+
+`TrustedProxies::from_env()` reads the list from `TRUSTED_PROXIES` (comma-separated), so it can differ between environments; `zapline g auth` uses it, and `zapline g deploy fly` and `render` set it to the private networks those hosts' proxies connect from. Trust a whole private range only when nothing else can reach the app directly.
 
 ### Per-route limits
 

@@ -85,7 +85,7 @@ mime_guess = { version = "2", optional = true }
 tokio-util = { version = "0.7", optional = true, features = ["io"] }
 multer = { version = "3", optional = true }
 async-compression = { version = "0.4", optional = true, features = ["tokio", "gzip", "brotli", "zstd", "deflate", "zlib"] }
-jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["rust_crypto", "use_pem"] }
+jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["aws_lc_rs", "use_pem"] }
 cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
 getrandom = { version = "0.2", optional = true }
 argon2 = { version = "0.5", optional = true, default-features = false, features = ["alloc", "password-hash"] }

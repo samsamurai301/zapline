@@ -89,10 +89,11 @@ impl JwtConfig {
     /// Full control: any algorithm and keys. `encoding` is needed only to
     /// issue tokens.
     pub fn new(algorithm: Algorithm, decoding: DecodingKey, encoding: Option<EncodingKey>) -> Self {
-        // Pin the RustCrypto backend unless the app installed one: if another
-        // crate also enabled `aws_lc_rs`, jsonwebtoken would otherwise panic
-        // on first use.
-        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
+        // Pin the aws-lc backend unless the app installed one: if another
+        // crate also enabled `rust_crypto`, jsonwebtoken would otherwise
+        // panic on first use. (aws-lc, not RustCrypto: the `rsa` crate's
+        // signing is open to the Marvin timing attack, RUSTSEC-2023-0071.)
+        let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
         let mut validation = Validation::new(algorithm);
         validation.validate_nbf = true;
         let required = validation.required_spec_claims.clone();

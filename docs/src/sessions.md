@@ -259,6 +259,29 @@ async fn session_survives_a_round_trip() {
 
 ## CSRF
 
+There are two ways to stop cross-site request forgery. Most apps want the first.
+
+### `SameOrigin`: no tokens
+
+`SameOrigin` (no feature needed) refuses unsafe requests (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) that a browser sent on behalf of another site, with `403 cross_origin`. It reads the headers browsers add themselves: `Sec-Fetch-Site` (every current browser), otherwise `Origin`, which must match the request's host. Requests with neither are not from a browser (curl, API clients, tests) and pass. Nothing changes in your forms, htmx attributes or `fetch` calls. `zapline g auth` installs it.
+
+```rust
+use zapline::middleware::SameOrigin;
+use zapline::prelude::*;
+
+fn app() -> App {
+    App::new()
+        .wrap(SameOrigin::new()
+            .allow(["https://app.example.com"])   // a front end on another origin, with cookies
+            .exempt(["/webhooks/"]))              // callbacks other services send
+        .post("/transfer", || async { "sent" })
+}
+```
+
+It also stops sibling subdomains (`Sec-Fetch-Site: same-site`), which `SameSite=Lax` cookies let through. Keep `GET` handlers free of side effects: they always pass. Browsers that send neither header (versions from before 2020) are left to `SameSite` cookies; if you must support them fully, use `Csrf`.
+
+### `Csrf`: signed tokens
+
 `Csrf` is signed double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`__Host-zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
 
 **Register a cookie key** with `App::cookie_key` (or give one to `.key(..)`); it is strongly recommended. Tokens are then signed: 32 random bytes followed by their HMAC-SHA256 under the key, base64url-encoded (86 characters), and only tokens this server minted are accepted. Without a key, tokens are plain random values (43 characters) and anything well-formed is accepted.
