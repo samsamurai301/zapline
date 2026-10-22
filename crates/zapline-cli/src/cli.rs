@@ -122,6 +122,36 @@ Examples:
     )]
     Db(DbCommand),
 
+    /// Type-check the project and print one line per error or warning
+    #[command(after_long_help = "\
+Runs `cargo check --all-targets` (or clippy) and prints each diagnostic as
+`level[code] file:line:col: message`, with the span label and the first suggested fix.
+No progress output, no ASCII art: a fraction of cargo's output, built for AI assistants
+and quick terminal reads. Exits non-zero when the build fails.
+
+Examples:
+  zapline check
+  zapline check --clippy")]
+    Check {
+        /// Run clippy instead of `cargo check`
+        #[arg(long)]
+        clippy: bool,
+    },
+
+    /// Run the tests and print only the totals and the failures
+    #[command(after_long_help = "\
+Compiles the tests first and, if they do not build, prints the condensed compile errors.
+Otherwise runs `cargo test` and prints each failing test with the start of its panic
+message, then one summary line. Exits non-zero when anything fails.
+
+Examples:
+  zapline test
+  zapline test users::")]
+    Test {
+        /// Only run tests whose name contains this
+        filter: Option<String>,
+    },
+
     /// Check that the tools zapline relies on are installed
     Doctor,
 

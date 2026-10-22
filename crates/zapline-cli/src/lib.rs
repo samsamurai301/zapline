@@ -10,6 +10,7 @@
 #![warn(missing_docs)]
 
 pub mod bench;
+pub mod brief;
 pub mod build;
 pub mod cli;
 pub mod db;
@@ -171,11 +172,30 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             db::migrate(&project, bin.as_deref())
         }
+        Command::Check { clippy } => {
+            let project = Project::discover(Path::new("."))?;
+            finish(brief::check(&project, clippy)?)
+        }
+        Command::Test { filter } => {
+            let project = Project::discover(Path::new("."))?;
+            finish(brief::test(&project, filter.as_deref())?)
+        }
         Command::Doctor => doctor::run(),
         Command::Bench(a) => {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
             let cfg = bench::configure(&a.url, a.connections, &a.duration, a.threads, cpus)?;
             bench::run(&cfg, a.raw)
         }
+    }
+}
+
+/// Prints a condensed report; a failed check or test run is an error exit
+/// without another message (the report already says what failed).
+fn finish((ok, report): (bool, String)) -> Result<()> {
+    print!("{report}");
+    if ok {
+        Ok(())
+    } else {
+        std::process::exit(1)
     }
 }
