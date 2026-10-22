@@ -22,10 +22,11 @@ The first public release.
 
 ### AI-assisted development
 - `AGENTS.md` in the repository and in every project `zapline new` creates: commands, layout and the one canonical way to do each task.
-- A runnable cheatsheet (`examples/examples/cheatsheet.rs`, ~1.6k tokens) that covers the common 90% of the API.
+- A runnable cheatsheet (`examples/examples/cheatsheet.rs`, ~1.3k tokens; ~2k with its page) that covers the common 90% of the API.
 - `llms.txt` and `llms-full.txt` generated from the guide (`scripts/gen-llms.sh`) and published with the docs site.
 - `zapline mcp`: a Model Context Protocol server with `docs` (section-level answers from a guide built into the binary), `new_project`, the generators, `db_new_migration`, `db_migrate`, `check`, `test`, `routes` and `openapi`.
-- `zapline check [--clippy]` and `zapline test [filter]`: cargo results condensed to one line per diagnostic and only the failing tests (222 bytes instead of 10 KB for a failing run of a scaffolded app).
+- `zapline check [--clippy]` and `zapline test [filter]`: cargo results condensed to one line per diagnostic and only the failing tests (67–78% fewer tokens than cargo for a failing test or a type error, see `bench/tokens`).
+- `bench/tokens`: a token-efficiency benchmark. The same validated, documented, tested CRUD API takes 673 tokens in zapline, 1,257 in axum and 1,336 in actix-web (o200k_base).
 
 ### Core
 - OpenAPI operation ids for same-named handlers in different modules are prefixed with the module (`users_list`, `posts_list`) instead of numbered.

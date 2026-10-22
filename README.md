@@ -8,7 +8,7 @@
 
 **FastAPI ergonomics at actix-web speed, built for humans and AI coding agents.**
 
-A batteries-included Rust web framework: typed handlers, OpenAPI generated from your code, validation, DI, auth, sessions, realtime, metrics, a thread-per-core server, and a CLI that scaffolds, generates and live-reloads. Small API surface, one obvious way to do each thing, and docs packaged so an AI assistant can learn the common 90% of the framework in under 2k tokens.
+A batteries-included Rust web framework: typed handlers, OpenAPI generated from your code, validation, DI, auth, sessions, realtime, metrics, a thread-per-core server, and a CLI that scaffolds, generates and live-reloads. Small API surface, one obvious way to do each thing, and docs packaged so an AI assistant can learn the common 90% of the framework in about 2k tokens. The same API takes [about half the tokens](bench/tokens/results.md) to write in zapline as in axum or actix-web.
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -46,7 +46,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
 | 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
 | 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
-| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~1.6k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline mcp` serves docs, generators, routes, `check` and `test` to Claude Code, Cursor and other MCP clients, and `zapline check` / `zapline test` print about 2% of raw cargo output. |
+| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~2k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline mcp` serves docs, generators, routes, `check` and `test` to Claude Code, Cursor and other MCP clients, and `zapline check` / `zapline test` answer in 67–78% fewer tokens than cargo ([token benchmark](bench/tokens/results.md)). |
 | 🧩 **Pay for what you use** | Optional features are Cargo features built on public extension points. Unused features cost nothing at runtime. |
 
 ## Features at a glance
