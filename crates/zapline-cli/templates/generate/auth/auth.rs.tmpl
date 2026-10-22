@@ -6,7 +6,6 @@
 //! taking `CurrentUser` (401 when logged out), or `Option<CurrentUser>` to
 //! treat visitors differently.
 
-use serde::{Deserialize, Serialize};
 use zapline::auth::password;
 use zapline::cookies::key_from_env;
 use zapline::db::{sqlx, Db};
@@ -21,14 +20,15 @@ use zapline::view::{context, Hx, Views};
 const USER_ID: &str = "user_id";
 
 /// A registered user.
-#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
+#[model]
+#[derive(sqlx::FromRow)]
 pub struct User {
     pub id: i64,
     pub email: String,
 }
 
 /// Email and password, to sign up or log in (JSON or an HTML form).
-#[derive(Deserialize, JsonSchema, Validate)]
+#[model]
 pub struct Credentials {
     #[validate(email)]
     pub email: String,

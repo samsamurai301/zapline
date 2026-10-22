@@ -6,30 +6,28 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use serde::{Deserialize, Serialize};
-use zapline::openapi::JsonSchema;
 use zapline::prelude::*;
-use zapline::validate::{Valid, Validate};
 
 /// Largest page `GET @@path@@` returns.
 const MAX_PAGE: usize = 200;
 
 /// A stored @@human@@.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[model]
+#[derive(PartialEq)]
 pub struct @@pascal@@ {
     pub id: u64,
     pub name: String,
 }
 
 /// Payload for creating or replacing @@a_human@@. Add your own fields here.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+#[model]
 pub struct New@@pascal@@ {
     #[validate(length(min = 1, max = 200))]
     pub name: String,
 }
 
 /// Query parameters for `GET @@path@@`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[model]
 pub struct List@@pascal_plural@@Query {
     /// Maximum number of items to return (default 50, at most 200).
     pub limit: Option<usize>,

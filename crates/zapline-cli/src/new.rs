@@ -420,9 +420,10 @@ mod tests {
             let dev = doc["dev-dependencies"].as_table().unwrap();
             assert!(dev.contains_key("tokio"));
             if t != Template::Minimal {
-                assert!(deps.contains_key("serde"));
-                assert!(deps.contains_key("schemars"));
-                assert!(deps.contains_key("validator"));
+                // `#[model]` derives through zapline: no serde, schemars or
+                // validator dependency to keep in sync.
+                assert!(!deps.contains_key("schemars"));
+                assert!(!deps.contains_key("validator"));
                 assert!(dev.contains_key("serde_json"));
             }
         }

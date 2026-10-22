@@ -91,6 +91,11 @@ impl Field {
         if name == "id" {
             bail!("`id` is added automatically");
         }
+        if SQL_RESERVED.contains(&name.as_str()) {
+            bail!(
+                "`{name}` is a reserved word in SQL; pick another field name (e.g. `is_{name}` or `{name}_value`)"
+            );
+        }
         let ty = FieldType::parse(&ty.to_ascii_lowercase())?;
         // A missing checkbox already means `false`.
         let optional = optional && ty != FieldType::Bool;
@@ -124,6 +129,105 @@ impl Field {
         }
     }
 }
+
+/// Words SQLite or Postgres reserve: unusable as unquoted column names.
+const SQL_RESERVED: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "between",
+    "both",
+    "by",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "column",
+    "constraint",
+    "create",
+    "cross",
+    "current_date",
+    "current_role",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "delete",
+    "desc",
+    "distinct",
+    "do",
+    "drop",
+    "else",
+    "end",
+    "except",
+    "exists",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "in",
+    "index",
+    "initially",
+    "inner",
+    "insert",
+    "intersect",
+    "into",
+    "is",
+    "join",
+    "key",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "natural",
+    "not",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "session_user",
+    "set",
+    "some",
+    "symmetric",
+    "table",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "update",
+    "user",
+    "using",
+    "values",
+    "variadic",
+    "when",
+    "where",
+    "window",
+    "with",
+];
 
 /// Parses all field arguments; defaults to `name:string` when there are none.
 pub fn parse_fields(specs: &[String]) -> Result<Vec<Field>> {
@@ -270,7 +374,6 @@ fn module(plan: &Plan<'_>) -> String {
         n.plural
     );
     s.push('\n');
-    s.push_str("use serde::{Deserialize, Serialize};\n");
     s.push_str("use zapline::db::{sqlx, Db};\n");
     s.push_str("use zapline::prelude::*;\n");
     if plan.html {
@@ -280,7 +383,7 @@ fn module(plan: &Plan<'_>) -> String {
 
     // Model.
     let _ = writeln!(s, "/// A stored {}.", n.human);
-    s.push_str("#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]\n");
+    s.push_str("#[model]\n#[derive(sqlx::FromRow)]\n");
     let _ = writeln!(s, "pub struct {} {{", n.pascal);
     s.push_str("    pub id: i64,\n");
     for f in plan.fields {
@@ -294,7 +397,7 @@ fn module(plan: &Plan<'_>) -> String {
         "/// Payload for creating or replacing {} (JSON or an HTML form).",
         n.a_human
     );
-    s.push_str("#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]\n");
+    s.push_str("#[model]\n");
     let _ = writeln!(s, "pub struct New{} {{", n.pascal);
     for f in plan.fields {
         match (f.ty, f.optional) {
@@ -315,7 +418,7 @@ fn module(plan: &Plan<'_>) -> String {
     s.push_str("}\n\n");
 
     let _ = writeln!(s, "/// Query parameters for `GET {api}`.");
-    s.push_str("#[derive(Debug, Deserialize, JsonSchema)]\n");
+    s.push_str("#[model]\n");
     s.push_str("pub struct ListQuery {\n");
     s.push_str("    /// Maximum number of items to return (default 50, at most 200).\n");
     s.push_str("    pub limit: Option<i64>,\n");
@@ -632,6 +735,14 @@ mod tests {
 
     fn names() -> ResourceNames {
         ResourceNames::parse("blog-post", None).unwrap()
+    }
+
+    #[test]
+    fn sql_reserved_words_are_rejected() {
+        let err = parse_fields(&["on:bool".into()]).unwrap_err().to_string();
+        assert!(err.contains("reserved word in SQL"), "{err}");
+        assert!(parse_fields(&["order".into()]).is_err());
+        assert!(parse_fields(&["is_on:bool".into()]).is_ok());
     }
 
     #[test]

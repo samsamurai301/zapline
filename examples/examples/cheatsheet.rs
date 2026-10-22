@@ -8,29 +8,28 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use serde::{Deserialize, Serialize};
 use zapline::middleware::{Cors, SetRequestId};
 use zapline::prelude::*;
 
-// ---- Models: derive Serialize/Deserialize + JsonSchema (+ Validate for input).
+// ---- Models: `#[model]` derives serde, JsonSchema (OpenAPI) and, with `#[validate]` rules, Validate.
 // Doc comments become OpenAPI descriptions.
 
 /// A note.
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[model]
 pub struct Note {
     pub id: u64,
     pub text: String,
 }
 
 /// Body of `POST /notes`.
-#[derive(Deserialize, JsonSchema, Validate)]
+#[model]
 pub struct NewNote {
     #[validate(length(min = 1, max = 500))]
     pub text: String,
 }
 
 /// Query string of `GET /notes`.
-#[derive(Deserialize, JsonSchema)]
+#[model]
 pub struct Page {
     pub limit: Option<usize>,
 }

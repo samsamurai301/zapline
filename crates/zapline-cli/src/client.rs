@@ -222,7 +222,7 @@ function makeRequest(options: ClientOptions) {
   return async function request<T>(
     method: string,
     path: string,
-    init: { query?: Query | undefined; json?: unknown; form?: Record<string, unknown> | undefined } = {},
+    init: { query?: Query | undefined; json?: unknown; form?: object | undefined } = {},
   ): Promise<T> {
     let url = base + path;
     if (init.query) {

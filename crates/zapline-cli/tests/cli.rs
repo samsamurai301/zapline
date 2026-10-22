@@ -158,11 +158,11 @@ fn new_api_is_the_default_template() {
     }
     let manifest = read_toml(&root.join("Cargo.toml"));
     let deps = manifest["dependencies"].as_table().unwrap();
-    for d in ["zapline", "serde", "schemars", "validator"] {
-        assert!(deps.contains_key(d), "missing dependency {d}");
+    // Models use `#[model]`: zapline is the only dependency they need.
+    assert!(deps.contains_key("zapline"));
+    for d in ["serde", "schemars", "validator"] {
+        assert!(!deps.contains_key(d), "unneeded dependency {d}");
     }
-    assert_eq!(deps["validator"]["features"][0].as_str(), Some("derive"));
-    assert_eq!(deps["serde"]["features"][0].as_str(), Some("derive"));
     let mod_rs = fs::read_to_string(root.join("src/routes/mod.rs")).unwrap();
     assert!(mod_rs.contains("// zapline:routes:start") && mod_rs.contains("// zapline:routes:end"));
 }
@@ -415,7 +415,7 @@ fn generate_in_a_minimal_project_explains_what_is_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let root = new_project(tmp.path(), "tiny", "minimal");
     let log = expect_success(&run_in(&root, &["g", "resource", "post"]));
-    assert!(log.contains("cargo add serde --features derive"), "{log}");
+    assert!(log.contains("cargo add --dev serde_json"), "{log}");
     assert!(log.contains("pub mod routes;"), "{log}");
     assert!(root.join("src/routes/mod.rs").is_file());
 }

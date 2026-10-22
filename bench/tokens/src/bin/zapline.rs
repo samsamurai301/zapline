@@ -1,18 +1,16 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use serde::{Deserialize, Serialize};
-use zapline::openapi::OpenApi;
 use zapline::prelude::*;
 
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[model]
 struct Note {
     id: u64,
     title: String,
     body: String,
 }
 
-#[derive(Deserialize, JsonSchema, Validate)]
+#[model]
 struct NewNote {
     #[validate(length(min = 1, max = 200))]
     title: String,

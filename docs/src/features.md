@@ -63,13 +63,13 @@ Some modules have no feature flag because they add no dependencies:
 
 Features are additive and unify across your dependency tree, so one crate enabling `full` enables it for all. The same applies to the macros: `#[get(..)]` works without `openapi`, it just doesn't document anything.
 
-Your own `Cargo.toml` still needs the crates whose derives expand to paths in their own crate:
+Put `#[model]` on request and response types and `zapline` is the only dependency you need: it derives `Serialize`, `Deserialize`, `JsonSchema` (with `openapi`) and `Validate` (with `validate`) through zapline's own re-exports. Writing the derives yourself still works; then add the crates they expand to:
 
 ```toml
-serde = { version = "1", features = ["derive"] }                    # always
-schemars = "1"                                                     # for #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }            # for #[derive(Validate)]
-tokio = { version = "1", features = ["macros", "rt"] }             # for #[tokio::test]
+serde = { version = "1", features = ["derive"] }                    # #[derive(Serialize, Deserialize)]
+schemars = "1"                                                     # #[derive(JsonSchema)]
+validator = { version = "0.21", features = ["derive"] }            # #[derive(Validate)]
+tokio = { version = "1", features = ["macros", "rt"] }             # #[tokio::test], in [dev-dependencies]
 ```
 
 `cargo doc -p zapline --all-features --open` builds the API reference with every module visible. The reference on docs.rs is built the same way.

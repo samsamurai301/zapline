@@ -547,6 +547,66 @@ pub fn route(attr: TokenStream, item: TokenStream) -> TokenStream {
     expand(args, item)
 }
 
+/// Make a struct or enum a request/response model in one line.
+///
+/// `#[model]` derives `Debug`, `Clone`, `Serialize` and `Deserialize`, plus
+/// `JsonSchema` (with zapline's `openapi` feature) and, for structs with
+/// named fields, `Validate` (with `validate`; fields opt in with
+/// `#[validate(..)]` rules). The derives go
+/// through zapline's own copies of serde, schemars and validator, so the
+/// app needs none of them in its `Cargo.toml`. `#[serde(..)]`,
+/// `#[schemars(..)]` and `#[validate(..)]` attributes work as usual; don't
+/// derive these traits again yourself.
+///
+/// ```text
+/// #[model]
+/// struct NewUser {
+///     #[validate(email)]
+///     email: String,
+///     #[serde(default)]
+///     admin: bool,
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
+    if !attr.is_empty() {
+        let attr = TokenStream2::from(attr);
+        return syn::Error::new(attr.span(), "`#[model]` takes no arguments")
+            .to_compile_error()
+            .into();
+    }
+    let input = parse_macro_input!(item as syn::DeriveInput);
+    let mut out = quote! {
+        #[derive(
+            ::core::fmt::Debug,
+            ::core::clone::Clone,
+            ::zapline::__private::serde::Serialize,
+            ::zapline::__private::serde::Deserialize,
+        )]
+        #[serde(crate = "::zapline::__private::serde")]
+    };
+    if cfg!(feature = "openapi") {
+        out.extend(quote! {
+            #[derive(::zapline::__private::schemars::JsonSchema)]
+            #[schemars(crate = "::zapline::__private::schemars")]
+        });
+    }
+    // Every struct with named fields gets `Validate` (a no-op without
+    // rules), so `Valid<Json<T>>` works whatever its fields are.
+    let named_struct = matches!(
+        &input.data,
+        syn::Data::Struct(s) if matches!(s.fields, syn::Fields::Named(_))
+    );
+    if named_struct && cfg!(feature = "validate") {
+        out.extend(quote! {
+            #[derive(::zapline::__private::validator::Validate)]
+            #[validate(crate = "::zapline::__private::validator")]
+        });
+    }
+    out.extend(quote! { #input });
+    out.into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

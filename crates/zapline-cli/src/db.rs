@@ -63,21 +63,27 @@ pub fn migration_file_name(name: &str, secs: u64) -> Result<String> {
     Ok(format!("{}_{slug}.sql", timestamp(secs)))
 }
 
+/// A file name for a new migration `name` in `root`'s migrations
+/// directory: timestamped now, or later if that version is taken, since two
+/// migrations created in the same second (by back-to-back generators) must
+/// still get distinct versions that sort in creation order.
+pub fn new_migration_name(root: &Path, name: &str) -> Result<String> {
+    let dir = root.join(MIGRATIONS_DIR);
+    let mut secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    while same_version_exists(&dir, secs) {
+        secs += 1;
+    }
+    migration_file_name(name, secs)
+}
+
 /// Creates `migrations/<timestamp>_<name>.sql` under `root` with `sql` as
 /// its contents and returns its path.
 pub fn create_migration(root: &Path, name: &str, sql: &str) -> Result<PathBuf> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     let dir = root.join(MIGRATIONS_DIR);
     std::fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
-    // Two migrations created in the same second must still sort in order.
-    let mut secs = now;
-    let mut path = dir.join(migration_file_name(name, secs)?);
-    while path.exists() || same_version_exists(&dir, secs) {
-        secs += 1;
-        path = dir.join(migration_file_name(name, secs)?);
-    }
+    let path = dir.join(new_migration_name(root, name)?);
     std::fs::write(&path, sql).with_context(|| format!("cannot write {}", path.display()))?;
     Ok(path)
 }

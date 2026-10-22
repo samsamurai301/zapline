@@ -4,13 +4,13 @@
 //! with the re-rendered `list` block of `templates/todos/index.html`, which
 //! htmx swaps into the page.
 
-use serde::{Deserialize, Serialize};
 use zapline::db::{sqlx, Db};
 use zapline::prelude::*;
 use zapline::view::{context, HxRequest, Views};
 
 /// A todo item.
-#[derive(Clone, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
+#[model]
+#[derive(sqlx::FromRow)]
 pub struct Todo {
     pub id: i64,
     pub title: String,
@@ -18,7 +18,7 @@ pub struct Todo {
 }
 
 /// Body of a create request (form or JSON).
-#[derive(Deserialize, JsonSchema, Validate)]
+#[model]
 pub struct NewTodo {
     #[validate(length(min = 1, max = 200))]
     pub title: String,

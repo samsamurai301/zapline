@@ -29,6 +29,13 @@ pub struct Opaque;
 #[cfg(feature = "openapi")]
 pub use crate::openapi::OperationDoc as Doc;
 
+// Crates `#[model]` derives from, so apps don't need them as dependencies.
+#[cfg(feature = "openapi")]
+pub use schemars;
+pub use serde;
+#[cfg(feature = "validate")]
+pub use validator;
+
 /// Placeholder when the `openapi` feature is disabled.
 #[cfg(not(feature = "openapi"))]
 #[derive(Clone, Copy, Debug, Default)]

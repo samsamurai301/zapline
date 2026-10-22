@@ -42,9 +42,9 @@ With an MCP-capable assistant, `zapline mcp` serves all of this as tools
   with `Error::not_found()`, `Error::bad_request(msg)`, `Error::conflict(msg)`,
   and add a stable machine code with `.with_code("snake_case")`. Map domain
   errors with `impl From<MyError> for Error`.
-- **Models**: request/response structs derive
-  `Serialize, Deserialize, JsonSchema` (plus `Validate` for input). Doc
-  comments on handlers and fields become the OpenAPI description.
+- **Models**: put `#[model]` on request/response structs (it derives Debug,
+  Clone, Serialize, Deserialize, JsonSchema and Validate; no other crates
+  needed). Doc comments on handlers and fields become the OpenAPI description.
 - **Shared state**: `App::state(value)` + `State<T>` for plain values;
   `App::provide`/`provide_dyn` + `Dep<T>` for services behind traits.
 - **Tests**: one file per resource in `tests/`, using

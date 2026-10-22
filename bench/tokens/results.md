@@ -9,19 +9,19 @@ an OpenAPI document, interactive docs, and one end-to-end test. Sources: [`src/b
 
 | Framework | Tokens | vs zapline |
 |---|---:|---:|
-| zapline | 673 | |
-| axum 0.8 + utoipa + validator | 1257 | zapline uses 46% fewer |
-| actix-web 4 + utoipa + validator | 1336 | zapline uses 50% fewer |
+| zapline | 641 | |
+| axum 0.8 + utoipa + validator | 1257 | zapline uses 49% fewer |
+| actix-web 4 + utoipa + validator | 1336 | zapline uses 52% fewer |
 
 ## Reading tool output
 
 | Situation | cargo | zapline | Saved |
 |---|---:|---:|---:|
-| One failing test (`cargo test` vs `zapline test`) | 238 | 78 | 67% |
-| One type error (`cargo check` vs `zapline check`) | 272 | 61 | 78% |
+| One failing test (`cargo test` vs `zapline test`) | 242 | 78 | 68% |
+| One type error (`cargo check` vs `zapline check`) | 296 | 61 | 79% |
 
 ## Learning the framework
 
 The cheatsheet page, which `AGENTS.md`, `llms.txt` and `zapline mcp` point assistants to first: 837 tokens
-(its runnable example alone: 1254). `zapline mcp`'s `docs` tool answers a topic with only the matching
+(its runnable example alone: 1240). `zapline mcp`'s `docs` tool answers a topic with only the matching
 guide sections instead of the whole guide.

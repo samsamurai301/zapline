@@ -142,13 +142,10 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
     let with_test = project.lib_name.is_some()
         && lib.contains("pub fn app(db: Database)")
         && dialect == Dialect::Sqlite;
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     // Regenerating (--force) rewrites the existing migration instead of adding a second one.
     let migration = match existing_migration(project, "_create_users.sql") {
         Some(name) => name,
-        None => crate::db::migration_file_name("create_users", now)?,
+        None => crate::db::new_migration_name(&project.root, "create_users")?,
     };
     let krate = crate_name_of(project);
     let files = files(

@@ -11,10 +11,9 @@
 //! line and costs nothing when unused.
 //!
 //! ```no_run
-//! use serde::{Deserialize, Serialize};
 //! use zapline::prelude::*;
 //!
-//! #[derive(Serialize, Deserialize, JsonSchema)]
+//! #[model] // Serialize, Deserialize, JsonSchema, Validate, Debug, Clone
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -42,8 +41,10 @@
 //!
 //! `use zapline::prelude::*` brings in the app builder, extractors,
 //! responses, route macros and the types most apps touch (see [`prelude`]).
-//! Deriving [`JsonSchema`] or `Validate` expands to paths in `schemars` /
-//! `validator`, so add those crates to your `Cargo.toml` when you derive them.
+//! [`model`] derives everything a request or response type needs through
+//! zapline's own re-exports, so `zapline` is the only dependency. Deriving
+//! [`JsonSchema`] or `Validate` by hand expands to paths in `schemars` /
+//! `validator`; add those crates to your `Cargo.toml` if you do.
 //!
 //! # Where to start
 //!
@@ -172,7 +173,7 @@ pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 
 #[cfg(feature = "macros")]
-pub use zapline_macros::{delete, get, head, options, patch, post, put, route};
+pub use zapline_macros::{delete, get, head, model, options, patch, post, put, route};
 
 /// Everything a typical app needs: `use zapline::prelude::*;`
 ///
@@ -197,7 +198,7 @@ pub mod prelude {
     pub use crate::extract::{Extension, MatchedPath, Path, State};
     pub use crate::middleware::{Next, RequestId};
     #[cfg(feature = "macros")]
-    pub use crate::{delete, get, head, options, patch, post, put, route};
+    pub use crate::{delete, get, head, model, options, patch, post, put, route};
     pub use crate::{
         header, App, Bytes, ConnInfo, Error, HeaderMap, HeaderValue, Html, IntoResponse, Method,
         Plugin, Redirect, Request, Resources, Response, Result, Routes, StatusCode, Uri,

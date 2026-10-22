@@ -11,10 +11,9 @@
 A batteries-included Rust web framework: typed handlers, OpenAPI generated from your code, validation, DI, auth, sessions, realtime, metrics, a thread-per-core server, and a CLI that scaffolds, generates and live-reloads. Small API surface, one obvious way to do each thing, and docs packaged so an AI assistant can learn the common 90% of the framework in about 2k tokens. The same API takes [about half the tokens](bench/tokens/results.md) to write in zapline as in axum or actix-web.
 
 ```rust
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+#[model] // serde + JSON Schema + validation, no extra crates
 struct NewUser {
     #[validate(length(min = 1, max = 64))]
     name: String,
@@ -46,7 +45,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
 | 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
 | 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
-| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~2k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline mcp` serves docs, generators, routes, `check` and `test` to Claude Code, Cursor and other MCP clients, and `zapline check` / `zapline test` answer in 67–78% fewer tokens than cargo ([token benchmark](bench/tokens/results.md)). |
+| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~2k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline mcp` serves docs, generators, routes, `check` and `test` to Claude Code, Cursor and other MCP clients, and `zapline check` / `zapline test` answer in 68–79% fewer tokens than cargo ([token benchmark](bench/tokens/results.md)). |
 | 🧩 **Pay for what you use** | Optional features are Cargo features built on public extension points. Unused features cost nothing at runtime. |
 
 ## Features at a glance
@@ -56,7 +55,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Routing | `#[get]`/`#[post]`/... macros or builder methods, typed path params, nested groups, per-route metadata, 404/405 handling |
 | Extractors | `Path`, `Query`, `Json`, `Form`, `Bytes`, `State`, `Dep`, `Valid`, `Multipart`, `BodyStream`, `CookieJar`, `Session`, `CurrentUser`, `Jwt`, `BearerToken`, `ConnInfo`, ... |
 | API docs | OpenAPI 3.1 generated from signatures and doc comments; Swagger UI, Scalar and Redoc; security schemes from auth policies; export with `zapline openapi` |
-| Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` derives, returning `422` with `[{field, code, message}]` |
+| Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` rules (`#[model]` derives them), returning `422` with `[{field, code, message}]` |
 | App structure | `Dep<T>` DI with trait objects and async factories, `Config::load()` (TOML layers + env + `.env` + profiles), `on_startup`/`on_shutdown`, plugins |
 | Background work | `BackgroundTasks` after the response, `App::schedule(Schedule::every(..))`, long-running workers with shutdown tokens |
 | Security | Bearer, Basic and API-key extractors; JWT (HS/RS/ES); `Authenticate` + `CurrentUser`; `.require_roles/.require_scopes` guards; cookies; sessions; CSRF |
@@ -86,11 +85,10 @@ Or add it to an existing project:
 
 ```toml
 [dependencies]
-zapline = "0.1"                                  # default features: macros, json, query, form, openapi, validate, config, tracing
-serde = { version = "1", features = ["derive"] }
-schemars = "1"                                   # for #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }
+zapline = "0.1"   # default features: macros, json, query, form, openapi, validate, config, tracing
 ```
+
+`#[model]` derives serde, `JsonSchema` and `Validate` through zapline's re-exports, so no other crate is needed.
 
 Enable more with features such as `ws`, `fs`, `multipart`, `compression`, `jwt`, `cookies`, `tls` and `http2`, or turn on everything with `full`.
 

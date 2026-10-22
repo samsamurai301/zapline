@@ -150,16 +150,9 @@ fn plan_route_registration(project: &Project, module: &str) -> Result<ModEdit> {
 
 /// Notes for the dependencies the generated resource code relies on.
 fn missing_dependency_note(project: &Project) -> Option<String> {
+    // Models use `#[model]`, which needs no serde/schemars/validator
+    // dependency; only the generated tests need these.
     let mut cmds: Vec<&str> = Vec::new();
-    if !project.depends_on("serde") {
-        cmds.push("cargo add serde --features derive");
-    }
-    if !project.depends_on("schemars") {
-        cmds.push("cargo add schemars@1");
-    }
-    if !project.depends_on("validator") {
-        cmds.push("cargo add validator@0.21 --features derive");
-    }
     if !project.dev_depends_on("serde_json") {
         cmds.push("cargo add --dev serde_json");
     }
@@ -346,9 +339,6 @@ fn sql_resource(
     let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
     let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");
     let krate = crate_name_of(project);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs());
     let plan = db_resource::Plan {
         names: &names,
         fields: &fields,
@@ -359,7 +349,9 @@ fn sql_resource(
         migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))
         {
             Some(name) => name,
-            None => crate::db::migration_file_name(&format!("create_{}", names.plural), now)?,
+            None => {
+                crate::db::new_migration_name(&project.root, &format!("create_{}", names.plural))?
+            }
         },
     };
     let files = db_resource::files(&plan);

@@ -67,19 +67,16 @@ Open <http://localhost:8080/docs> for the interactive API docs, and run `cargo t
 ```toml
 [dependencies]
 zapline = "0.1"
-serde = { version = "1", features = ["derive"] }
-schemars = "1"                                            # #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }   # #[derive(Validate)]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+// `#[model]` derives Debug, Clone, Serialize, Deserialize, JsonSchema and Validate.
+#[model]
 struct Todo {
     #[validate(length(min = 1, max = 200))]
     title: String,
@@ -148,29 +145,28 @@ One runnable file showing the canonical way to do each common task: models with 
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
-use serde::{Deserialize, Serialize};
 use zapline::middleware::{Cors, SetRequestId};
 use zapline::prelude::*;
 
-// ---- Models: derive Serialize/Deserialize + JsonSchema (+ Validate for input).
+// ---- Models: `#[model]` derives serde, JsonSchema (OpenAPI) and, with `#[validate]` rules, Validate.
 // Doc comments become OpenAPI descriptions.
 
 /// A note.
-#[derive(Clone, Serialize, Deserialize, JsonSchema)]
+#[model]
 pub struct Note {
     pub id: u64,
     pub text: String,
 }
 
 /// Body of `POST /notes`.
-#[derive(Deserialize, JsonSchema, Validate)]
+#[model]
 pub struct NewNote {
     #[validate(length(min = 1, max = 500))]
     pub text: String,
 }
 
 /// Query string of `GET /notes`.
-#[derive(Deserialize, JsonSchema)]
+#[model]
 pub struct Page {
     pub limit: Option<usize>,
 }
@@ -458,7 +454,7 @@ The second form is the `mcp.json` / settings entry most other clients use.
 |---|---|
 | `@app.get("/items/{id}")` | `#[get("/items/{id}")]` |
 | `def read(id: int, q: str \| None = None)` | `async fn read(Path(id): Path<i64>, Query(q): Query<Params>)` |
-| Pydantic model | `#[derive(Deserialize, Serialize, JsonSchema, Validate)] struct` |
+| Pydantic model | `#[model] struct` (derives serde, `JsonSchema` and `Validate`) |
 | Automatic 422 validation errors | `Valid<Json<T>>` → 422 with per-field `details` |
 | `/docs`, `/openapi.json` | `App::openapi(OpenApi::new("API", "1.0"))` |
 | `Depends(get_db)` | `Dep<T>`, `State<T>`, custom extractors, `Cached<T>` |
@@ -1114,7 +1110,7 @@ The route macros read the doc comment and the handler signature (`Path<T>`, `Que
 Requirements:
 
 - Cargo features `openapi` (on by default, implies `json`) and `macros` (on by default) for the automatic parts.
-- Types appear in the spec when they implement `JsonSchema`. The derive expands to paths in the `schemars` crate, so add it to your `Cargo.toml`:
+- Types appear in the spec when they implement `JsonSchema`. `#[model]` derives it for you (along with serde and `Validate`) with no extra dependency. The plain derive expands to paths in the `schemars` crate, so add it to your `Cargo.toml`:
 
   ```toml
   schemars = "1"
@@ -1455,7 +1451,7 @@ async fn create_user(Valid(Json(user)): Valid<Json<NewUser>>) -> StatusCode {
 Requirements:
 
 - Cargo feature `validate` (on by default, implies `json`).
-- The derive expands to paths in the `validator` crate, so add it to your `Cargo.toml`:
+- `#[model]` derives `Validate` (plus serde and `JsonSchema`) without adding any crate. The plain derive expands to paths in the `validator` crate, so add it to your `Cargo.toml`:
 
   ```toml
   validator = { version = "0.21", features = ["derive"] }
@@ -5483,13 +5479,13 @@ Some modules have no feature flag because they add no dependencies:
 
 Features are additive and unify across your dependency tree, so one crate enabling `full` enables it for all. The same applies to the macros: `#[get(..)]` works without `openapi`, it just doesn't document anything.
 
-Your own `Cargo.toml` still needs the crates whose derives expand to paths in their own crate:
+Put `#[model]` on request and response types and `zapline` is the only dependency you need: it derives `Serialize`, `Deserialize`, `JsonSchema` (with `openapi`) and `Validate` (with `validate`) through zapline's own re-exports. Writing the derives yourself still works; then add the crates they expand to:
 
 ```toml
-serde = { version = "1", features = ["derive"] }                    # always
-schemars = "1"                                                     # for #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }            # for #[derive(Validate)]
-tokio = { version = "1", features = ["macros", "rt"] }             # for #[tokio::test]
+serde = { version = "1", features = ["derive"] }                    # #[derive(Serialize, Deserialize)]
+schemars = "1"                                                     # #[derive(JsonSchema)]
+validator = { version = "0.21", features = ["derive"] }            # #[derive(Validate)]
+tokio = { version = "1", features = ["macros", "rt"] }             # #[tokio::test], in [dev-dependencies]
 ```
 
 `cargo doc -p zapline --all-features --open` builds the API reference with every module visible. The reference on docs.rs is built the same way.
