@@ -59,10 +59,12 @@
 //! | API docs and validation | [`openapi`], [`validate`] |
 //! | Security | [`auth`] (bearer, basic, API keys, JWT, guards, CSRF), [`cookies`], [`session`] |
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
-//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases |
+//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs |
+//! | Email | [`mail`]: SMTP, dev inbox, test outbox |
 //! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
+//! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
 //!
 //! # Cargo features
 //!
@@ -85,6 +87,8 @@
 //! | `jwt` | | JSON Web Tokens: [`auth::Jwt`], [`auth::JwtConfig`], [`auth::Claims`] |
 //! | `cookies` | | [`cookies`], [`session`] and [`auth::Csrf`] |
 //! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
+//! | `password` | | [`auth::password`]: Argon2id password hashing |
+//! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
 //! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
 //! | `sqlite` | | [`db`]: SQLite pool, migrations, `Db` extractor (sqlx) |
 //! | `full` | | All of the above |
@@ -96,6 +100,7 @@
 // ---- core -----------------------------------------------------------------
 mod app;
 mod body;
+pub mod dev;
 mod error;
 pub mod extract;
 mod handler;
@@ -143,6 +148,10 @@ pub mod config;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
+#[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
+pub mod jobs;
+#[cfg(feature = "mail")]
+pub mod mail;
 pub mod tasks;
 
 // ---- observability -----------------------------------------------------------

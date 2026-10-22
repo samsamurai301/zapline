@@ -16,6 +16,8 @@ zapline routes --json               # machine-readable route table
 zapline openapi -o openapi.json     # the API contract, generated from code
 zapline generate resource <name>    # new CRUD module + tests, auto-registered
 zapline generate handler <name> --method get
+zapline generate auth               # accounts + password reset (needs a database)
+zapline generate job <name>         # durable background job (needs a database)
 ```
 
 Run `zapline test` after every change (it wraps `cargo test` and prints a
@@ -38,6 +40,9 @@ With an MCP-capable assistant, `zapline mcp` serves all of this as tools
   `async fn`s. Arguments are extractors: `Path<T>`, `Query<T>`, `Json<T>`,
   `Valid<Json<T>>` (validated body, 422 on failure), `State<T>`, `Dep<T>`.
 - **Mounting**: `app.mount((handler_a, handler_b))`.
+- **Background work**: work that must not be lost (email, webhooks) is a
+  durable job in `src/jobs/` (`zapline g job <name>`), enqueued with
+  `jobs.enqueue(..)`; `BackgroundTasks` only for best-effort work.
 - **Errors**: return `Result<T>` (zapline's) and use `?`. Build HTTP errors
   with `Error::not_found()`, `Error::bad_request(msg)`, `Error::conflict(msg)`,
   and add a stable machine code with `.with_code("snake_case")`. Map domain

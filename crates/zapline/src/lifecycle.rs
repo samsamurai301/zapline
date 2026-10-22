@@ -43,6 +43,13 @@ impl Resources {
         }
     }
 
+    #[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
+    /// A handle that doesn't keep the registry alive (for values stored in
+    /// it that need to reach it again).
+    pub(crate) fn downgrade(&self) -> WeakResources {
+        WeakResources(Arc::downgrade(&self.inner))
+    }
+
     pub(crate) fn snapshot(&self) -> Vec<StateEntry> {
         self.inner.lock().unwrap().clone()
     }
@@ -87,6 +94,18 @@ impl Resources {
     pub fn contains<T: Send + Sync + 'static>(&self) -> bool {
         let id = TypeId::of::<T>();
         self.inner.lock().unwrap().iter().any(|(t, _)| *t == id)
+    }
+}
+
+/// A non-owning [`Resources`] handle.
+#[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
+#[derive(Clone)]
+pub(crate) struct WeakResources(std::sync::Weak<Mutex<Vec<StateEntry>>>);
+
+#[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
+impl WeakResources {
+    pub(crate) fn upgrade(&self) -> Option<Resources> {
+        self.0.upgrade().map(|inner| Resources { inner })
     }
 }
 

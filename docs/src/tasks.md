@@ -29,7 +29,7 @@ async fn signup(tasks: BackgroundTasks, Json(address): Json<String>) -> StatusCo
 - A task may return `()` or `Result<(), E>` where `E: Display`. Errors and panics are logged (through `tracing` when enabled, otherwise on stderr) and never affect the client or the server.
 - A task must be `Send + 'static`. `Dep<T>` is an `Arc` underneath, so clone it into the task.
 - If the app has a job, a worker, or sets `App::tasks_grace_period`, shutdown waits for queued tasks (see [Shutdown and the grace period](#shutdown-and-the-grace-period)). Without any of these, tasks still queued when the process exits can be cut off.
-- Tasks live in memory. If the process crashes or is killed before they run, they are lost. For work that must not be lost, write it to a database or a queue and process it from a worker.
+- Tasks live in memory. If the process crashes or is killed before they run, they are lost. For work that must not be lost, use [durable jobs](jobs.md), which are stored in the database and retried.
 
 ```rust
 use zapline::di::Dep;

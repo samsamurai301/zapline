@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod db_resource;
+pub mod job;
 pub mod register;
 
 use std::fs;

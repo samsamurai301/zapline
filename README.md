@@ -63,7 +63,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed), multipart uploads |
 | Observability | `tracing` spans per request, Prometheus `/metrics` with route labels, `/health/live` and `/health/ready` with checks |
 | Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
-| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases; accounts in one command (`zapline g auth`: Argon2id, database sessions, htmx pages); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
+| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases; accounts in one command (`zapline g auth`: Argon2id, database sessions, password reset by email, htmx pages); durable jobs with retries in the same database; email with a dev inbox; a dev console at `/_dev` (routes, recent requests, job queue, inbox); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
 | Tooling | `zapline new` (minimal, api, full and fullstack templates), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `routes`, `openapi`, `doctor`, `bench` |
 
 ## Getting started
@@ -76,6 +76,8 @@ zapline new shop --template fullstack && cd shop                 # SQLite file, 
 zapline g resource product name price:float stock:int featured:bool   # migration + SQL CRUD API + htmx page + tests
 zapline dev                                                      # http://localhost:8080/products and /docs
 ```
+
+Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, and 12 end-to-end tests, about 100 lines beyond what the CLI generated.
 
 Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
 
@@ -159,6 +161,7 @@ async fn unknown_user_is_404() {
 - **For AI assistants**: [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) (index) and [`llms-full.txt`](https://samsamurai301.github.io/zapline/llms-full.txt) (the whole guide in one file). Agents working on zapline itself should read [`AGENTS.md`](AGENTS.md).
 - **[The guide](https://samsamurai301.github.io/zapline/)** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
 - **API reference**: `cargo doc -p zapline --all-features --open`
+- **The saas example** in [`examples/saas`](examples/saas): accounts, password reset, per-user data, durable jobs, email and a schedule in one app.
 - **Examples** in [`examples/examples`](examples/examples): `cheatsheet`, `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the internals and the plugin extension points.
 

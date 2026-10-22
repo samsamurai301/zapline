@@ -18,6 +18,7 @@
 - [Middleware](middleware.md)
 - [State, lifecycle & plugins](lifecycle.md)
 - [Testing](testing.md)
+- [Dev console](dev-console.md)
 
 # Building APIs
 
@@ -31,6 +32,8 @@
 
 - [Databases (Postgres, SQLite)](database.md)
 - [Views & htmx](views.md)
+- [Durable jobs](jobs.md)
+- [Email](mail.md)
 
 # Security
 

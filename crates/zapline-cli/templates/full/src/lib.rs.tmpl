@@ -26,6 +26,8 @@ use crate::repository::{MemUserRepository, UserRepository};
 /// Builds the application: dependencies, probes, metrics, middleware, routes.
 pub fn app(settings: &Settings) -> App {
     App::new()
+        // Routes, recent requests, jobs and mail at /_dev (debug builds only).
+        .dev_console()
         // Serves /openapi.json, with Swagger UI at /docs.
         .openapi(OpenApi::new(
             env!("CARGO_PKG_NAME"),

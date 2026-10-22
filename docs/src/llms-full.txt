@@ -324,9 +324,10 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
+| Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts + password reset), `g job <name>` (durable job), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -345,7 +346,8 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
-| `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
+| `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
+| `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
@@ -1067,6 +1069,45 @@ let addr = listener.local_addr()?;
 tokio::spawn(app().serve(listener));
 // connect to `addr` with any client
 ```
+
+
+---
+
+<!-- dev-console.md -->
+
+# Dev console
+
+One call gives a running app a page that shows what it is made of and what it is doing:
+
+```rust
+use zapline::prelude::*;
+
+#[get("/")]
+async fn index() -> &'static str { "hi" }
+
+fn main() -> std::io::Result<()> {
+    App::new()
+        .dev_console()
+        .mount(index)
+        .run("127.0.0.1:8080")
+}
+```
+
+Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `minimal`) already have it.
+
+| Panel | Shows |
+|---|---|
+| Recent requests | The last 50 requests: status (4xx and 5xx highlighted), method, path with query, and how long the app took. |
+| Routes | Every route with its summary and tags (from doc comments and `#[get(.., tag = "..")]`). Parameterless `GET` routes are links. |
+| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. |
+| Mail | When the [mailer](mail.md) is the dev outbox: how many emails were kept, with a link to the inbox at `/_dev/mail`. |
+
+## Safe to leave in
+
+- **Debug builds only.** In a release build (`cargo build --release`, the Dockerfiles) `.dev_console()` does nothing: no route, no middleware, no cost.
+- **This machine only.** Requests from any other address get a `404`, so a debug build bound to `0.0.0.0` doesn't show its routes or jobs to the network.
+
+The console's own requests are not listed under recent requests.
 
 
 ---
@@ -2227,7 +2268,7 @@ async fn signup(tasks: BackgroundTasks, Json(address): Json<String>) -> StatusCo
 - A task may return `()` or `Result<(), E>` where `E: Display`. Errors and panics are logged (through `tracing` when enabled, otherwise on stderr) and never affect the client or the server.
 - A task must be `Send + 'static`. `Dep<T>` is an `Arc` underneath, so clone it into the task.
 - If the app has a job, a worker, or sets `App::tasks_grace_period`, shutdown waits for queued tasks (see [Shutdown and the grace period](#shutdown-and-the-grace-period)). Without any of these, tasks still queued when the process exits can be cut off.
-- Tasks live in memory. If the process crashes or is killed before they run, they are lost. For work that must not be lost, write it to a database or a queue and process it from a worker.
+- Tasks live in memory. If the process crashes or is killed before they run, they are lost. For work that must not be lost, use [durable jobs](jobs.md), which are stored in the database and retried.
 
 ```rust
 use zapline::di::Dep;
@@ -2598,6 +2639,202 @@ A template error (missing template, syntax error, unknown filter) is a 500. Unde
 
 ---
 
+<!-- jobs.md -->
+
+# Durable jobs
+
+Work that must not be lost (emails, webhooks, image processing, billing) goes in a **job**: a struct stored in your database until a worker has run it. Jobs survive restarts and deploys, are retried with backoff when they fail, and are shared by every instance of the app.
+
+```rust
+use zapline::db::Database;
+use zapline::jobs::{Job, Jobs};
+use zapline::prelude::*;
+
+#[model]
+struct SendWelcome {
+    user_id: i64,
+}
+
+impl Job for SendWelcome {
+    const NAME: &'static str = "send_welcome";
+
+    async fn run(self, res: Resources) -> Result<()> {
+        // load the user with res.require::<..>()?, send the email...
+        Ok(())
+    }
+}
+
+#[post("/signup")]
+async fn signup(jobs: Jobs) -> Result<StatusCode> {
+    // create the user...
+    jobs.enqueue(SendWelcome { user_id: 1 }).await?;
+    Ok(StatusCode::CREATED)
+}
+
+fn main() -> std::io::Result<()> {
+    App::new()
+        .database(Database::from_env())
+        .jobs(|queue| queue.register::<SendWelcome>())
+        .mount(signup)
+        .run("0.0.0.0:8080")
+}
+```
+
+Requirements: the `postgres` or `sqlite` feature, and `json` (on by default). `zapline g job <name>` writes the struct, its registration and a test for you.
+
+## Writing a job
+
+- The struct is the payload, stored as JSON: keep it small (ids, not whole records). `#[model]` derives what it needs.
+- `NAME` identifies the job type in the database. Keep it stable when you rename or move the struct, or queued jobs will find no handler.
+- `run` gets the app's `Resources`, so it can use everything a handler can: `res.require::<Pool<Postgres>>()?`, `res.require::<Mailer>()?`, your own services.
+- Return `Err` (or panic) to have the job retried. `MAX_ATTEMPTS` (default 5) caps the runs.
+- Jobs run **at least once**: if a worker dies mid-run, the job runs again after its lease expires. Make jobs safe to repeat (check before you charge, upsert instead of insert).
+
+## Enqueueing
+
+| Call | Runs |
+|---|---|
+| `jobs.enqueue(job).await?` | as soon as a worker is free |
+| `jobs.enqueue_in(job, Duration::from_secs(3600)).await?` | after the delay |
+
+`Jobs` is an extractor, and also available from `Resources` (`res.require::<Jobs>()?`), so a job can enqueue follow-up jobs. Enqueueing a type that isn't registered in `.jobs(..)` is an error that names the missing `.register::<T>()`.
+
+## Workers, retries and failures
+
+`App::jobs` starts the workers at startup and stops them at shutdown, after their current job (within [`App::tasks_grace_period`](tasks.md#shutdown-and-the-grace-period)).
+
+| Setting | Default | |
+|---|---|---|
+| `.workers(n)` | 4 | Jobs run at once in this instance. `0` runs none: useful in tests, or for web instances when a separate instance runs the jobs. |
+| `.poll_interval(d)` | 1 s | How often idle workers look for due jobs. Jobs enqueued by the same instance wake a worker at once. |
+| `.timeout(d)` | 5 min | A run that takes longer fails (and is retried). |
+
+A failed run is retried after 5 s, 20 s, 80 s, 5 min, 21 min (capped at 1 h) until `MAX_ATTEMPTS`. Then the job stays in the table with status `failed` and its last error. Finished jobs are deleted.
+
+```rust
+let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
+let n = jobs.retry_failed().await?;   // queue every failed job again
+```
+
+In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+
+The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
+
+On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
+
+## Testing jobs
+
+With `.workers(0)` nothing runs in the background, and `run_pending` runs the due jobs on the spot, so tests are deterministic:
+
+```rust
+let client = App::new()
+    .database(Database::sqlite_memory())
+    .jobs(|queue| queue.register::<SendWelcome>().workers(0))
+    .test();
+let jobs: Jobs = client.resources().await.require()?;
+
+client.post("/signup").send().await.assert_status(201);
+assert_eq!(jobs.run_pending().await?, 1);
+```
+
+## Jobs or background tasks?
+
+| | [`BackgroundTasks`](tasks.md) | Jobs |
+|---|---|---|
+| Stored | in memory | in the database |
+| Survives a crash or deploy | no | yes |
+| Retries | no | with backoff |
+| Shared across instances | no | yes |
+| Needs | nothing | a database |
+
+Use background tasks for best-effort work (an audit log line, a cache warm-up) and jobs for everything a user would notice missing.
+
+
+---
+
+<!-- mail.md -->
+
+# Email
+
+`zapline::mail` sends email over SMTP in production, keeps it in a **dev inbox** you can open in the browser while developing, and captures it in tests.
+
+```rust
+use zapline::mail::{Email, Mailer};
+use zapline::prelude::*;
+
+#[post("/invite")]
+async fn invite(mail: Mailer) -> Result<&'static str> {
+    mail.send(
+        Email::to("ada@example.com")
+            .subject("You're invited")
+            .text("Join us: https://example.com/join")
+            .html("<p>Join us: <a href=\"https://example.com/join\">example.com</a></p>"),
+    )
+    .await?;
+    Ok("sent")
+}
+
+fn main() -> zapline::Result<()> {
+    App::new()
+        .mailer(Mailer::from_env()?)
+        .mount(invite)
+        .run("0.0.0.0:8080")?;
+    Ok(())
+}
+```
+
+Requirements: the `mail` feature (included in `full`).
+
+## Configuration
+
+`Mailer::from_env()` reads:
+
+| Variable | Example | |
+|---|---|---|
+| `SMTP_URL` | `smtps://user:pass@smtp.example.com` | Implicit TLS (port 465). Use `smtp://user:pass@host:587?tls=required` for STARTTLS and `smtp://localhost:1025` for a local catcher like Mailpit. |
+| `MAIL_FROM` | `Acme <no-reply@acme.dev>` | The sender when an `Email` doesn't set `.from(..)`. Defaults to `no-reply@localhost`. |
+
+Without `SMTP_URL`, a **debug** build uses the outbox described below, and a **release** build refuses to start, so production never drops mail silently.
+
+`Mailer::smtp(url)` and `Mailer::outbox()` build the two kinds directly, and `.default_from(addr)` sets the sender in code.
+
+## The dev inbox
+
+An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use, and the [dev console](dev-console.md) links it.
+
+## Sending in the background
+
+Sending inline makes the request wait for the SMTP server and fail if it is down. With a database, `Email` is also a [durable job](jobs.md): register it once and enqueue messages instead of sending them.
+
+```rust
+App::new()
+    .database(Database::from_env())
+    .mailer(Mailer::from_env()?)
+    .jobs(|queue| queue.register::<Email>());
+
+// in a handler
+jobs.enqueue(Email::to(&user.email).subject("Welcome").text(body)).await?;
+```
+
+A failed send is retried with backoff (5 s, 20 s, 80 s, ...).
+
+## Testing
+
+```rust
+let mailer = Mailer::outbox();
+let client = App::new().mailer(mailer.clone()).mount(invite).test();
+
+client.post("/invite").send().await.assert_status(200);
+let sent = mailer.sent();
+assert_eq!(sent[0].to, ["ada@example.com"]);
+assert!(sent[0].text.as_deref().unwrap().contains("/join"));
+```
+
+`Email` is a plain struct with public fields, so assertions can look at anything.
+
+
+---
+
 <!-- auth.md -->
 
 # Authentication & authorization
@@ -2648,12 +2885,14 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table: unique (lowercased) email, Argon2id password hash |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
-| `templates/auth/signup.html`, `login.html` | htmx pages at `/signup` and `/login` (when `templates/base.html` exists) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, the HTML forms |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash) and `password_resets` (hashed single-use tokens) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms |
 
-It also enables zapline's `cookies` and `password` features and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM` and `APP_URL` to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+**Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
@@ -5449,8 +5688,12 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
+| `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
+
+With `postgres` or `sqlite` (and `json`), `zapline::jobs` adds [durable jobs](jobs.md) stored in the same database.
 | `full` | | Every feature above except the database backends (pick `postgres` and/or `sqlite`) | all | |
 
 `openapi`, `validate`, `jwt` and `cookies` turn on `json` as well, because their error bodies, schemas and session data are JSON.

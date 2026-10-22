@@ -142,6 +142,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                 }
                 GenerateKind::Middleware { name } => generate::middleware(here, &name, g.force)?,
                 GenerateKind::Auth => generate::auth::generate(&Project::discover(here)?, g.force)?,
+                GenerateKind::Job { name } => {
+                    generate::job::generate(&Project::discover(here)?, &name, g.force)?
+                }
             };
             report.print();
             Ok(())
