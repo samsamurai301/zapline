@@ -467,9 +467,11 @@ version = "0.0.0"
 dependencies = [
  "actix-web",
  "axum",
+ "fastrand",
  "mimalloc",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
  "zapline",
 ]

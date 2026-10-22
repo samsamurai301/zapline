@@ -127,6 +127,10 @@ impl<DB: sqlx::Database> Database<DB> {
     }
 
     /// Maximum pool size. Defaults to 4 × the number of CPUs, at least 10.
+    ///
+    /// On the thread-per-core runtime (the default on Linux) each worker
+    /// thread gets its own pool of `n / workers` connections (rounded up),
+    /// so a request's database I/O never leaves its core.
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = Some(n);
         self
@@ -297,9 +301,59 @@ impl App {
                 println!("migrations are up to date");
                 std::process::exit(0);
             }
+            res.insert(WorkerPools {
+                shared: pool.clone(),
+                key: (DB::NAME != "SQLite").then(crate::server::local::key),
+            });
             res.insert(pool);
             Ok(())
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Per-worker pools
+
+/// The pool created at startup, plus one pool per thread-per-core worker.
+///
+/// Connections are registered with the runtime that opened them. Shared by
+/// per-core workers, a connection opened on one worker (or on the startup
+/// runtime) is woken by that runtime's I/O driver, so every query would hop
+/// threads. Each worker instead lazily opens its own pool with the same
+/// options and a share of `max_connections`.
+struct WorkerPools<DB: sqlx::Database> {
+    shared: Pool<DB>,
+    /// `None`: always use the shared pool. SQLite runs queries on its own
+    /// threads, so splitting its pool would only shrink it.
+    key: Option<u64>,
+}
+
+impl<DB: sqlx::Database> Clone for WorkerPools<DB> {
+    fn clone(&self) -> Self {
+        WorkerPools {
+            shared: self.shared.clone(),
+            key: self.key,
+        }
+    }
+}
+
+impl<DB: sqlx::Database> WorkerPools<DB> {
+    /// This worker's pool, or the shared one outside per-core workers.
+    #[inline]
+    fn get(&self) -> Pool<DB> {
+        let Some(key) = self.key else {
+            return self.shared.clone();
+        };
+        crate::server::local::get_or_init(key, |workers| {
+            let opts = self.shared.options();
+            let max = opts.get_max_connections().div_ceil(workers as u32).max(1);
+            let min = opts.get_min_connections().div_ceil(workers as u32).min(max);
+            opts.clone()
+                .max_connections(max)
+                .min_connections(min)
+                .connect_lazy_with((*self.shared.connect_options()).clone())
+        })
+        .unwrap_or_else(|| self.shared.clone())
     }
 }
 
@@ -334,8 +388,8 @@ impl<DB: sqlx::Database> Deref for Db<DB> {
 
 impl<DB: sqlx::Database> FromRequestParts for Db<DB> {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
-        match req.state::<Pool<DB>>() {
-            Some(pool) => Ok(Db(pool.clone())),
+        match req.state::<WorkerPools<DB>>() {
+            Some(pools) => Ok(Db(pools.get())),
             None => Err(Error::internal(format!(
                 "no {} database registered: add `.database(Database::from_env())` to the app \
                  (with both the postgres and sqlite features on, `Db` means Postgres; \

@@ -26,6 +26,7 @@
 //! the hot path).
 
 mod conn;
+pub(crate) mod local;
 mod shutdown;
 
 use std::future::Future;
@@ -627,7 +628,8 @@ fn run_per_core(
     proto: &Proto,
     config: &ServerConfig,
 ) -> io::Result<()> {
-    let mut handles = Vec::with_capacity(listeners.len());
+    let count = listeners.len();
+    let mut handles = Vec::with_capacity(count);
     let mut result = Ok(());
     for (i, (listener, signal)) in listeners.into_iter().zip(signals).enumerate() {
         let worker = Worker::new(Arc::new(app.for_worker()), proto, config, signal);
@@ -639,7 +641,9 @@ fn run_per_core(
                     .enable_all()
                     .build()
                     .and_then(|rt| {
+                        local::enter(i, count);
                         let r = rt.block_on(listener.serve(worker));
+                        rt.block_on(async { local::clear() });
                         rt.shutdown_timeout(Duration::from_secs(1));
                         r
                     });
