@@ -6,7 +6,7 @@
 
 pub mod routes;
 
-use zapline::db::{Database, DbCheck};
+use zapline::db::{Database, DbCheck, Factory};
 use zapline::live::Live;
 use zapline::openapi::OpenApi;
 use zapline::prelude::*;
@@ -21,6 +21,16 @@ pub fn app(db: Database) -> App {
         // Every table at /admin (debug builds only; `zapline g auth` opens it
         // to the accounts in ADMIN_EMAILS).
         .admin(|admin| admin)
+        // Demo data: `zapline db seed` inserts it once; normal runs and tests
+        // skip it. Factory fills in the columns you leave out.
+        .seed(|db| async move {
+            Factory::new("todos")
+                .set("title", "Try zapline")
+                .create(&db)
+                .await?;
+            Factory::new("todos").set("done", true).create(&db).await?;
+            Ok(())
+        })
         .views("templates")
         // Pub/sub for live pages: see `/live/todos` in routes/todos.rs.
         .live(Live::new())

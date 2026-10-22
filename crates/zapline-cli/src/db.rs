@@ -20,6 +20,8 @@ use crate::ui;
 /// Environment variable that makes `App::database` migrate and exit.
 pub const ENV_MIGRATE_ONLY: &str = "ZAPLINE_MIGRATE_ONLY";
 
+/// Environment variable that makes the app migrate, run `App::seed` and exit.
+pub const ENV_SEED: &str = "ZAPLINE_SEED";
 /// Where migrations live, relative to the project root.
 pub const MIGRATIONS_DIR: &str = "migrations";
 
@@ -126,6 +128,23 @@ pub fn migrate(project: &Project, bin: Option<&str>) -> Result<()> {
         );
     }
     ui::status("Migrated", "the database is up to date");
+    Ok(())
+}
+
+/// `zapline db seed`: runs the app with `ZAPLINE_SEED=1`, which migrates,
+/// runs the function given to `App::seed` once, and exits.
+pub fn seed(project: &Project, bin: Option<&str>) -> Result<()> {
+    let captured = build::run_app(project, bin, &[(ENV_SEED, OsStr::new("1"))], RUN_TIMEOUT)?;
+    if !captured.status.success() {
+        return Err(captured.failure("while seeding"));
+    }
+    if !captured.stdout.contains("seed data inserted") {
+        bail!(
+            "the app exited without seeding\n\
+             hint: add `.seed(|db| async move {{ .. }})` after `.database(..)` in `app()`"
+        );
+    }
+    ui::status("Seeded", "the database");
     Ok(())
 }
 

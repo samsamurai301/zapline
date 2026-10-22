@@ -942,14 +942,14 @@ impl Ui<'_> {
 /// A column as the admin sees it.
 #[doc(hidden)]
 pub struct Column {
-    name: String,
+    pub(crate) name: String,
     /// The declared type, as the database spells it.
-    ty: String,
-    kind: Kind,
-    nullable: bool,
-    has_default: bool,
-    pk: bool,
-    generated: bool,
+    pub(crate) ty: String,
+    pub(crate) kind: Kind,
+    pub(crate) nullable: bool,
+    pub(crate) has_default: bool,
+    pub(crate) pk: bool,
+    pub(crate) generated: bool,
     hidden: bool,
 }
 
@@ -976,7 +976,7 @@ impl Column {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum Kind {
+pub(crate) enum Kind {
     Bool,
     Int,
     Float,
@@ -1022,13 +1022,17 @@ enum Part {
 }
 
 impl Stmt {
-    fn sql(&mut self, sql: impl Into<String>) -> &mut Self {
+    pub(crate) fn sql(&mut self, sql: impl Into<String>) -> &mut Self {
         self.parts.push(Part::Sql(sql.into()));
         self
     }
 
     /// A value for `column`.
-    fn bind<DB: AdminBackend>(&mut self, value: Option<String>, column: &Column) -> &mut Self {
+    pub(crate) fn bind<DB: AdminBackend>(
+        &mut self,
+        value: Option<String>,
+        column: &Column,
+    ) -> &mut Self {
         let value = match (column.kind, value) {
             (Kind::Bool, Some(v)) => Some(DB::bool_text(truthy(&v)).to_owned()),
             (_, v) => v,
@@ -1054,14 +1058,14 @@ impl Stmt {
     }
 }
 
-fn is_ident(name: &str) -> bool {
+pub(crate) fn is_ident(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 63
         && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         && !name.as_bytes()[0].is_ascii_digit()
 }
 
-fn quote(ident: &str) -> String {
+pub(crate) fn quote(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
 
@@ -1105,10 +1109,17 @@ pub trait AdminBackend: sqlx::Database + sealed::Sealed {
     ) -> impl Future<Output = Result<Vec<Vec<Option<String>>>>> + Send;
     #[doc(hidden)]
     fn execute(pool: &Pool<Self>, stmt: &Stmt) -> impl Future<Output = sqlx::Result<u64>> + Send;
+    /// Single-column foreign keys of `table`: (column, parent table, parent
+    /// column, or `None` for the parent's primary key).
+    #[doc(hidden)]
+    fn foreign_keys(
+        pool: &Pool<Self>,
+        table: &str,
+    ) -> impl Future<Output = Result<Vec<(String, String, Option<String>)>>> + Send;
 }
 
 macro_rules! admin_backend {
-    ($db:ty, cast: $cast:expr, bools: ($t:expr, $f:expr), tables: $tables:expr, columns: $columns:expr) => {
+    ($db:ty, cast: $cast:expr, bools: ($t:expr, $f:expr), tables: $tables:expr, columns: $columns:expr, foreign_keys: $fks:expr) => {
         impl sealed::Sealed for $db {}
 
         impl BuildFor<$db> for Stmt {
@@ -1192,6 +1203,13 @@ macro_rules! admin_backend {
                     .await?
                     .rows_affected())
             }
+
+            async fn foreign_keys(
+                pool: &Pool<Self>,
+                table: &str,
+            ) -> Result<Vec<(String, String, Option<String>)>> {
+                Ok(sqlx::query_as($fks).bind(table).fetch_all(pool).await?)
+            }
         }
     };
 }
@@ -1204,7 +1222,9 @@ admin_backend!(
     tables: "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name",
     columns: "SELECT name, type, \"notnull\" <> 0, dflt_value IS NOT NULL \
               OR (pk = 1 AND UPPER(type) = 'INTEGER'), pk > 0, hidden IN (2, 3) \
-              FROM pragma_table_xinfo(?) WHERE hidden <> 1 ORDER BY cid"
+              FROM pragma_table_xinfo(?) WHERE hidden <> 1 ORDER BY cid",
+    foreign_keys: "SELECT \"from\", \"table\", \"to\" FROM pragma_foreign_key_list(?1) f \
+                   WHERE (SELECT COUNT(*) FROM pragma_foreign_key_list(?1) g WHERE g.id = f.id) = 1"
 );
 
 #[cfg(feature = "postgres")]
@@ -1223,7 +1243,15 @@ admin_backend!(
               FROM pg_attribute a JOIN pg_class c ON c.oid = a.attrelid \
               JOIN pg_namespace n ON n.oid = c.relnamespace \
               WHERE n.nspname = current_schema() AND c.relname = $1 \
-              AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum"
+              AND a.attnum > 0 AND NOT a.attisdropped ORDER BY a.attnum",
+    foreign_keys: "SELECT a.attname::text, p.relname::text, pa.attname::text \
+                   FROM pg_constraint k JOIN pg_class c ON c.oid = k.conrelid \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                   JOIN pg_class p ON p.oid = k.confrelid \
+                   JOIN pg_attribute a ON a.attrelid = k.conrelid AND a.attnum = k.conkey[1] \
+                   JOIN pg_attribute pa ON pa.attrelid = k.confrelid AND pa.attnum = k.confkey[1] \
+                   WHERE k.contype = 'f' AND cardinality(k.conkey) = 1 \
+                   AND n.nspname = current_schema() AND c.relname = $1"
 );
 
 #[cfg(test)]

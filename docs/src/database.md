@@ -111,6 +111,28 @@ The app also applies pending migrations at startup, so `zapline dev` and deploys
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
 
+## Seed data
+
+Demo or development data goes in `App::seed`, after `.database(..)`:
+
+```rust,ignore
+use zapline::db::{Database, Factory};
+
+App::new()
+    .database(Database::from_env())
+    .seed(|db| async move {
+        Factory::new("todos").set("title", "Try zapline").create(&db).await?;
+        Factory::new("todos").set("done", true).create_many(&db, 5).await?;
+        Ok(())
+    })
+```
+
+```sh
+zapline db seed     # migrate, run the seed once, exit
+```
+
+Normal runs and tests never run it. `zapline db seed` starts the app with `ZAPLINE_SEED=1`, like `db migrate`, so it uses the app's own `DATABASE_URL`. Running it twice inserts the rows twice. The `fullstack` template comes with a seed.
+
 ## Health
 
 ```rust,ignore
@@ -141,5 +163,27 @@ async fn creates_a_post() {
     assert_eq!(res.status(), 201);
 }
 ```
+
+### Test data with `Factory`
+
+`Factory` inserts a row and fills in every column you don't set that the database requires (`NOT NULL`, no default), read from the schema: unique numbers, text like `title 7`, `user7@example.com` for email columns, `false`, the current time, `{}` for JSON. A required foreign key gets a parent row, made the same way. Set only what the test is about:
+
+```rust,ignore
+use zapline::db::{sqlx, DefaultDb, Factory};
+
+#[tokio::test]
+async fn lists_only_published_posts() {
+    let client = app(Database::sqlite_memory()).test();
+    let pool: sqlx::Pool<DefaultDb> = client.resources().await.require().unwrap();
+
+    Factory::new("posts").set("published", true).create_many(&pool, 2).await.unwrap();
+    Factory::new("posts").set("published", false).create(&pool).await.unwrap();   // its author is created too
+
+    let posts: Vec<serde_json::Value> = client.get("/posts").send().await.json();
+    assert_eq!(posts.len(), 2);
+}
+```
+
+`create` returns a `Record`: `get("title")` as text, `int("id")`, `json()` with typed numbers and booleans (compare it with your API's response), or `parse::<Post>()` into your own type. `.null("column")` stores `NULL`. It works on SQLite and Postgres, in tests and in seeds.
 
 If your SQL is portable between SQLite and Postgres you can test against SQLite and run Postgres in production; otherwise point a test at a real Postgres with `Database::postgres(url)`.

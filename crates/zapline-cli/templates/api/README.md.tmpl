@@ -27,7 +27,7 @@ curl -X POST localhost:8080/users \
 | Path | What it is |
 |---|---|
 | `src/lib.rs` | `app()`: builds the `App` (OpenAPI docs + routes) |
-| `src/main.rs` | Serves `app()`; set `ADDR` to change the bind address (see `.env.example`) |
+| `src/main.rs` | Serves `app()`; set `ADDR` (or just `PORT`) to change the bind address (see `.env.example`) |
 | `src/models.rs` | Request and response types with validation rules |
 | `src/routes/` | One module per resource; each exposes `mount(app)` |
 | `tests/` | Integration tests using `app().test()` |

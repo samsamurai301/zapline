@@ -325,6 +325,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| Test data / seeds | `Factory::new("posts").set("title", "Hi").create(&pool).await?` fills the other required columns (and parent rows) from the schema; `.create_many(&pool, 10)`; record `.int("id")`, `.json()`, `.parse::<Post>()`; `App::seed(\|db\| async move { .. })` + `zapline db seed` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
@@ -335,7 +336,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -352,10 +353,12 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, an htmx page (when `templates/base.html` exists) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
 | `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
 | `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
+| `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
@@ -2657,6 +2660,28 @@ The app also applies pending migrations at startup, so `zapline dev` and deploys
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
 
+## Seed data
+
+Demo or development data goes in `App::seed`, after `.database(..)`:
+
+```rust,ignore
+use zapline::db::{Database, Factory};
+
+App::new()
+    .database(Database::from_env())
+    .seed(|db| async move {
+        Factory::new("todos").set("title", "Try zapline").create(&db).await?;
+        Factory::new("todos").set("done", true).create_many(&db, 5).await?;
+        Ok(())
+    })
+```
+
+```sh
+zapline db seed     # migrate, run the seed once, exit
+```
+
+Normal runs and tests never run it. `zapline db seed` starts the app with `ZAPLINE_SEED=1`, like `db migrate`, so it uses the app's own `DATABASE_URL`. Running it twice inserts the rows twice. The `fullstack` template comes with a seed.
+
 ## Health
 
 ```rust,ignore
@@ -2687,6 +2712,28 @@ async fn creates_a_post() {
     assert_eq!(res.status(), 201);
 }
 ```
+
+### Test data with `Factory`
+
+`Factory` inserts a row and fills in every column you don't set that the database requires (`NOT NULL`, no default), read from the schema: unique numbers, text like `title 7`, `user7@example.com` for email columns, `false`, the current time, `{}` for JSON. A required foreign key gets a parent row, made the same way. Set only what the test is about:
+
+```rust,ignore
+use zapline::db::{sqlx, DefaultDb, Factory};
+
+#[tokio::test]
+async fn lists_only_published_posts() {
+    let client = app(Database::sqlite_memory()).test();
+    let pool: sqlx::Pool<DefaultDb> = client.resources().await.require().unwrap();
+
+    Factory::new("posts").set("published", true).create_many(&pool, 2).await.unwrap();
+    Factory::new("posts").set("published", false).create(&pool).await.unwrap();   // its author is created too
+
+    let posts: Vec<serde_json::Value> = client.get("/posts").send().await.json();
+    assert_eq!(posts.len(), 2);
+}
+```
+
+`create` returns a `Record`: `get("title")` as text, `int("id")`, `json()` with typed numbers and booleans (compare it with your API's response), or `parse::<Post>()` into your own type. `.null("column")` stores `NULL`. It works on SQLite and Postgres, in tests and in seeds.
 
 If your SQL is portable between SQLite and Postgres you can test against SQLite and run Postgres in production; otherwise point a test at a real Postgres with `Database::postgres(url)`.
 
@@ -6079,21 +6126,36 @@ Consider `mimalloc` as the global allocator for throughput-heavy services.
 
 ## Container image
 
-Projects generated by `zapline new --template api` include this Dockerfile:
+Projects generated by `zapline new` (`api`, `full` and `fullstack` templates) include a two-stage Dockerfile. The first stage compiles your dependencies in their own cached layer, then your code. The runtime image is `debian:bookworm-slim` with CA certificates, running as a non-root user. The `fullstack` image also carries `templates/`, `static/` and `migrations/`, and keeps the SQLite file in `/home/app/data`, which is meant to be a volume.
 
-```dockerfile
-FROM rust:1-slim AS build
-WORKDIR /app
-COPY . .
-RUN cargo build --release
+The app listens on `ADDR` if set, otherwise on `0.0.0.0:$PORT` (the image sets `PORT=8080`). Hosts that choose the port, such as Railway and Render, override `PORT`.
 
-FROM debian:stable-slim
-RUN useradd --system --uid 10001 app
-COPY --from=build /app/target/release/my-app /usr/local/bin/my-app
-USER app
-EXPOSE 8080
-ENV APP_ENV=production
-CMD ["my-app"]
+## Hosting configs: `zapline g deploy`
+
+```sh
+zapline g deploy fly        # fly.toml
+zapline g deploy railway    # railway.json
+zapline g deploy render     # render.yaml (a Blueprint)
+zapline g deploy compose    # compose.yaml: any server with Docker
+```
+
+Each target builds the project's Dockerfile, and the CLI adds one if the project has none. The config follows what the app uses:
+
+| The project has | The config gets |
+|---|---|
+| A SQLite database (the `fullstack` default) | A volume at `/home/app/data` (Fly mount, Render disk, Compose volume) |
+| zapline's `postgres` feature | A Postgres service with `DATABASE_URL` wired to it (Compose, Render) |
+| zapline's `redis` feature | A Redis service with `REDIS_URL` (Compose) |
+| The `Health` plugin | Health checks on `/health/ready` |
+| Settings in `.env.example` (`SESSION_SECRET`, `SMTP_URL`, ...) | Entries that read them from the environment; on Render, `*_SECRET` and `*_KEY` are generated |
+
+After writing the file, the CLI prints what is left to do on that host, such as `fly volumes create data` and `fly secrets set SESSION_SECRET=$(openssl rand -base64 48) ...`. Nothing is deployed and no account is touched until you run those commands.
+
+With Compose, put the settings in a `.env` file next to `compose.yaml`. It is in `.dockerignore`, so it never ends up in the image:
+
+```sh
+echo "SESSION_SECRET=$(openssl rand -base64 48)" > .env
+docker compose up --build -d     # http://localhost:8080
 ```
 
 ## Kubernetes

@@ -186,6 +186,11 @@ fn tool_list() -> Value {
             "inputSchema": { "type": "object", "properties": { "bin": bin }}
         },
         {
+            "name": "db_seed",
+            "description": "Insert the app's seed data (the function given to App::seed) into DATABASE_URL, after migrating.",
+            "inputSchema": { "type": "object", "properties": { "bin": bin }}
+        },
+        {
             "name": "check",
             "description": "Type-check the project (cargo check or clippy, all targets). One line per error/warning with location and suggested fix.",
             "inputSchema": { "type": "object", "properties": {
@@ -333,6 +338,11 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             let project = Project::discover(here)?;
             with_build_errors(&project, || db::migrate(&project, s("bin")))?;
             Ok("migrated: the database is up to date".to_string())
+        }
+        "db_seed" => {
+            let project = Project::discover(here)?;
+            with_build_errors(&project, || db::seed(&project, s("bin")))?;
+            Ok("seeded: the app's seed data is in the database".to_string())
         }
         "check" => {
             let project = Project::discover(here)?;

@@ -6,6 +6,7 @@
 
 pub mod auth;
 pub mod db_resource;
+pub mod deploy;
 pub mod job;
 pub mod register;
 

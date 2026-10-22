@@ -2,7 +2,11 @@
 //! can build the very same `App` in-process.
 
 fn main() -> std::io::Result<()> {
-    // Override the bind address with e.g. `ADDR=127.0.0.1:3000 cargo run`.
-    let addr = std::env::var("ADDR").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    // Override the bind address with e.g. `ADDR=127.0.0.1:3000 cargo run`,
+    // or just the port with `PORT` (set by hosts such as Railway and Render).
+    let addr = std::env::var("ADDR").unwrap_or_else(|_| {
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+        format!("0.0.0.0:{port}")
+    });
     @@crate_name@@::app().run(addr)
 }

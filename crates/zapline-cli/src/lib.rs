@@ -146,6 +146,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                 GenerateKind::Job { name } => {
                     generate::job::generate(&Project::discover(here)?, &name, g.force)?
                 }
+                GenerateKind::Deploy { target } => {
+                    generate::deploy::generate(&Project::discover(here)?, target, g.force)?
+                }
                 GenerateKind::Tailwind => tailwind::generate(&Project::discover(here)?, g.force)?,
             };
             report.print();
@@ -187,6 +190,10 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Db(DbCommand::Migrate { bin }) => {
             let project = Project::discover(Path::new("."))?;
             db::migrate(&project, bin.as_deref())
+        }
+        Command::Db(DbCommand::Seed { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::seed(&project, bin.as_deref())
         }
         Command::Check { clippy } => {
             let project = Project::discover(Path::new("."))?;

@@ -67,7 +67,9 @@ pub use sqlx;
 use sqlx::pool::PoolOptions;
 use sqlx::{Connection, Pool};
 
+mod factory;
 mod list;
+pub use factory::{Factory, Record};
 pub use list::{AsPool, ListBackend, ListParams, Listing, Paged, Value};
 
 use crate::extract::FromRequestParts;
@@ -86,6 +88,15 @@ pub type DefaultDb = sqlx::Sqlite;
 /// When this environment variable is set, the app applies its migrations
 /// during startup and exits instead of serving. Used by `zapline db migrate`.
 pub const ENV_MIGRATE_ONLY: &str = "ZAPLINE_MIGRATE_ONLY";
+
+/// When this environment variable is set, the app applies its migrations,
+/// runs the function given to [`App::seed`] and exits instead of serving.
+/// Used by `zapline db seed`.
+pub const ENV_SEED: &str = "ZAPLINE_SEED";
+
+/// Marks an app that has seed data (see [`App::seed`]).
+#[derive(Clone)]
+struct HasSeed;
 
 /// Directory migrations are read from unless [`Database::migrations`] says
 /// otherwise. Relative to the working directory (the project root under
@@ -300,8 +311,51 @@ impl App {
                 println!("migrations are up to date");
                 std::process::exit(0);
             }
+            if std::env::var_os(ENV_SEED).is_some() && !res.contains::<HasSeed>() {
+                return Err(Error::internal(
+                    "no seed data: add `.seed(|db| async move { .. })` after `.database(..)`",
+                ));
+            }
             res.insert(pool);
             Ok(())
+        })
+    }
+
+    /// Seed data for development and demos. `zapline db seed` starts the app
+    /// with [`ENV_SEED`] set, which applies the migrations, runs `seed` once
+    /// and exits; normal runs and tests skip it. Register it after
+    /// [`App::database`]. [`Factory`] fills in the columns you don't care
+    /// about.
+    ///
+    /// ```
+    /// use zapline::db::{Database, Factory};
+    /// use zapline::prelude::*;
+    ///
+    /// let app = App::new()
+    ///     .database(Database::from_env())
+    ///     .seed(|db| async move {
+    ///         Factory::new("todos").set("title", "Try zapline").create(&db).await?;
+    ///         Factory::new("todos").set("done", true).create_many(&db, 3).await?;
+    ///         Ok(())
+    ///     });
+    /// ```
+    pub fn seed<F, Fut>(self, seed: F) -> Self
+    where
+        F: FnOnce(Db) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = crate::Result<()>> + Send + 'static,
+    {
+        self.state(HasSeed).on_startup(|res: Resources| async move {
+            if std::env::var_os(ENV_SEED).is_none() {
+                return Ok(());
+            }
+            let pool: Pool<DefaultDb> = res.get().ok_or_else(|| {
+                Error::internal(
+                    "register the database before the seed: `.database(..)`, then `.seed(..)`",
+                )
+            })?;
+            seed(Db(pool)).await?;
+            println!("seed data inserted");
+            std::process::exit(0);
         })
     }
 }

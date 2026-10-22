@@ -87,3 +87,12 @@ async fn email_is_a_durable_job() {
     assert_eq!(jobs.run_pending().await.unwrap(), 1);
     assert_eq!(mailer.sent()[0].subject, "Later");
 }
+
+/// `app()` builds its mailer in `main`, before the runtime starts; that must
+/// not need one (it once panicked in release builds).
+#[test]
+fn smtp_mailers_are_made_outside_the_runtime() {
+    let mailer = Mailer::smtp("smtp://localhost:2525").unwrap();
+    drop(App::new().mailer(mailer.clone()));
+    drop(mailer);
+}

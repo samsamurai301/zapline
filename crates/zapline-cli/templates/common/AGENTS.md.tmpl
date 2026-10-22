@@ -19,6 +19,8 @@ zapline generate handler <name> --method get
 zapline generate auth               # accounts + password reset (needs a database)
 zapline generate job <name>         # durable background job (needs a database)
 zapline generate tailwind           # Tailwind CSS without Node; then `zapline css`
+zapline generate deploy fly         # or railway, render, compose: hosting config
+zapline db seed                     # insert the demo data from App::seed
 ```
 
 Run `zapline test` after every change (it wraps `cargo test` and prints a

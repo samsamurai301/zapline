@@ -31,7 +31,8 @@ COPY static ./static
 COPY migrations ./migrations
 
 USER app
-ENV ADDR=0.0.0.0:8080
+# Hosts that pick the port (Railway, Render, ...) override PORT.
+ENV PORT=8080
 # Mount a volume at /home/app/data to keep the SQLite file, or set
 # DATABASE_URL to a Postgres URL (build with zapline's `postgres` feature).
 ENV DATABASE_URL=sqlite:///home/app/data/app.db?mode=rwc

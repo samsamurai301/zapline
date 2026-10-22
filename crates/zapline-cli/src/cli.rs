@@ -338,6 +338,22 @@ templates, and `zapline css` builds it on demand.
 Examples:
   zapline g tailwind")]
     Tailwind,
+
+    /// Hosting config: fly.toml, railway.json, render.yaml or compose.yaml
+    #[command(after_long_help = "\
+Writes the target's config for the project's Dockerfile (adding one if missing), with a
+volume for a SQLite file, Postgres and Redis when zapline's features use them, health
+checks when the Health plugin is installed, and the settings from .env.example. Prints
+the commands that remain (creating the app, setting secrets).
+
+Examples:
+  zapline g deploy fly
+  zapline g deploy compose")]
+    Deploy {
+        /// Where to deploy
+        #[arg(value_enum)]
+        target: crate::generate::deploy::Target,
+    },
 }
 
 /// Arguments of `zapline dev`.
@@ -410,6 +426,12 @@ pub enum DbCommand {
     },
     /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE_ONLY=1)
     Migrate {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
+    },
+    /// Insert the app's seed data: migrate, then run `App::seed` once (ZAPLINE_SEED=1)
+    Seed {
         /// Binary to run [default: the package's only binary]
         #[arg(long, value_name = "NAME")]
         bin: Option<String>,
