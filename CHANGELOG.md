@@ -13,7 +13,10 @@ The first public release.
 - `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
 - `zapline db new` / `zapline db migrate`.
 - `zapline g auth`: accounts in one command (users migration, sign-up/log-in/log-out as JSON API and htmx pages, `CurrentUser` extractor, tests).
-- `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing.
+- `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing, and `new_token` / `hash_token` for single-use links.
+- `zapline g auth` includes password reset by email: hashed single-use tokens that expire after an hour, JSON endpoints and htmx pages, and tests.
+- `zapline::jobs`: durable background jobs in the app's database (SQLite or Postgres), with retries and backoff, `FOR UPDATE SKIP LOCKED` on Postgres so instances share one queue, and `run_pending` for deterministic tests.
+- `zapline::mail` (feature `mail`): SMTP email, a dev inbox at `/_dev/mail` when `SMTP_URL` is unset in debug builds, `Mailer::sent` for tests, and `Email` as a durable job.
 - `App::database_sessions`: sessions stored in the database (`SqlSessionStore`, SQLite and Postgres). `cookies::key_from_env` / `key_from_secret` derive the cookie key from a secret, with a development fallback in debug builds.
 - `TestResponse::assert_text` and `assert_contains`.
 - `zapline client`: a typed, dependency-free TypeScript client generated from the OpenAPI document; `zapline dev --client <file>` regenerates it after every build for end-to-end types.

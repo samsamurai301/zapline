@@ -37,7 +37,7 @@ cookies = ["json", "dep:cookie", "dep:getrandom", "dep:hmac", "dep:sha2"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 views = ["dep:minijinja"]
-password = ["dep:argon2", "dep:getrandom"]
+password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
 
 [dependencies]

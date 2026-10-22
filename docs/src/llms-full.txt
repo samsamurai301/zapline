@@ -326,7 +326,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts + password reset), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -345,7 +345,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
-| `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
+| `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
@@ -2842,12 +2842,14 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table: unique (lowercased) email, Argon2id password hash |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
-| `templates/auth/signup.html`, `login.html` | htmx pages at `/signup` and `/login` (when `templates/base.html` exists) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, the HTML forms |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash) and `password_resets` (hashed single-use tokens) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms |
 
-It also enables zapline's `cookies` and `password` features and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM` and `APP_URL` to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+**Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 

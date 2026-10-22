@@ -46,12 +46,14 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table: unique (lowercased) email, Argon2id password hash |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
-| `templates/auth/signup.html`, `login.html` | htmx pages at `/signup` and `/login` (when `templates/base.html` exists) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, the HTML forms |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash) and `password_resets` (hashed single-use tokens) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms |
 
-It also enables zapline's `cookies` and `password` features and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM` and `APP_URL` to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+**Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 

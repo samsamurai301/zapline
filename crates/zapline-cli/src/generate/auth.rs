@@ -1,6 +1,7 @@
 //! `zapline generate auth`: accounts with sign-up, log-in, log-out,
-//! Argon2id passwords, database-backed sessions and a `CurrentUser`
-//! extractor, plus htmx pages when the project has templates.
+//! password reset by email, Argon2id passwords, database-backed sessions
+//! and a `CurrentUser` extractor, plus htmx pages when the project has
+//! templates.
 
 use std::fs;
 use std::path::PathBuf;
@@ -58,6 +59,8 @@ pub fn files(
         for (name, tmpl) in [
             ("signup", templates::AUTH_SIGNUP_PAGE),
             ("login", templates::AUTH_LOGIN_PAGE),
+            ("forgot", templates::AUTH_FORGOT_PAGE),
+            ("reset", templates::AUTH_RESET_PAGE),
         ] {
             files.push(OutputFile {
                 path: PathBuf::from(format!("templates/auth/{name}.html")),
@@ -85,7 +88,7 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
         .find(|l| l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline="))
         .map(str::to_string);
     if let Some(line) = line_start {
-        let missing: Vec<String> = ["cookies", "password"]
+        let missing: Vec<String> = ["cookies", "mail", "password"]
             .iter()
             .filter(|f| !line.contains(&format!("\"{f}\"")))
             .map(|f| format!("\"{f}\""))
@@ -118,6 +121,41 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
         );
     }
     (out != manifest).then_some(out)
+}
+
+/// The variables auth reads, appended to `.env.example` when missing.
+const ENV_VARS: [(&str, &str); 4] = [
+    (
+        "SESSION_SECRET",
+        "# Signs session cookies; required in release builds. `openssl rand -base64 48`\nSESSION_SECRET=\n",
+    ),
+    (
+        "SMTP_URL",
+        "# Sends email (password resets). Unset in debug builds: mail shows up at /_dev/mail.\n\
+         # smtps://user:pass@smtp.example.com, or smtp://localhost:1025 for Mailpit\nSMTP_URL=\n",
+    ),
+    ("MAIL_FROM", "MAIL_FROM=no-reply@example.com\n"),
+    (
+        "APP_URL",
+        "# The public address, for links in emails.\nAPP_URL=http://localhost:8080\n",
+    ),
+];
+
+/// `.env.example` with the auth variables it lacks, or `None`.
+pub fn patch_env_example(env: &str) -> Option<String> {
+    let mut out = env.to_string();
+    for (name, block) in ENV_VARS {
+        if !out
+            .lines()
+            .any(|l| l.trim_start().starts_with(&format!("{name}=")))
+        {
+            if !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(block);
+        }
+    }
+    (out != env).then_some(out)
 }
 
 /// `zapline generate auth`.
@@ -166,27 +204,18 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
     }
     let env_example = project.root.join(".env.example");
     if let Ok(env) = fs::read_to_string(&env_example) {
-        if !env.contains("SESSION_SECRET") {
-            let sep = if env.ends_with('\n') || env.is_empty() {
-                ""
-            } else {
-                "\n"
-            };
-            fs::write(
-                &env_example,
-                format!(
-                    "{env}{sep}# Signs session cookies; required in release builds. `openssl rand -base64 48`\n\
-                     SESSION_SECRET=\n"
-                ),
-            )?;
+        if let Some(patched) = patch_env_example(&env) {
+            fs::write(&env_example, patched)?;
             report.modified.push(PathBuf::from(".env.example"));
         }
     }
     report.notes.push(format!(
         "accounts are ready: {}POST /api/auth/signup, /api/auth/login, /api/auth/logout and GET /api/auth/me\n\
          protect a handler by adding a `CurrentUser` argument (use crate::routes::auth::CurrentUser)\n\
-         production needs SESSION_SECRET set to a random string of 32+ bytes (`openssl rand -base64 48`)",
-        if html { "pages at /signup and /login; " } else { "" }
+         password reset: POST /api/auth/forgot and /api/auth/reset{}; while developing, reset emails show up at /_dev/mail\n\
+         production needs SESSION_SECRET (32+ random bytes, `openssl rand -base64 48`), SMTP_URL, MAIL_FROM and APP_URL",
+        if html { "pages at /signup and /login; " } else { "" },
+        if html { " (pages at /forgot and /reset)" } else { "" }
     ));
     warn_if_not_zapline(project, &mut report);
     Ok(report)
@@ -209,7 +238,7 @@ mod tests {
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
         let p = patch_manifest(m).unwrap();
         assert!(
-            p.contains("features = [\"cookies\", \"password\", \"sqlite\", \"views\"]"),
+            p.contains("features = [\"cookies\", \"mail\", \"password\", \"sqlite\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
@@ -217,10 +246,26 @@ mod tests {
         let bare = patch_manifest("[dependencies]\nzapline = { version = \"0.1\" }\n").unwrap();
         assert!(
             bare.contains(
-                "zapline = { version = \"0.1\", features = [\"cookies\", \"password\"] }"
+                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"password\"] }"
             ),
             "{bare}"
         );
+    }
+
+    #[test]
+    fn env_example_gets_the_missing_variables_once() {
+        let env = "ADDR=0.0.0.0:8080\nMAIL_FROM=me@x.test";
+        let patched = patch_env_example(env).unwrap();
+        assert!(patched.starts_with("ADDR=0.0.0.0:8080\nMAIL_FROM=me@x.test\n# Signs"));
+        assert_eq!(patched.matches("MAIL_FROM=").count(), 1);
+        for var in [
+            "SESSION_SECRET=",
+            "SMTP_URL=",
+            "APP_URL=http://localhost:8080",
+        ] {
+            assert!(patched.contains(var), "{var}");
+        }
+        assert_eq!(patch_env_example(&patched), None);
     }
 
     #[test]
@@ -245,12 +290,15 @@ mod tests {
                 "src/routes/auth.rs",
                 "templates/auth/signup.html",
                 "templates/auth/login.html",
+                "templates/auth/forgot.html",
+                "templates/auth/reset.html",
                 "tests/auth.rs"
             ]
         );
         assert!(all[0].contents.contains("AUTOINCREMENT"));
         assert!(all[1].contents.contains("signup_form"));
-        assert!(all[4].contents.contains("use my_app::app;"));
+        assert!(all[6].contents.contains("use my_app::app;"));
+        assert!(all[0].contents.contains("CREATE TABLE password_resets"));
 
         let api = files(
             "my-app",

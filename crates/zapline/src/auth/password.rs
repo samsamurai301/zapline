@@ -19,6 +19,10 @@
 //! On login, call [`verify_missing`] when the account does not exist: it
 //! takes as long as a real check, so response times don't reveal which
 //! emails are registered.
+//!
+//! For password-reset and email-confirmation links, [`new_token`] makes a
+//! random token to send and [`hash_token`] the digest to store, so a leaked
+//! database doesn't hand out working links.
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
@@ -78,6 +82,46 @@ pub fn verify_blocking(password: &str, hash: &str) -> Result<bool> {
         Err(argon2::password_hash::Error::Password) => Ok(false),
         Err(e) => Err(hash_error(e)),
     }
+}
+
+/// A random single-use token for a link (256 bits, base64url, 43
+/// characters). Send it; store [`hash_token`] of it.
+///
+/// ```
+/// use zapline::auth::password::{hash_token, new_token};
+///
+/// let token = new_token()?;           // goes in the emailed link
+/// let stored = hash_token(&token);    // goes in the database
+/// assert_eq!(stored, hash_token(&token));
+/// assert_ne!(token, new_token()?);
+/// # Ok::<(), zapline::Error>(())
+/// ```
+///
+/// # Errors
+///
+/// If the operating system's random number generator is unavailable.
+pub fn new_token() -> Result<String> {
+    use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).map_err(|e| {
+        Error::internal("secure random numbers are unavailable")
+            .with_source(std::io::Error::other(e.to_string()))
+    })?;
+    Ok(BASE64_URL_SAFE_NO_PAD.encode(buf))
+}
+
+/// The SHA-256 digest of `token` as lowercase hex: what to store and look
+/// up for a token from [`new_token`]. (Tokens are random, so a fast hash
+/// is enough; Argon2 is for passwords people choose.)
+pub fn hash_token(token: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(token.as_bytes());
+    let mut hex = String::with_capacity(64);
+    for b in digest {
+        hex.push(char::from(b"0123456789abcdef"[usize::from(b >> 4)]));
+        hex.push(char::from(b"0123456789abcdef"[usize::from(b & 15)]));
+    }
+    hex
 }
 
 fn hash_error(e: argon2::password_hash::Error) -> Error {

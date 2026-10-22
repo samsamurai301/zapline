@@ -175,6 +175,10 @@ pub const AUTH_MIGRATION_POSTGRES: &str =
 pub const AUTH_SIGNUP_PAGE: &str = include_str!("../templates/generate/auth/signup.html.tmpl");
 /// `templates/auth/login.html`.
 pub const AUTH_LOGIN_PAGE: &str = include_str!("../templates/generate/auth/login.html.tmpl");
+/// Asks for a password-reset link.
+pub const AUTH_FORGOT_PAGE: &str = include_str!("../templates/generate/auth/forgot.html.tmpl");
+/// Sets a new password from a reset link.
+pub const AUTH_RESET_PAGE: &str = include_str!("../templates/generate/auth/reset.html.tmpl");
 /// Source of a generated middleware module.
 pub const MIDDLEWARE: &str = include_str!("../templates/generate/middleware.rs.tmpl");
 /// Integration test for a generated middleware.
