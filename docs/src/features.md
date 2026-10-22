@@ -35,6 +35,8 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
+| `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
 

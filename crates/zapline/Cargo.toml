@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies", "views",
-    "password", "mail",
+    "password", "mail", "storage",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -39,6 +39,8 @@ sqlite = ["dep:sqlx", "sqlx/sqlite"]
 views = ["dep:minijinja"]
 password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
+storage = ["dep:mime_guess", "dep:hmac", "dep:sha2", "dep:getrandom"]
+s3 = ["storage", "dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 
 [dependencies]
 zapline-macros = { path = "../zapline-macros", version = "0.1.0", optional = true }
@@ -80,6 +82,7 @@ jsonwebtoken = { version = "11", optional = true, default-features = false, feat
 cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
 getrandom = { version = "0.2", optional = true }
 argon2 = { version = "0.5", optional = true, default-features = false, features = ["alloc", "password-hash"] }
+hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
 lettre = { version = "0.11.19", optional = true, default-features = false, features = ["builder", "smtp-transport", "pool", "hostname", "tokio1-rustls", "ring", "webpki-roots"] }
 minijinja = { version = "2.24", optional = true, features = ["loader"] }
 sqlx = { version = "0.8.6", optional = true, default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros"] }

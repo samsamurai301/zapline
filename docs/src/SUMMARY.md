@@ -46,6 +46,7 @@
 - [WebSockets](websockets.md)
 - [Server-Sent Events & streaming](streaming.md)
 - [Static files & uploads](files.md)
+- [File storage (local, S3)](storage.md)
 
 # Operations
 

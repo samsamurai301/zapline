@@ -61,6 +61,7 @@
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
 //! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
+//! | Files | [`storage`]: local, memory and S3 storage with expiring links |
 //! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
@@ -89,6 +90,8 @@
 //! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
 //! | `password` | | [`auth::password`]: Argon2id password hashing |
 //! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
+//! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
+//! | `s3` | | S3-compatible storage for [`storage`] |
 //! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
 //! | `sqlite` | | [`db`]: SQLite pool, migrations, `Db` extractor (sqlx) |
 //! | `full` | | All of the above |
@@ -152,6 +155,8 @@ pub mod di;
 pub mod jobs;
 #[cfg(feature = "mail")]
 pub mod mail;
+#[cfg(feature = "storage")]
+pub mod storage;
 pub mod tasks;
 
 // ---- observability -----------------------------------------------------------
