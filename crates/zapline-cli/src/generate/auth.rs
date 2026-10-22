@@ -88,7 +88,7 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
         .find(|l| l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline="))
         .map(str::to_string);
     if let Some(line) = line_start {
-        let missing: Vec<String> = ["cookies", "mail", "password"]
+        let missing: Vec<String> = ["cookies", "mail", "oauth", "password"]
             .iter()
             .filter(|f| !line.contains(&format!("\"{f}\"")))
             .map(|f| format!("\"{f}\""))
@@ -124,7 +124,7 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
 }
 
 /// The variables auth reads, appended to `.env.example` when missing.
-const ENV_VARS: [(&str, &str); 4] = [
+const ENV_VARS: [(&str, &str); 6] = [
     (
         "SESSION_SECRET",
         "# Signs session cookies; required in release builds. `openssl rand -base64 48`\nSESSION_SECRET=\n",
@@ -138,6 +138,16 @@ const ENV_VARS: [(&str, &str); 4] = [
     (
         "APP_URL",
         "# The public address, for links in emails.\nAPP_URL=http://localhost:8080\n",
+    ),
+    (
+        "GITHUB_CLIENT_ID",
+        "# \"Continue with GitHub\": an OAuth app with callback {APP_URL}/auth/github/callback\n\
+         GITHUB_CLIENT_ID=\nGITHUB_CLIENT_SECRET=\n",
+    ),
+    (
+        "GOOGLE_CLIENT_ID",
+        "# \"Continue with Google\": an OAuth client with redirect URI {APP_URL}/auth/google/callback\n\
+         GOOGLE_CLIENT_ID=\nGOOGLE_CLIENT_SECRET=\n",
     ),
 ];
 
@@ -238,7 +248,7 @@ mod tests {
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
         let p = patch_manifest(m).unwrap();
         assert!(
-            p.contains("features = [\"cookies\", \"mail\", \"password\", \"sqlite\", \"views\"]"),
+            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
@@ -246,7 +256,7 @@ mod tests {
         let bare = patch_manifest("[dependencies]\nzapline = { version = \"0.1\" }\n").unwrap();
         assert!(
             bare.contains(
-                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"password\"] }"
+                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\"] }"
             ),
             "{bare}"
         );

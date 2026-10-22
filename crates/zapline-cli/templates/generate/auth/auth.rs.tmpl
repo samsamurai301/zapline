@@ -9,9 +9,14 @@
 //!
 //! Reset links are emailed through `SMTP_URL` and point at `APP_URL`. While
 //! developing, without `SMTP_URL`, they appear at <http://localhost:8080/_dev/mail>.
+//!
+//! "Continue with GitHub / Google" turns on when `GITHUB_CLIENT_ID` and
+//! `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) are set. The callback URL
+//! to register there is `{APP_URL}/auth/github/callback`.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use zapline::auth::oauth::{OAuth, OAuthLogin};
 use zapline::auth::password;
 use zapline::cookies::key_from_env;
 use zapline::db::{sqlx, Db};
@@ -26,6 +31,13 @@ use zapline::view::{context, Hx, Views};
 
 /// Session key holding the logged-in user's id.
 const USER_ID: &str = "user_id";
+
+/// Providers offered when their `{NAME}_CLIENT_ID`/`_SECRET` are set.
+const PROVIDERS: [(&str, &str); 2] = [("github", "GitHub"), ("google", "Google")];
+
+/// The configured providers as `(slug, label)`, for the log-in page.
+#[derive(Clone, Debug, Default)]
+pub struct SocialLogins(pub Vec<(&'static str, &'static str)>);
 
 /// How long a password-reset link works.
 const RESET_TTL: Duration = Duration::from_secs(60 * 60);
@@ -97,7 +109,8 @@ fn login_required() -> Error {
 pub fn mount(app: App) -> App {
     let key = key_from_env("SESSION_SECRET").unwrap_or_else(|e| panic!("{}", e.message()));
     let mailer = Mailer::from_env().unwrap_or_else(|e| panic!("{}", e.message()));
-    app.cookie_key(key)
+    let mut app = app
+        .cookie_key(key)
         // `Secure` cookies in release builds (HTTPS); plain HTTP while developing.
         .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
         .mailer(mailer)
@@ -106,6 +119,15 @@ pub fn mount(app: App) -> App {
         .mount((signup_page, login_page, signup_form, login_form, logout_form))
         .mount((forgot_page, forgot_form, reset_page, reset_form))
         // html@@
+        .mount((github_callback, google_callback));
+    let mut social = SocialLogins::default();
+    for (name, label) in PROVIDERS {
+        if let Ok(provider) = OAuth::from_env(name) {
+            app = app.oauth(provider);
+            social.0.push((name, label));
+        }
+    }
+    app.state(social)
 }
 
 // ---- accounts -----------------------------------------------------------------
@@ -148,6 +170,58 @@ async fn authenticate(db: &Db, session: &Session, creds: &Credentials) -> Result
         return Err(invalid_credentials());
     }
     let user = User { id, email };
+    start_session(session, &user)?;
+    Ok(user)
+}
+
+/// Logs in the account linked to this GitHub/Google identity. The first
+/// time, links it to the account with the same verified email, or creates
+/// one (without a password: "Forgot your password?" sets one).
+async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<User> {
+    let who = &oauth.user;
+    let linked = sqlx::query_as::<_, User>(
+        "SELECT users.id, users.email FROM oauth_accounts \
+         JOIN users ON users.id = oauth_accounts.user_id \
+         WHERE oauth_accounts.provider = $1 AND oauth_accounts.provider_id = $2",
+    )
+    .bind(&who.provider)
+    .bind(&who.id)
+    .fetch_optional(&**db)
+    .await?;
+    let user = match linked {
+        Some(user) => user,
+        None => {
+            let Some(email) = who.email.as_deref().filter(|_| who.email_verified) else {
+                return Err(Error::bad_request("that account has no verified email address")
+                    .with_code("email_unverified"));
+            };
+            let email = email.trim().to_lowercase();
+            let existing = sqlx::query_as::<_, User>("SELECT id, email FROM users WHERE email = $1")
+                .bind(&email)
+                .fetch_optional(&**db)
+                .await?;
+            let user = match existing {
+                Some(user) => user,
+                None => {
+                    let unusable = password::hash(&password::new_token()?).await?;
+                    sqlx::query_as::<_, User>(
+                        "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email",
+                    )
+                    .bind(&email)
+                    .bind(&unusable)
+                    .fetch_one(&**db)
+                    .await?
+                }
+            };
+            sqlx::query("INSERT INTO oauth_accounts (provider, provider_id, user_id) VALUES ($1, $2, $3)")
+                .bind(&who.provider)
+                .bind(&who.id)
+                .bind(user.id)
+                .execute(&**db)
+                .await?;
+            user
+        }
+    };
     start_session(session, &user)?;
     Ok(user)
 }
@@ -262,6 +336,20 @@ async fn logout(session: Session) -> StatusCode {
     StatusCode::NO_CONTENT
 }
 
+/// Back from GitHub: log in and go on.
+#[get("/auth/github/callback", tag = "pages")]
+async fn github_callback(db: Db, session: Session, oauth: OAuthLogin) -> Result<Redirect> {
+    social_login(&db, &session, &oauth).await?;
+    Ok(Redirect::to(oauth.next.as_deref().unwrap_or("/")))
+}
+
+/// Back from Google: log in and go on.
+#[get("/auth/google/callback", tag = "pages")]
+async fn google_callback(db: Db, session: Session, oauth: OAuthLogin) -> Result<Redirect> {
+    social_login(&db, &session, &oauth).await?;
+    Ok(Redirect::to(oauth.next.as_deref().unwrap_or("/")))
+}
+
 /// The logged-in user.
 #[get("/api/auth/me", tag = "auth")]
 async fn me(CurrentUser(user): CurrentUser) -> Json<User> {
@@ -295,14 +383,14 @@ async fn reset(
 
 /// The sign-up page.
 #[get("/signup", tag = "pages")]
-async fn signup_page(views: Views) -> Result<Html<String>> {
-    views.render("auth/signup.html", context! {})
+async fn signup_page(views: Views, State(social): State<SocialLogins>) -> Result<Html<String>> {
+    views.render("auth/signup.html", context! { providers => social.0 })
 }
 
 /// The log-in page.
 #[get("/login", tag = "pages")]
-async fn login_page(views: Views) -> Result<Html<String>> {
-    views.render("auth/login.html", context! {})
+async fn login_page(views: Views, State(social): State<SocialLogins>) -> Result<Html<String>> {
+    views.render("auth/login.html", context! { providers => social.0 })
 }
 
 /// Sign up from the page's form: go home, or show what went wrong.

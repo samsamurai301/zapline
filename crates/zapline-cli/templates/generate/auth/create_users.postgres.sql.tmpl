@@ -12,3 +12,11 @@ CREATE TABLE password_resets (
     user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
     expires_at BIGINT NOT NULL
 );
+
+-- GitHub/Google identities linked to accounts.
+CREATE TABLE oauth_accounts (
+    provider TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    PRIMARY KEY (provider, provider_id)
+);

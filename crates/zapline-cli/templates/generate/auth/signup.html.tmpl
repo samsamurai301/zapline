@@ -3,6 +3,10 @@
 {% block content %}
 <h1>Sign up</h1>
 
+{% for slug, label in providers %}
+<p><a role="button" class="secondary" href="/auth/{{ slug }}">Continue with {{ label }}</a></p>
+{% endfor %}
+
 <form hx-post="/signup">
   {% block form %}
   {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}

@@ -3,6 +3,7 @@
 use std::time::Duration;
 
 use serde_json::json;
+use zapline::auth::oauth::OAuth;
 use zapline::db::Database;
 use zapline::mail::Mailer;
 use zapline::test::TestClient;
@@ -168,3 +169,52 @@ async fn html_forms_redirect_or_show_the_error() {
     assert!(!bad.text().contains("<h1>"), "htmx gets only the form: {}", bad.text());
 }
 // html@@
+
+/// A stand-in for GitHub: every code is good and the user is octo.
+async fn fake_github() -> String {
+    use zapline::prelude::{App, Json};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let github = App::new()
+        .post("/token", || async { Json(json!({ "access_token": "t", "token_type": "bearer" })) })
+        .get("/user", || async { Json(json!({ "id": 7, "login": "octo", "email": null })) })
+        .get("/user/emails", || async {
+            Json(json!([{ "email": "Ada@Example.com", "primary": true, "verified": true }]))
+        });
+    tokio::spawn(github.serve(listener));
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn github_login_links_to_the_account_with_that_email() {
+    let base = fake_github().await;
+    let github = OAuth::github("id", "secret").endpoints(
+        format!("{base}/authorize"),
+        format!("{base}/token"),
+        format!("{base}/user"),
+    );
+    let client = app(Database::sqlite_memory()).oauth(github).test().with_cookies();
+    client
+        .post("/api/auth/signup")
+        .json(&creds("ada@example.com", "correct horse"))
+        .send()
+        .await
+        .assert_status(201);
+    client.post("/api/auth/logout").send().await.assert_status(204);
+
+    // Twice: the first login links the GitHub identity, the second uses the link.
+    for _ in 0..2 {
+        let res = client.get("/auth/github?next=/settings").send().await;
+        let location = res.header("location").unwrap();
+        assert!(location.starts_with(&format!("{base}/authorize?")), "{location}");
+        let state = location.split("state=").nth(1).unwrap().split('&').next().unwrap();
+        let res = client
+            .get(&format!("/auth/github/callback?code=c&state={state}"))
+            .send()
+            .await;
+        assert_eq!(res.header("location"), Some("/settings"));
+        let me = client.get("/api/auth/me").send().await;
+        assert_eq!(me.json::<serde_json::Value>()["email"], "ada@example.com");
+        client.post("/api/auth/logout").send().await.assert_status(204);
+    }
+}

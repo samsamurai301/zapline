@@ -331,7 +331,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts + password reset), `g job <name>` (durable job), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -3001,14 +3001,16 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash) and `password_resets` (hashed single-use tokens) |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
 | `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
 | `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider |
 
-It also enables zapline's `cookies`, `mail` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM` and `APP_URL` to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
 
 **Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
+
+**Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. See [Social login](#social-login-oauth) for the pieces underneath.
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
@@ -3041,6 +3043,37 @@ assert!(password::verify("correct horse battery staple", &hash).await?);
 ```
 
 Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
+
+## Social login (OAuth)
+
+With the `oauth` feature, `App::oauth` adds "log in with GitHub/Google/..." using the authorization-code flow with PKCE. Register a provider, then handle its callback with the `OAuthLogin` extractor:
+
+```rust
+use zapline::auth::oauth::{OAuth, OAuthLogin};
+
+#[get("/auth/github/callback")]
+async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
+    // login.user: provider, id, email, email_verified, name, avatar_url, raw
+    let user_id = find_or_create_user(&login.user).await?;
+    session.regenerate();
+    session.insert("user_id", user_id)?;
+    Ok(Redirect::to(login.next.as_deref().unwrap_or("/")))
+}
+
+let app = App::new()
+    .oauth(OAuth::from_env("github")?) // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
+    .mount(github_done);
+```
+
+Send people to `/auth/github` (optionally `?next=/settings`) to start. That route redirects to the provider with a random `state` and a PKCE challenge, kept in a short-lived `HttpOnly` cookie scoped to `/auth`. On the way back, `OAuthLogin` checks the state, exchanges the code (sending the PKCE verifier) and fetches the profile. It answers `400 invalid_oauth_state` for a forged or replayed callback, `401 oauth_denied` when the user cancelled at the provider, `401 oauth_failed` when the provider rejects the code, and `404` for a provider that isn't registered. `next` is kept only when it is a local path, so it can't be used as an open redirect.
+
+| Provider | Constructor | Notes |
+|---|---|---|
+| GitHub | `OAuth::github(id, secret)` | Scope `read:user user:email`; the email is the verified primary one from `/user/emails` |
+| Google | `OAuth::google(id, secret)` | OpenID Connect `userinfo`; scopes `openid email profile` |
+| Any OAuth 2 provider | `OAuth::custom(name, authorize_url, token_url, userinfo_url)` | Reads `sub`/`id`, `email`, `email_verified`, `name`, `picture`/`avatar_url`; the whole profile is in `user.raw` |
+
+`.scopes([...])` replaces the scopes, `.redirect_url(url)` overrides the callback URL (by default `APP_URL` + `/auth/{name}/callback`, or the request's host when `APP_URL` is unset), and `.endpoints(..)` points a built-in provider at a test double. Only trust `user.email` for account linking when `user.email_verified` is true.
 
 ## Credential extractors
 
@@ -5978,6 +6011,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |

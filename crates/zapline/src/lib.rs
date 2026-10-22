@@ -57,7 +57,7 @@
 //! | Errors | [`Error`] (`{"error", "code", "details"}` JSON), [`App::error_handler`] |
 //! | Middleware | [`middleware`]: CORS, timeouts, rate limiting, request IDs, compression, ... |
 //! | API docs and validation | [`openapi`], [`validate`] |
-//! | Security | [`auth`] (bearer, basic, API keys, JWT, guards, CSRF), [`cookies`], [`session`] |
+//! | Security | [`auth`] (bearer, basic, API keys, JWT, social login, guards, CSRF), [`cookies`], [`session`] |
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
 //! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
@@ -91,6 +91,7 @@
 //! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
 //! | `password` | | [`auth::password`]: Argon2id password hashing |
 //! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
+//! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
@@ -156,6 +157,8 @@ pub mod config;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
+#[cfg(feature = "_http-client")]
+mod http_client;
 #[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
 pub mod jobs;
 #[cfg(feature = "mail")]

@@ -7,11 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use http::{Method, Request as HttpRequest, StatusCode};
-use http_body_util::{BodyExt, Full};
-use hyper_rustls::HttpsConnector;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::client::legacy::Client;
-use hyper_util::rt::TokioExecutor;
+use http_body_util::Full;
 use sha2::{Digest, Sha256};
 
 use super::{encode_path, hex};
@@ -32,7 +28,6 @@ pub struct S3 {
     access_key: String,
     secret_key: String,
     session_token: Option<String>,
-    client: Client<HttpsConnector<HttpConnector>, Full<Bytes>>,
 }
 
 impl fmt::Debug for S3 {
@@ -54,11 +49,6 @@ impl S3 {
     /// let s3 = zapline::storage::S3::new("my-bucket", "eu-west-1");
     /// ```
     pub fn new(bucket: impl Into<String>, region: impl Into<String>) -> Self {
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
         S3 {
             bucket: bucket.into(),
             region: region.into(),
@@ -66,7 +56,6 @@ impl S3 {
             access_key: String::new(),
             secret_key: String::new(),
             session_token: None,
-            client: Client::builder(TokioExecutor::new()).build(https),
         }
     }
 
@@ -231,19 +220,8 @@ impl S3 {
             .header(http::header::AUTHORIZATION, auth)
             .body(Full::new(body))
             .map_err(|e| Error::internal("invalid S3 request").with_source(e))?;
-        let res = self
-            .client
-            .request(req)
-            .await
-            .map_err(|e| Error::service_unavailable("cannot reach S3").with_source(e))?;
-        let status = res.status();
-        let body = res
-            .into_body()
-            .collect()
-            .await
-            .map_err(|e| Error::service_unavailable("S3 response failed").with_source(e))?
-            .to_bytes();
-        Ok((status, body))
+        let res = crate::http_client::fetch(req, "S3").await?;
+        Ok((res.status, res.body))
     }
 
     /// The `Authorization` header for a request. Sorts `headers`.

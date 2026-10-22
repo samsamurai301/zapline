@@ -52,6 +52,8 @@ mod csrf;
 mod guard;
 #[cfg(feature = "jwt")]
 pub mod jwt;
+#[cfg(feature = "oauth")]
+pub mod oauth;
 #[cfg(feature = "password")]
 pub mod password;
 
