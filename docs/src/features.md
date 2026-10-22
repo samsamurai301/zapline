@@ -37,6 +37,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
+| `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
 

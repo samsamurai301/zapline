@@ -27,6 +27,7 @@
 - [Dependency injection](di.md)
 - [Configuration](config.md)
 - [Background tasks & scheduled jobs](tasks.md)
+- [Caching](caching.md)
 
 # Full-stack
 

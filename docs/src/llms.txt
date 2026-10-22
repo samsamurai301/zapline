@@ -38,6 +38,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Dependency injection](https://samsamurai301.github.io/zapline/di.html): Register a service once with `App::provide`, receive it in any handler with `Dep<T>`:
 - [Configuration](https://samsamurai301.github.io/zapline/config.html): Load layered settings into your own struct, then hand it to the app:
 - [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopp
+- [Caching](https://samsamurai301.github.io/zapline/caching.html): `zapline::cache` (feature `cache`, included in `full`) has three tools. Pick by what you want to skip:
 
 ## Full-stack
 

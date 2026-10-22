@@ -61,6 +61,7 @@
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
 //! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
+//! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
 //! | Files | [`storage`]: local, memory and S3 storage with expiring links |
 //! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
@@ -90,6 +91,7 @@
 //! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
 //! | `password` | | [`auth::password`]: Argon2id password hashing |
 //! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
+//! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
 //! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
@@ -146,6 +148,8 @@ pub mod cookies;
 pub mod session;
 
 // ---- application structure ---------------------------------------------------
+#[cfg(feature = "cache")]
+pub mod cache;
 #[cfg(feature = "config")]
 pub mod config;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]

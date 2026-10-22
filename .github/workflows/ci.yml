@@ -61,7 +61,7 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password mail storage s3; do
+          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password mail storage s3 cache; do
             echo "::group::$f"
             cargo check -p zapline --no-default-features --features "$f"
             echo "::endgroup::"

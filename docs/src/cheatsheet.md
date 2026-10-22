@@ -30,6 +30,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
+| Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |

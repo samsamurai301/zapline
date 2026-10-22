@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies", "views",
-    "password", "mail", "storage",
+    "password", "mail", "storage", "cache",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -39,6 +39,7 @@ sqlite = ["dep:sqlx", "sqlx/sqlite"]
 views = ["dep:minijinja"]
 password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
+cache = ["json"]
 storage = ["dep:mime_guess", "dep:hmac", "dep:sha2", "dep:getrandom"]
 s3 = ["storage", "dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 

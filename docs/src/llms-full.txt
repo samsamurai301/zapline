@@ -324,6 +324,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
+| Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
@@ -2453,6 +2454,81 @@ The grace period comes on top of the time the server spends draining connections
 ## Tests
 
 `App::test()` starts jobs and workers together with the other startup hooks, on the first request. Call `client.start().await` to start them eagerly and `client.shutdown().await` to stop them and wait for the drain. Scheduled jobs with long periods never fire inside a short test, so test the job's logic as a plain function and keep the schedule thin.
+
+
+---
+
+<!-- caching.md -->
+
+# Caching
+
+`zapline::cache` (feature `cache`, included in `full`) has three tools. Pick by what you want to skip:
+
+| Skip | Use |
+|---|---|
+| Recomputing a value (a slow query, an API call) | `Cache` |
+| Running a handler at all for the same anonymous `GET` | `ResponseCache` |
+| Sending a body the browser already has | `ETag` |
+
+## `Cache`: values
+
+```rust
+use std::time::Duration;
+use zapline::cache::Cache;
+use zapline::prelude::*;
+
+#[model]
+struct Stats { users: u64 }
+
+#[get("/stats")]
+async fn stats(cache: Cache) -> Result<Json<Stats>> {
+    let stats = cache
+        .get_or_set("stats", Duration::from_secs(60), || async {
+            Ok(Stats { users: 42 }) // the expensive part
+        })
+        .await?;
+    Ok(Json(stats))
+}
+
+let app = App::new().cache(Cache::memory()).mount(stats);
+```
+
+`get_or_set` is the one to reach for. When 500 requests miss at once, one computes and the rest wait for it (no stampede). Errors aren't cached.
+
+| Call | |
+|---|---|
+| `cache.get::<T>(key)` | `Option<T>`: a miss when absent, expired, or of another type |
+| `cache.set(key, &value, ttl)` | Any `Serialize` value (stored as JSON) |
+| `cache.delete(key)` / `delete_prefix("posts:")` / `clear()` | Invalidate after writes |
+| `Cache::memory().max_entries(n)` | Capacity (default 10,000). When full, expired entries go first, then the soonest to expire. |
+
+Name keys like `posts:42` so a write can drop a whole family with `delete_prefix`.
+
+## `ResponseCache`: whole pages
+
+```rust
+use zapline::cache::ResponseCache;
+
+let app = App::new().nest(
+    "/blog",
+    Routes::new().mount((index, post)).wrap(ResponseCache::new(Duration::from_secs(300))),
+);
+```
+
+Repeats are answered from memory with `x-cache: HIT`. It only keeps responses that are safe to share:
+
+- `GET` or `HEAD` with no `Authorization` or `Cookie` header, so logged-in users always get their own page;
+- a `200` with a buffered body, no `Set-Cookie`, and no `Cache-Control: private`, `no-store` or `no-cache`.
+
+The query string, `Accept` and `HX-Request` are part of the key, so htmx fragments and full pages don't mix. When the handler set no `Cache-Control`, `public, max-age=<ttl>` is added, so CDNs and browsers help too.
+
+## `ETag`: conditional requests
+
+```rust
+let app = App::new().wrap(zapline::cache::ETag);
+```
+
+`200` responses to `GET` get a weak `ETag` (a hash of the body). A browser that sends it back in `If-None-Match` gets an empty `304 Not Modified`. Streamed bodies are left alone. [Static files](files.md) have their own ETags already.
 
 
 ---
@@ -5779,6 +5855,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
+| `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
 
