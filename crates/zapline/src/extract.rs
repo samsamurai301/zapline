@@ -418,6 +418,126 @@ impl<T: DeserializeOwned + Send> FromRequest for Form<T> {
     }
 }
 
+/// Serde helper for HTML forms: an empty field becomes `None` instead of a
+/// parse error (browsers send `age=` for an empty number input). Works for
+/// JSON bodies too (`null`, numbers, strings), so one struct can serve both.
+///
+/// ```
+/// # use serde::Deserialize;
+/// #[derive(Deserialize)]
+/// struct Profile {
+///     #[serde(default, deserialize_with = "zapline::extract::empty_as_none")]
+///     age: Option<u32>,
+/// }
+/// ```
+#[cfg(feature = "form")]
+pub fn empty_as_none<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    deserializer.deserialize_any(form_helpers::Loose(std::marker::PhantomData))
+}
+
+/// Serde helper for HTML checkboxes: present (`on`, `true`, `1`, `yes`)
+/// means `true`, absent or empty means `false`. Also accepts JSON booleans.
+/// Pair it with `#[serde(default)]` so a missing (unchecked) box is `false`.
+#[cfg(feature = "form")]
+pub fn checkbox<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    deserializer.deserialize_any(form_helpers::Checkbox)
+}
+
+#[cfg(feature = "form")]
+mod form_helpers {
+    use std::fmt;
+    use std::marker::PhantomData;
+    use std::str::FromStr;
+
+    use serde::de::{self, Deserializer, Visitor};
+
+    pub(super) struct Loose<T>(pub(super) PhantomData<T>);
+
+    impl<T: FromStr> Loose<T>
+    where
+        T::Err: fmt::Display,
+    {
+        fn parse<E: de::Error>(s: &str) -> Result<Option<T>, E> {
+            match s.trim() {
+                "" => Ok(None),
+                s => s.parse().map(Some).map_err(E::custom),
+            }
+        }
+    }
+
+    impl<'de, T: FromStr> Visitor<'de> for Loose<T>
+    where
+        T::Err: fmt::Display,
+    {
+        type Value = Option<T>;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a value or an empty string")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+            Self::parse(v)
+        }
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+            Self::parse(if v { "true" } else { "false" })
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+            Self::parse(&v.to_string())
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+            Self::parse(&v.to_string())
+        }
+        fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+            Self::parse(&v.to_string())
+        }
+        fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+            Ok(None)
+        }
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+
+    pub(super) struct Checkbox;
+
+    impl<'de> Visitor<'de> for Checkbox {
+        type Value = bool;
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("a boolean or a checkbox value")
+        }
+        fn visit_bool<E: de::Error>(self, v: bool) -> Result<bool, E> {
+            Ok(v)
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<bool, E> {
+            Ok(matches!(v.trim(), "on" | "true" | "1" | "yes"))
+        }
+        fn visit_i64<E: de::Error>(self, v: i64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+        fn visit_u64<E: de::Error>(self, v: u64) -> Result<bool, E> {
+            Ok(v != 0)
+        }
+        fn visit_none<E: de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_unit<E: de::Error>(self) -> Result<bool, E> {
+            Ok(false)
+        }
+        fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<bool, D::Error> {
+            d.deserialize_any(self)
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // A small serde deserializer for route parameters.
 

@@ -109,6 +109,7 @@ pub struct Database<DB: sqlx::Database = DefaultDb> {
 enum Source {
     Url(String),
     Env(&'static str),
+    EnvOr(&'static str, String),
 }
 
 impl<DB: sqlx::Database> Database<DB> {
@@ -160,6 +161,9 @@ impl<DB: sqlx::Database> Database<DB> {
     fn resolve_url(&self) -> crate::Result<String> {
         match &self.url {
             Source::Url(url) => Ok(url.clone()),
+            Source::EnvOr(var, fallback) => {
+                Ok(std::env::var(var).unwrap_or_else(|_| fallback.clone()))
+            }
             Source::Env(var) => std::env::var(var).map_err(|_| {
                 Error::internal(format!(
                     "the {var} environment variable is not set; set it to your database URL \
@@ -200,6 +204,12 @@ impl Database {
     /// Read the URL from `DATABASE_URL` at startup (the sqlx convention).
     pub fn from_env() -> Self {
         Self::from_env_var("DATABASE_URL")
+    }
+
+    /// `DATABASE_URL` if set, otherwise `fallback`: zero-setup local
+    /// development, e.g. `Database::from_env_or("sqlite://app.db?mode=rwc")`.
+    pub fn from_env_or(fallback: impl Into<String>) -> Self {
+        Self::with_source(Source::EnvOr("DATABASE_URL", fallback.into()))
     }
 
     /// Read the URL from the `var` environment variable at startup. Startup

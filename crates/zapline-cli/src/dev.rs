@@ -1,11 +1,14 @@
 //! `zapline dev`: rebuild and restart the app whenever source files change.
 //!
 //! Flow: build once, start the binary, then watch `src/`, `config/`,
-//! `templates/`, `Cargo.toml` and `build.rs`. After a burst of changes settles
+//! `migrations/`, `Cargo.toml` and `build.rs`. After a burst of changes settles
 //! (debounce), rebuild; if the build succeeds, stop the old process gracefully
 //! (SIGTERM, then SIGKILL after a grace period) and start the new one. A failed
 //! build leaves the previous version running. The app's output is streamed
 //! straight through.
+//!
+//! `templates/` is deliberately not watched: debug builds re-read templates
+//! on every render, so editing one needs a browser refresh, not a restart.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -23,7 +26,7 @@ use crate::project::Project;
 use crate::ui;
 
 /// Directories watched recursively (when they exist).
-pub const WATCHED_DIRS: &[&str] = &["src", "config", "templates"];
+pub const WATCHED_DIRS: &[&str] = &["src", "config", "migrations"];
 /// Files in the project root that trigger a rebuild.
 pub const WATCHED_ROOT_FILES: &[&str] = &["Cargo.toml", "build.rs"];
 /// Directory names that are never interesting, wherever they appear.
@@ -467,7 +470,7 @@ mod tests {
             "src/main.rs",
             "src/routes/users.rs",
             "config/default.toml",
-            "templates/index.html",
+            "migrations/20260101000000_create_todos.sql",
             "Cargo.toml",
             "build.rs",
         ] {
@@ -483,6 +486,7 @@ mod tests {
             ".git/index",
             "src/.git/HEAD",
             "README.md",
+            "templates/index.html",
             "Cargo.lock",
             "tests/api.rs",
             "node_modules/x/y.js",

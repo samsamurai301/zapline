@@ -424,3 +424,42 @@ fn dev_mode_shows_the_real_500_message() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+#[tokio::test]
+async fn form_helpers_handle_empty_inputs_and_checkboxes() {
+    #[derive(Deserialize)]
+    struct Profile {
+        #[serde(default, deserialize_with = "zapline::extract::empty_as_none")]
+        age: Option<u32>,
+        #[serde(default, deserialize_with = "zapline::extract::checkbox")]
+        public: bool,
+    }
+    let app = App::new().post("/", |Form(p): Form<Profile>| async move {
+        format!("{:?} {}", p.age, p.public)
+    });
+    let client = app.test();
+    let res = client.post("/").form(&[("age", "")]).send().await;
+    assert_eq!(res.text(), "None false");
+    let res = client
+        .post("/")
+        .form(&[("age", "42"), ("public", "on")])
+        .send()
+        .await;
+    assert_eq!(res.text(), "Some(42) true");
+    let res = client.post("/").form(&[("age", "x")]).send().await;
+    assert_eq!(res.status(), 422);
+
+    // The same struct works for JSON bodies.
+    let app = App::new().post("/", |Json(p): Json<Profile>| async move {
+        format!("{:?} {}", p.age, p.public)
+    });
+    let client = app.test();
+    let res = client
+        .post("/")
+        .json(&json!({"age": 7, "public": true}))
+        .send()
+        .await;
+    assert_eq!(res.text(), "Some(7) true");
+    let res = client.post("/").json(&json!({"age": null})).send().await;
+    assert_eq!(res.text(), "None false");
+}

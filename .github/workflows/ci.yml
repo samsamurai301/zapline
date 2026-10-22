@@ -134,9 +134,13 @@ jobs:
           ROOT="$(native "$PWD")"
           WORK="$(native "$RUNNER_TEMP")/scaffold"
           mkdir -p "$WORK"
-          for t in minimal api full; do
+          for t in minimal api full fullstack; do
             echo "::group::template $t"
             "$ROOT/target/debug/zapline" new "demo-$t" --template "$t" --path "$WORK" --zapline-path "$ROOT/crates/zapline" --no-git
+            if [ "$t" = fullstack ]; then
+              # The database-backed generator must produce code that builds and passes its tests.
+              (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool)
+            fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)
             echo "::endgroup::"
           done

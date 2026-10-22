@@ -20,6 +20,7 @@ Examples:
   zapline new my-api                       Create an API project (docs, validation, Docker, CI)
   zapline new hello --template minimal     Create a tiny single-route project
   zapline new shop --template full         Add config layers, DI, metrics, tracing, hardened middleware
+  zapline new todo --template fullstack    HTML + htmx + SQLite + JSON API, zero setup
   zapline dev                              Rebuild and restart on every change
   zapline dev -- --port 9000               Pass arguments to your app
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
@@ -65,8 +66,11 @@ Templates:
   api      Structured REST API: routes, models, validation, OpenAPI docs, Dockerfile, CI (default)
   full     api plus layered config, DI, health probes, Prometheus metrics, tracing,
            security headers, request IDs, CORS, rate limiting, background tasks
+  fullstack  Server-rendered HTML with htmx, SQL database with migrations (SQLite, zero
+           setup), JSON API with OpenAPI docs, Dockerfile, CI
 
 Examples:
+  zapline new my-app --template fullstack
   zapline new my-api
   zapline new my-api --template full --path ~/code
   zapline new hello --template minimal --no-git")]
@@ -78,7 +82,7 @@ Examples:
 
     /// Rebuild and restart the app whenever files change
     #[command(after_long_help = "\
-Watches src/, config/, templates/, Cargo.toml and build.rs (ignoring target/ and editor
+Watches src/, config/, migrations/, Cargo.toml and build.rs (ignoring target/ and editor
 temp files), rebuilds after the changes settle, and restarts the binary. The old process
 gets SIGTERM and is killed after 5 seconds if it does not exit. If a build fails, the
 previous version keeps running.
@@ -177,16 +181,30 @@ the module is declared and mounted automatically; otherwise you get instructions
 
 The name can be singular or plural and in any case style: post, Posts, blog-post, BlogPosts.
 
+In a project with a migrations/ directory (the fullstack template), the resource is
+database-backed: a SQL migration, sqlx queries, a JSON API, an htmx page when
+templates/base.html exists, and tests. Field types: string, text, int, float, bool;
+append `?` for optional.
+
 Examples:
   zapline generate resource post
+  zapline g resource post title body:text published:bool
+  zapline g resource product name price:float stock:int notes:text?
   zapline g resource blog-post
   zapline g resource person --plural people")]
     Resource {
         /// Resource name, e.g. `post` or `blog-post`
         name: String,
+        /// Columns for a database-backed resource: `title`, `body:text`, `views:int`,
+        /// `price:float`, `done:bool`; add `?` for optional (`bio:text?`)
+        #[arg(value_name = "FIELD:TYPE")]
+        fields: Vec<String>,
         /// Plural form, for irregular nouns the built-in rules get wrong
         #[arg(long, value_name = "WORD")]
         plural: Option<String>,
+        /// Use an in-memory store even in a project with a database
+        #[arg(long)]
+        memory: bool,
     },
 
     /// A single route handler in src/routes/<name>.rs
@@ -354,7 +372,7 @@ mod tests {
                 panic!()
             };
             assert!(g.force);
-            let GenerateKind::Resource { name, plural } = g.kind else {
+            let GenerateKind::Resource { name, plural, .. } = g.kind else {
                 panic!()
             };
             assert_eq!(name, "post");

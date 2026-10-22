@@ -64,15 +64,21 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed), multipart uploads |
 | Observability | `tracing` spans per request, Prometheus `/metrics` with route labels, `/health/live` and `/health/ready` with checks |
 | Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
-| Tooling | `zapline new` (minimal, api and full templates), `generate`, `dev` (auto-restart), `routes`, `openapi`, `doctor`, `bench` |
+| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases |
+| Tooling | `zapline new` (minimal, api, full and fullstack templates), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `routes`, `openapi`, `doctor`, `bench` |
 
 ## Getting started
 
+A full-stack app (HTML + htmx, SQL database, JSON API, tests) in four commands, with no database server and no Node:
+
 ```sh
-cargo install zapline-cli                    # provides `zapline` and `cargo zapline`
-zapline new my-api                           # --template minimal | api | full
-cd my-api && zapline dev                     # rebuilds and restarts on change
+cargo install zapline-cli                                        # provides `zapline` and `cargo zapline`
+zapline new shop --template fullstack && cd shop                 # SQLite file, migrations, htmx pages, OpenAPI
+zapline g resource product name price:float stock:int featured:bool   # migration + SQL CRUD API + htmx page + tests
+zapline dev                                                      # http://localhost:8080/products and /docs
 ```
+
+Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
 
 zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
 

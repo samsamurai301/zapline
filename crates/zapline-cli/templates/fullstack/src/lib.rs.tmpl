@@ -1,0 +1,26 @@
+//! @@name@@: a full-stack zapline app.
+//!
+//! Server-rendered HTML (MiniJinja templates in `templates/`) made
+//! interactive with htmx, data in SQL (migrations in `migrations/`), and a
+//! JSON API with OpenAPI docs at `/docs`.
+
+pub mod routes;
+
+use zapline::db::{Database, DbCheck};
+use zapline::openapi::OpenApi;
+use zapline::prelude::*;
+
+/// Builds the application on top of `db`. `main` passes the real database;
+/// tests pass `Database::sqlite_memory()`.
+pub fn app(db: Database) -> App {
+    App::new()
+        .database(db)
+        .views("templates")
+        .static_files("/static", ServeDir::new("static"))
+        .plugin(Health::new().check("database", DbCheck::new()))
+        .openapi(OpenApi::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .plugin(routes::install)
+}

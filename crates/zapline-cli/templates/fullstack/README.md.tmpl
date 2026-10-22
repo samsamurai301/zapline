@@ -1,0 +1,55 @@
+# @@name@@
+
+A full-stack app built with [zapline](https://github.com/samsamurai301/zapline):
+server-rendered HTML made interactive with [htmx](https://htmx.org), data in
+SQL with migrations, and a JSON API with OpenAPI docs. No Node, no build step,
+no database server to install: it uses a local SQLite file until you set
+`DATABASE_URL`.
+
+```sh
+zapline dev          # http://localhost:8080 , rebuilds and restarts on change
+cargo test           # every test gets its own in-memory database
+```
+
+- <http://localhost:8080/>: the todo app (htmx)
+- <http://localhost:8080/docs>: the JSON API, interactive docs
+- <http://localhost:8080/health/ready>: readiness, including the database
+
+Edit a file in `templates/` and refresh: templates reload without a rebuild
+in debug builds.
+
+## Layout
+
+| Path | What it is |
+|---|---|
+| `src/lib.rs` | `app(db)`: builds the `App` (database, templates, static files, docs) |
+| `src/main.rs` | Serves `app(..)` with `DATABASE_URL` or `./app.db` |
+| `src/routes/` | One module per resource; each exposes `mount(app)` |
+| `templates/` | MiniJinja (Jinja2) templates; `{% block %}`s double as htmx fragments |
+| `migrations/` | SQL migrations, applied in order at startup |
+| `static/` | CSS, images and scripts served under `/static` |
+| `tests/` | In-process tests with `app(Database::sqlite_memory()).test()` |
+
+## Common tasks
+
+```sh
+zapline db new add_due_date          # new migration in migrations/
+zapline db migrate                   # apply migrations without starting the server
+zapline generate resource project    # CRUD module + tests, registered for you
+zapline routes                       # the route table
+```
+
+## Postgres
+
+Switch zapline's `sqlite` feature to `postgres` in `Cargo.toml` and set
+`DATABASE_URL=postgres://user:pass@host/db`. The queries use `$1` placeholders,
+which both SQLite and Postgres understand. In the migration, write
+`id BIGSERIAL PRIMARY KEY` instead of `INTEGER PRIMARY KEY AUTOINCREMENT`, and
+point the tests at a Postgres with `Database::postgres(url)`.
+
+## Docker
+
+```sh
+docker build -t @@name@@ .
+docker run --rm -p 8080:8080 -v @@name@@-data:/home/app/data @@name@@
+```

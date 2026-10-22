@@ -16,6 +16,8 @@ pub enum Template {
     Api,
     /// Everything in `api` plus layered config, DI, probes, metrics, tracing and a hardened middleware stack.
     Full,
+    /// Server-rendered HTML with htmx, a SQL database with migrations (SQLite, zero setup) and a JSON API.
+    Fullstack,
 }
 
 /// One file of a template: where it goes and what it contains.
@@ -91,6 +93,32 @@ const FULL: &[TemplateFile] = &[
     file!("tests/users.rs", "full/tests/users.rs.tmpl"),
 ];
 
+const FULLSTACK: &[TemplateFile] = &[
+    file!("AGENTS.md", "common/AGENTS.md.tmpl"),
+    file!("Cargo.toml", "fullstack/Cargo.toml.tmpl"),
+    file!(".gitignore", "fullstack/gitignore.tmpl"),
+    file!(".dockerignore", "common/dockerignore.tmpl"),
+    file!(".env.example", "fullstack/env.example.tmpl"),
+    file!(".github/workflows/ci.yml", "common/ci.yml.tmpl"),
+    file!("Dockerfile", "fullstack/Dockerfile.tmpl"),
+    file!("README.md", "fullstack/README.md.tmpl"),
+    file!("src/main.rs", "fullstack/src/main.rs.tmpl"),
+    file!("src/lib.rs", "fullstack/src/lib.rs.tmpl"),
+    file!("src/routes/mod.rs", "fullstack/src/routes/mod.rs.tmpl"),
+    file!("src/routes/todos.rs", "fullstack/src/routes/todos.rs.tmpl"),
+    file!(
+        "migrations/20260101000000_create_todos.sql",
+        "fullstack/migrations/20260101000000_create_todos.sql.tmpl"
+    ),
+    file!("templates/base.html", "fullstack/templates/base.html.tmpl"),
+    file!(
+        "templates/todos/index.html",
+        "fullstack/templates/todos/index.html.tmpl"
+    ),
+    file!("static/app.css", "fullstack/static/app.css.tmpl"),
+    file!("tests/todos.rs", "fullstack/tests/todos.rs.tmpl"),
+];
+
 impl Template {
     /// The files this template consists of.
     pub fn files(self) -> &'static [TemplateFile] {
@@ -98,6 +126,7 @@ impl Template {
             Template::Minimal => MINIMAL,
             Template::Api => API,
             Template::Full => FULL,
+            Template::Fullstack => FULLSTACK,
         }
     }
 
@@ -107,6 +136,7 @@ impl Template {
         match self {
             Template::Minimal | Template::Api => &[],
             Template::Full => &["compression"],
+            Template::Fullstack => &["sqlite", "views", "fs"],
         }
     }
 
@@ -116,6 +146,7 @@ impl Template {
             Template::Minimal => "minimal",
             Template::Api => "api",
             Template::Full => "full",
+            Template::Fullstack => "fullstack",
         }
     }
 }

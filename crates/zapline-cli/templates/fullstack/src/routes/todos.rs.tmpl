@@ -1,0 +1,112 @@
+//! Todos: an htmx page at `/` and a JSON API under `/api/todos`.
+//!
+//! The page and the API share the queries below. Each htmx action answers
+//! with the re-rendered `list` block of `templates/todos/index.html`, which
+//! htmx swaps into the page.
+
+use serde::{Deserialize, Serialize};
+use zapline::db::{sqlx, Db};
+use zapline::prelude::*;
+use zapline::view::{context, HxRequest, Views};
+
+/// A todo item.
+#[derive(Clone, Serialize, Deserialize, JsonSchema, sqlx::FromRow)]
+pub struct Todo {
+    pub id: i64,
+    pub title: String,
+    pub done: bool,
+}
+
+/// Body of a create request (form or JSON).
+#[derive(Deserialize, JsonSchema, Validate)]
+pub struct NewTodo {
+    #[validate(length(min = 1, max = 200))]
+    pub title: String,
+}
+
+/// Adds the todo routes.
+pub fn mount(app: App) -> App {
+    app.mount((page, create_form, toggle, remove, list_json, create_json))
+}
+
+// ---- queries -----------------------------------------------------------------
+
+async fn all(db: &Db) -> Result<Vec<Todo>> {
+    let todos = sqlx::query_as::<_, Todo>("SELECT id, title, done FROM todos ORDER BY id")
+        .fetch_all(&**db)
+        .await?;
+    Ok(todos)
+}
+
+async fn insert(db: &Db, title: &str) -> Result<Todo> {
+    let todo = sqlx::query_as::<_, Todo>(
+        "INSERT INTO todos (title, done) VALUES ($1, FALSE) RETURNING id, title, done",
+    )
+    .bind(title)
+    .fetch_one(&**db)
+    .await?;
+    Ok(todo)
+}
+
+// ---- HTML (htmx) -------------------------------------------------------------
+
+async fn render_list(views: &Views, db: &Db, hx: &HxRequest) -> Result<Html<String>> {
+    let todos = all(db).await?;
+    views.page_or_block(hx, "todos/index.html", "list", context! { todos })
+}
+
+/// The todo page (or just its list, for htmx).
+#[get("/", tag = "pages")]
+async fn page(views: Views, db: Db, hx: HxRequest) -> Result<Html<String>> {
+    render_list(&views, &db, &hx).await
+}
+
+/// Add a todo from the page's form.
+#[post("/todos", tag = "pages")]
+async fn create_form(
+    views: Views,
+    db: Db,
+    hx: HxRequest,
+    Valid(Form(new)): Valid<Form<NewTodo>>,
+) -> Result<Html<String>> {
+    insert(&db, new.title.trim()).await?;
+    render_list(&views, &db, &hx).await
+}
+
+/// Flip a todo between done and not done.
+#[post("/todos/{id}/toggle", tag = "pages")]
+async fn toggle(views: Views, db: Db, hx: HxRequest, Path(id): Path<i64>) -> Result<Html<String>> {
+    sqlx::query("UPDATE todos SET done = NOT done WHERE id = $1")
+        .bind(id)
+        .execute(&*db)
+        .await?;
+    render_list(&views, &db, &hx).await
+}
+
+/// Delete a todo.
+#[delete("/todos/{id}", tag = "pages")]
+async fn remove(views: Views, db: Db, hx: HxRequest, Path(id): Path<i64>) -> Result<Html<String>> {
+    sqlx::query("DELETE FROM todos WHERE id = $1")
+        .bind(id)
+        .execute(&*db)
+        .await?;
+    render_list(&views, &db, &hx).await
+}
+
+// ---- JSON API ------------------------------------------------------------------
+
+/// List todos.
+#[get("/api/todos", tag = "todos")]
+async fn list_json(db: Db) -> Result<Json<Vec<Todo>>> {
+    Ok(Json(all(&db).await?))
+}
+
+/// Create a todo.
+#[post("/api/todos", tag = "todos", status = 201)]
+async fn create_json(
+    db: Db,
+    Valid(Json(new)): Valid<Json<NewTodo>>,
+) -> Result<(StatusCode, Json<Todo>)> {
+    let todo = insert(&db, new.title.trim()).await?;
+    Ok((StatusCode::CREATED, Json(todo)))
+}

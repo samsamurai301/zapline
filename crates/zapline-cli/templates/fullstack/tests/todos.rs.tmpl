@@ -1,0 +1,82 @@
+//! End-to-end tests against a fresh in-memory database per test.
+
+use serde_json::json;
+use zapline::db::Database;
+
+use @@crate_name@@::app;
+use @@crate_name@@::routes::todos::Todo;
+
+#[tokio::test]
+async fn page_renders_and_htmx_gets_the_list_fragment() {
+    let client = app(Database::sqlite_memory()).test();
+
+    let page = client.get("/").send().await;
+    assert_eq!(page.status(), 200);
+    assert!(page.text().contains("<h1>Todos</h1>"));
+
+    let res = client
+        .post("/todos")
+        .header("hx-request", "true")
+        .form(&[("title", "write tests")])
+        .send()
+        .await;
+    assert_eq!(res.status(), 200);
+    let fragment = res.text();
+    assert!(fragment.contains("write tests"), "{fragment}");
+    assert!(
+        !fragment.contains("<h1>"),
+        "htmx gets only the list: {fragment}"
+    );
+}
+
+#[tokio::test]
+async fn json_api_creates_and_lists() {
+    let client = app(Database::sqlite_memory()).test();
+
+    let res = client
+        .post("/api/todos")
+        .json(&json!({"title": "ship"}))
+        .send()
+        .await;
+    assert_eq!(res.status(), 201);
+    let todo: Todo = res.json();
+    assert!(!todo.done);
+
+    let res = client
+        .post("/api/todos")
+        .json(&json!({"title": ""}))
+        .send()
+        .await;
+    assert_eq!(res.status(), 422);
+
+    let todos: Vec<Todo> = client.get("/api/todos").send().await.json();
+    assert_eq!(todos.len(), 1);
+}
+
+#[tokio::test]
+async fn toggle_and_delete() {
+    let client = app(Database::sqlite_memory()).test();
+    let todo: Todo = client
+        .post("/api/todos")
+        .json(&json!({"title": "a"}))
+        .send()
+        .await
+        .json();
+
+    client
+        .post(&format!("/todos/{}/toggle", todo.id))
+        .send()
+        .await;
+    let todos: Vec<Todo> = client.get("/api/todos").send().await.json();
+    assert!(todos[0].done);
+
+    client.delete(&format!("/todos/{}", todo.id)).send().await;
+    let todos: Vec<Todo> = client.get("/api/todos").send().await.json();
+    assert!(todos.is_empty());
+}
+
+#[tokio::test]
+async fn readiness_checks_the_database() {
+    let client = app(Database::sqlite_memory()).test();
+    assert_eq!(client.get("/health/ready").send().await.status(), 200);
+}

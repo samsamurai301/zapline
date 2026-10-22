@@ -121,9 +121,19 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Generate(g) => {
             let here = Path::new(".");
             let report = match g.kind {
-                GenerateKind::Resource { name, plural } => {
-                    generate::resource(here, &name, plural.as_deref(), g.force)?
-                }
+                GenerateKind::Resource {
+                    name,
+                    fields,
+                    plural,
+                    memory,
+                } => generate::resource_with_fields(
+                    here,
+                    &name,
+                    plural.as_deref(),
+                    &fields,
+                    memory,
+                    g.force,
+                )?,
                 GenerateKind::Handler { name, method, path } => {
                     generate::handler(here, &name, method, path.as_deref(), g.force)?
                 }

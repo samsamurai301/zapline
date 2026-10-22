@@ -6,6 +6,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 The first public release.
 
+### Full-stack
+- `zapline::db` (features `postgres`, `sqlite`): sqlx pool created at startup, SQL migrations applied automatically, `Db` extractor, `DbCheck` readiness check, `Database::sqlite_memory()` for isolated tests, and sqlx errors mapped to 404/409/422/503.
+- `zapline::view` (feature `views`): MiniJinja templates with hot reload in debug builds, `render_block`/`page_or_block` for htmx fragments, `HxRequest` and `Hx` response headers.
+- `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
+- `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
+- `zapline db new` / `zapline db migrate`.
+- `zapline::extract::{empty_as_none, checkbox}` serde helpers for HTML forms.
+- `ZAPLINE_DEV=1` (set by `zapline dev`) shows the real cause of 500 errors.
+
 ### AI-assisted development
 - `AGENTS.md` in the repository and in every project `zapline new` creates: commands, layout and the one canonical way to do each task.
 - A runnable cheatsheet (`examples/examples/cheatsheet.rs`, ~1.6k tokens) that covers the common 90% of the API.
