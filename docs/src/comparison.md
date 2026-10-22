@@ -6,7 +6,7 @@
 |---|---|
 | `@app.get("/items/{id}")` | `#[get("/items/{id}")]` |
 | `def read(id: int, q: str \| None = None)` | `async fn read(Path(id): Path<i64>, Query(q): Query<Params>)` |
-| Pydantic model | `#[derive(Deserialize, Serialize, JsonSchema, Validate)] struct` |
+| Pydantic model | `#[model] struct` (derives serde, `JsonSchema` and `Validate`) |
 | Automatic 422 validation errors | `Valid<Json<T>>` → 422 with per-field `details` |
 | `/docs`, `/openapi.json` | `App::openapi(OpenApi::new("API", "1.0"))` |
 | `Depends(get_db)` | `Dep<T>`, `State<T>`, custom extractors, `Cached<T>` |

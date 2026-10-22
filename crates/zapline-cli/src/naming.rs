@@ -297,6 +297,8 @@ pub struct ResourceNames {
     pub path: String,
     /// `blog post` (for prose in doc comments).
     pub human: String,
+    /// `a blog post`, `an author`.
+    pub a_human: String,
     /// `blog posts`.
     pub plural_human: String,
 }
@@ -320,11 +322,30 @@ impl ResourceNames {
             pascal_plural: pascal_case(&plural),
             path: format!("/{}", kebab_case(&plural)),
             human: singular.replace('_', " "),
+            a_human: with_article(&singular.replace('_', " ")),
             plural_human: plural.replace('_', " "),
             singular,
             plural,
         })
     }
+}
+
+/// `author` -> `an author`, `user` -> `a user`: the indefinite article by
+/// sound, for the common cases.
+pub fn with_article(noun: &str) -> String {
+    let lower = noun.to_ascii_lowercase();
+    let vowel_sound = match lower.chars().next() {
+        Some('a' | 'e' | 'i' | 'o') => !lower.starts_with("eu") && !lower.starts_with("one"),
+        // "user", "unit", "uniform" sound like "you"; "umbrella", "update" don't.
+        Some('u') => !["uni", "use", "usa", "usu", "uti", "ure", "uro"]
+            .iter()
+            .any(|p| lower.starts_with(p)),
+        Some('h') => ["hour", "honest", "honor", "heir"]
+            .iter()
+            .any(|p| lower.starts_with(p)),
+        _ => false,
+    };
+    format!("{} {noun}", if vowel_sound { "an" } else { "a" })
 }
 
 /// Validates a name that will become a Rust module/function identifier.
@@ -389,6 +410,16 @@ pub fn crate_ident(package_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn indefinite_articles_follow_the_sound() {
+        assert_eq!(with_article("author"), "an author");
+        assert_eq!(with_article("user"), "a user");
+        assert_eq!(with_article("update"), "an update");
+        assert_eq!(with_article("hour log"), "an hour log");
+        assert_eq!(with_article("product"), "a product");
+        assert_eq!(with_article("euro rate"), "a euro rate");
+    }
 
     #[test]
     fn splits_words() {

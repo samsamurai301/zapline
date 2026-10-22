@@ -350,7 +350,12 @@ mod tests {
         assert_eq!(doc["p"].as_str(), Some(nasty));
     }
 
-    const ALL: [Template; 3] = [Template::Minimal, Template::Api, Template::Full];
+    const ALL: [Template; 4] = [
+        Template::Minimal,
+        Template::Api,
+        Template::Full,
+        Template::Fullstack,
+    ];
 
     fn rendered(template: Template, name: &str) -> Vec<OutputFile> {
         let dep = zapline_dependency(
@@ -415,9 +420,10 @@ mod tests {
             let dev = doc["dev-dependencies"].as_table().unwrap();
             assert!(dev.contains_key("tokio"));
             if t != Template::Minimal {
-                assert!(deps.contains_key("serde"));
-                assert!(deps.contains_key("schemars"));
-                assert!(deps.contains_key("validator"));
+                // `#[model]` derives through zapline: no serde, schemars or
+                // validator dependency to keep in sync.
+                assert!(!deps.contains_key("schemars"));
+                assert!(!deps.contains_key("validator"));
                 assert!(dev.contains_key("serde_json"));
             }
         }
@@ -425,10 +431,11 @@ mod tests {
 
     #[test]
     fn expected_files_exist() {
-        let expect: [(Template, &[&str]); 3] = [
+        let expect: [(Template, &[&str]); 4] = [
             (
                 Template::Minimal,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",
@@ -440,6 +447,7 @@ mod tests {
             (
                 Template::Api,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",
@@ -460,6 +468,7 @@ mod tests {
             (
                 Template::Full,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",
@@ -473,6 +482,28 @@ mod tests {
                     "config/production.toml",
                     "tests/ops.rs",
                     "tests/users.rs",
+                    "Dockerfile",
+                    ".dockerignore",
+                    ".github/workflows/ci.yml",
+                    ".env.example",
+                    ".gitignore",
+                    "README.md",
+                ],
+            ),
+            (
+                Template::Fullstack,
+                &[
+                    "AGENTS.md",
+                    "Cargo.toml",
+                    "src/main.rs",
+                    "src/lib.rs",
+                    "src/routes/mod.rs",
+                    "src/routes/todos.rs",
+                    "migrations/20260101000000_create_todos.sql",
+                    "templates/base.html",
+                    "templates/todos/index.html",
+                    "static/app.css",
+                    "tests/todos.rs",
                     "Dockerfile",
                     ".dockerignore",
                     ".github/workflows/ci.yml",
@@ -502,7 +533,7 @@ mod tests {
 
     #[test]
     fn route_registration_markers_are_present() {
-        for t in [Template::Api, Template::Full] {
+        for t in [Template::Api, Template::Full, Template::Fullstack] {
             let files = rendered(t, "demo-app");
             let mod_rs = file(&files, "src/routes/mod.rs");
             assert!(mod_rs.contains("// zapline:routes:start"));
@@ -533,7 +564,7 @@ mod tests {
 
     #[test]
     fn dockerfile_is_multistage_and_non_root() {
-        for t in [Template::Api, Template::Full] {
+        for t in [Template::Api, Template::Full, Template::Fullstack] {
             let files = rendered(t, "demo-app");
             let d = file(&files, "Dockerfile");
             assert_eq!(

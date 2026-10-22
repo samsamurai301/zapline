@@ -1,0 +1,49 @@
+//! @@name@@: a full-stack zapline app.
+//!
+//! Server-rendered HTML (MiniJinja templates in `templates/`) made
+//! interactive with htmx, data in SQL (migrations in `migrations/`), and a
+//! JSON API with OpenAPI docs at `/docs`.
+
+pub mod routes;
+
+use zapline::db::{Database, DbCheck, Factory};
+use zapline::live::Live;
+use zapline::middleware::SecurityHeaders;
+use zapline::openapi::OpenApi;
+use zapline::prelude::*;
+
+/// Builds the application on top of `db`. `main` passes the real database;
+/// tests pass `Database::sqlite_memory()`.
+pub fn app(db: Database) -> App {
+    App::new()
+        // Browser hardening headers (nosniff, no framing, referrer policy).
+        .wrap(SecurityHeaders::default())
+        // Routes, recent requests, jobs and mail at /_dev (debug builds only).
+        .dev_console()
+        .database(db)
+        // Every table at /admin (debug builds only; `zapline g auth` opens it
+        // to the accounts in ADMIN_EMAILS).
+        .admin(|admin| admin)
+        // Demo data: `zapline db seed` inserts it once; normal runs and tests
+        // skip it. Factory fills in the columns you leave out.
+        .seed(|db| async move {
+            Factory::new("todos")
+                .set("title", "Try zapline")
+                .create(&db)
+                .await?;
+            Factory::new("todos").set("done", true).create(&db).await?;
+            Ok(())
+        })
+        .views("templates")
+        // Pub/sub for live pages: see `/live/todos` in routes/todos.rs.
+        .live(Live::new())
+        // static/ at /static; asset("app.css") in templates gives a URL with a
+        // content hash that browsers may cache for a year.
+        .assets("/static", "static")
+        .plugin(Health::new().check("database", DbCheck::new()))
+        .openapi(OpenApi::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .plugin(routes::install)
+}

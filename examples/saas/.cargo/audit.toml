@@ -1,0 +1,9 @@
+# cargo audit configuration (https://github.com/rustsec/rustsec/tree/main/cargo-audit)
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071 (rsa, Marvin timing attack). The only path to `rsa`
+    # is sqlx-mysql, which sqlx lists in Cargo.lock but zapline never builds:
+    # there is no MySQL feature (`cargo tree -i rsa --all-features` prints
+    # nothing). JWT RS256 uses aws-lc, not the `rsa` crate.
+    "RUSTSEC-2023-0071",
+]

@@ -471,6 +471,32 @@ impl TestResponse {
         self
     }
 
+    /// Panic unless the body is exactly `expected`.
+    #[track_caller]
+    pub fn assert_text(&self, expected: &str) -> &Self {
+        if self.body != expected.as_bytes() {
+            panic!(
+                "expected body {expected:?} (status {})\nresponse body: {}",
+                self.status,
+                self.body_snippet()
+            );
+        }
+        self
+    }
+
+    /// Panic unless the body contains `needle`.
+    #[track_caller]
+    pub fn assert_contains(&self, needle: &str) -> &Self {
+        if !String::from_utf8_lossy(&self.body).contains(needle) {
+            panic!(
+                "expected the body to contain {needle:?} (status {})\nresponse body: {}",
+                self.status,
+                self.body_snippet()
+            );
+        }
+        self
+    }
+
     /// The body for panic messages, cut to a readable length.
     fn body_snippet(&self) -> String {
         const MAX: usize = 2048;

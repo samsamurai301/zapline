@@ -4,6 +4,10 @@
 //! how to edit `mod.rs`) and a small writing step, so conflicts and malformed
 //! markers are detected before anything is changed on disk.
 
+pub mod auth;
+pub mod db_resource;
+pub mod deploy;
+pub mod job;
 pub mod register;
 
 use std::fs;
@@ -148,16 +152,9 @@ fn plan_route_registration(project: &Project, module: &str) -> Result<ModEdit> {
 
 /// Notes for the dependencies the generated resource code relies on.
 fn missing_dependency_note(project: &Project) -> Option<String> {
+    // Models use `#[model]`, which needs no serde/schemars/validator
+    // dependency; only the generated tests need these.
     let mut cmds: Vec<&str> = Vec::new();
-    if !project.depends_on("serde") {
-        cmds.push("cargo add serde --features derive");
-    }
-    if !project.depends_on("schemars") {
-        cmds.push("cargo add schemars@1");
-    }
-    if !project.depends_on("validator") {
-        cmds.push("cargo add validator@0.21 --features derive");
-    }
     if !project.dev_depends_on("serde_json") {
         cmds.push("cargo add --dev serde_json");
     }
@@ -280,6 +277,7 @@ pub fn resource_files(
         ("pascal_plural", names.pascal_plural.as_str()),
         ("path", names.path.as_str()),
         ("human", names.human.as_str()),
+        ("a_human", names.a_human.as_str()),
         ("plural_human", names.plural_human.as_str()),
         ("crate_name", crate_name),
     ];
@@ -295,6 +293,98 @@ pub fn resource_files(
         });
     }
     Ok(files)
+}
+
+/// `zapline generate resource <name> [field:type ...]`.
+///
+/// In a project with a `migrations/` directory this generates a SQL-backed
+/// resource (see [`db_resource`]); `memory` forces the in-memory store.
+pub fn resource_with_fields(
+    dir: &Path,
+    name: &str,
+    plural: Option<&str>,
+    fields: &[String],
+    memory: bool,
+    force: bool,
+) -> Result<Report> {
+    let project = Project::discover(dir)?;
+    if !memory && project.root.join(crate::db::MIGRATIONS_DIR).is_dir() {
+        return sql_resource(&project, name, plural, fields, force);
+    }
+    if !fields.is_empty() {
+        bail!(
+            "fields like `{}` need a database: this project has no migrations/ directory\n\
+             hint: create one with `zapline db new init` (and enable zapline's `sqlite` or `postgres` feature), \
+             or start from `zapline new <name> --template fullstack`",
+            fields[0]
+        );
+    }
+    resource(dir, name, plural, force)
+}
+
+fn sql_resource(
+    project: &Project,
+    name: &str,
+    plural: Option<&str>,
+    fields: &[String],
+    force: bool,
+) -> Result<Report> {
+    let names = ResourceNames::parse(name, plural)?;
+    let fields = db_resource::parse_fields(fields)?;
+    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
+    let dialect = if manifest.contains("\"postgres\"") && !manifest.contains("\"sqlite\"") {
+        db_resource::Dialect::Postgres
+    } else {
+        db_resource::Dialect::Sqlite
+    };
+    let html = project.root.join("templates/base.html").is_file();
+    let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
+    let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");
+    let krate = crate_name_of(project);
+    let plan = db_resource::Plan {
+        names: &names,
+        fields: &fields,
+        dialect,
+        html,
+        test_crate: testable.then_some(krate.as_str()),
+        // Regenerating (--force) rewrites the existing migration instead of adding a second one.
+        migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))
+        {
+            Some(name) => name,
+            None => {
+                crate::db::new_migration_name(&project.root, &format!("create_{}", names.plural))?
+            }
+        },
+    };
+    let files = db_resource::files(&plan);
+
+    let mut report = Report::default();
+    let edit = plan_route_registration(project, &names.plural)?;
+    if apply(project, files, edit, force, &mut report)? {
+        report.notes.push(new_routes_module_note(project));
+    }
+    if !testable {
+        report.notes.push(
+            "no test was generated: tests build the app with `app(Database::sqlite_memory())`, \
+             so src/lib.rs needs `pub fn app(db: Database) -> App` (the fullstack template has it)"
+                .to_string(),
+        );
+    }
+    if !project.depends_on("sqlx") {
+        report
+            .notes
+            .push("the generated code derives sqlx::FromRow; run:\n\x20 cargo add sqlx@0.8 --no-default-features --features derive".to_string());
+    }
+    report.notes.push(format!(
+        "the table is created by the new migration when the app starts (or run `zapline db migrate`); \
+         open {} to try it",
+        if html { names.path.clone() } else { "/docs".to_string() }
+    ));
+    warn_if_not_zapline(project, &mut report);
+    if let Some(note) = missing_dependency_note(project) {
+        report.notes.push(note);
+    }
+    Ok(report)
 }
 
 /// `zapline generate resource <name>`: model, CRUD handlers, in-memory store and tests.
@@ -321,6 +411,16 @@ pub fn resource(dir: &Path, name: &str, plural: Option<&str>, force: bool) -> Re
 }
 
 /// The crate name tests import: the library name, or the package name as a fallback.
+/// The file name of an existing migration ending in `suffix`.
+fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
+    let dir = project.root.join(crate::db::MIGRATIONS_DIR);
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.ends_with(suffix))
+}
+
 fn crate_name_of(project: &Project) -> String {
     project
         .lib_name

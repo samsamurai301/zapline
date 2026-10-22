@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Choose a new password · saas{% endblock %}
+{% block content %}
+<h1>Choose a new password</h1>
+
+<form hx-post="/reset">
+  {% block form %}
+  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
+  <input type="hidden" name="token" value="{{ token }}">
+  <label>New password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password" autofocus></label>
+  <button>Save and log in</button>
+  {% endblock %}
+</form>
+
+<p><small>Link expired? <a href="/forgot">Get a new one</a></small></p>
+{% endblock %}

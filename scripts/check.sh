@@ -22,7 +22,7 @@ cargo test -p zapline-cli
 
 step "feature matrix"
 cargo check -p zapline --no-default-features
-for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies; do
+for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password mail storage s3 cache oauth i18n redis otlp; do
   echo "  - $f"
   cargo check -q -p zapline --no-default-features --features "$f"
 done
@@ -30,6 +30,8 @@ cargo check -p zapline
 
 step "examples"
 cargo build -p zapline-examples --examples
+# The flagship app is its own project (own lockfile, sqlite only).
+(cd examples/saas && CARGO_TARGET_DIR="$PWD/../../target/saas" cargo test -q)
 
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps

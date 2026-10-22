@@ -172,6 +172,9 @@ pub(crate) struct InputMark {
 #[derive(Clone, Debug, Default)]
 pub struct OperationDoc {
     pub(crate) handler: Option<&'static str>,
+    /// `module_path!()` of a macro route's handler, to tell apart
+    /// same-named handlers in different modules.
+    pub(crate) module: Option<&'static str>,
     pub(crate) summary: Option<Text>,
     pub(crate) description: Option<Text>,
     pub(crate) tags: Vec<Text>,

@@ -116,10 +116,7 @@ pub fn export(project: &Project, bin: Option<&str>, target: &Path) -> Result<()>
             RUN_TIMEOUT,
         )?;
         if !captured.status.success() {
-            bail!(
-                "the app exited with {} before exporting the spec",
-                captured.status
-            );
+            return Err(captured.failure("before exporting the spec"));
         }
         let text = std::fs::read_to_string(&tmp).context(
             "the app exited without writing the OpenAPI document\n\

@@ -1,0 +1,29 @@
+//! The `@@name@@` job runs and succeeds.
+
+use std::time::Duration;
+
+use zapline::db::Database;
+use zapline::jobs::{JobStats, Jobs};
+
+use @@crate_name@@::app;
+use @@crate_name@@::jobs::@@name@@::@@Pascal@@;
+
+#[tokio::test]
+async fn @@name@@_runs() {
+    let client = app(Database::sqlite_memory()).test();
+    let jobs: Jobs = client.resources().await.require().unwrap();
+    jobs.enqueue(@@Pascal@@ {}).await.unwrap();
+
+    // Run it here (unless a background worker got to it first), then wait
+    // until the queue is empty: a failure would show up as a retry.
+    for _ in 0..500 {
+        jobs.run_pending().await.unwrap();
+        let stats = jobs.stats().await.unwrap();
+        assert_eq!(stats.failed, 0);
+        if stats == JobStats::default() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the job did not finish: {:?}", jobs.stats().await.unwrap());
+}

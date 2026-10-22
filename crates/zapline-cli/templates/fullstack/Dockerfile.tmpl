@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1
+
+# ---- build ----
+FROM rust:1-slim-bookworm AS builder
+WORKDIR /app
+
+# Compile dependencies first so this layer is cached until Cargo.toml changes.
+COPY Cargo.toml Cargo.lock* ./
+RUN mkdir src \
+    && echo 'fn main() {}' > src/main.rs \
+    && touch src/lib.rs \
+    && cargo build --release \
+    && rm -rf src
+
+COPY src ./src
+# Cargo decides what to rebuild by mtime; make sure the real sources are newer.
+RUN touch src/main.rs src/lib.rs && cargo build --release
+
+# ---- runtime ----
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin app
+
+WORKDIR /home/app
+COPY --from=builder /app/target/release/@@name@@ /usr/local/bin/app
+# Read at runtime: templates, static files and SQL migrations.
+COPY templates ./templates
+COPY static ./static
+COPY migrations ./migrations
+
+USER app
+# Hosts that pick the port (Railway, Render, ...) override PORT.
+ENV PORT=8080
+# Mount a volume at /home/app/data to keep the SQLite file, or set
+# DATABASE_URL to a Postgres URL (build with zapline's `postgres` feature).
+ENV DATABASE_URL=sqlite:///home/app/data/app.db?mode=rwc
+RUN mkdir -p /home/app/data
+EXPOSE 8080
+ENTRYPOINT ["app"]

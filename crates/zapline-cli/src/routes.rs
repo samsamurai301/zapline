@@ -6,7 +6,7 @@
 use std::ffi::OsStr;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 use crate::build;
@@ -104,8 +104,9 @@ pub fn render_table(entries: &[RouteEntry], color: bool) -> String {
     out
 }
 
-/// Runs the app and prints its routes.
-pub fn run(project: &Project, bin: Option<&str>, json: bool) -> Result<()> {
+/// Runs the app and returns its route table: the parsed entries and the
+/// app's own JSON line.
+pub fn capture(project: &Project, bin: Option<&str>) -> Result<(Vec<RouteEntry>, String)> {
     let captured = build::run_app(
         project,
         bin,
@@ -113,18 +114,22 @@ pub fn run(project: &Project, bin: Option<&str>, json: bool) -> Result<()> {
         RUN_TIMEOUT,
     )?;
     if !captured.status.success() {
-        bail!(
-            "the app exited with {} before printing its routes",
-            captured.status
-        );
+        return Err(captured.failure("before printing its routes"));
     }
     let entries = parse_routes_json(&captured.stdout).context(
         "the app did not print a route table\n\
          hint: `main` must call `App::run`, which honours ZAPLINE_PRINT_ROUTES=1",
     )?;
+    let raw = raw_json_line(&captured.stdout).unwrap_or("[]").to_string();
+    Ok((entries, raw))
+}
+
+/// Runs the app and prints its routes.
+pub fn run(project: &Project, bin: Option<&str>, json: bool) -> Result<()> {
+    let (entries, raw) = capture(project, bin)?;
     if json {
         // Pass the app's own JSON through untouched.
-        println!("{}", raw_json_line(&captured.stdout).unwrap_or("[]"));
+        println!("{raw}");
     } else {
         print!("{}", render_table(&entries, ui::stdout_color()));
     }

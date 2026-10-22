@@ -1,15 +1,21 @@
 //! `zapline dev`: rebuild and restart the app whenever source files change.
 //!
 //! Flow: build once, start the binary, then watch `src/`, `config/`,
-//! `templates/`, `Cargo.toml` and `build.rs`. After a burst of changes settles
+//! `migrations/`, `Cargo.toml` and `build.rs`. After a burst of changes settles
 //! (debounce), rebuild; if the build succeeds, stop the old process gracefully
 //! (SIGTERM, then SIGKILL after a grace period) and start the new one. A failed
 //! build leaves the previous version running. The app's output is streamed
 //! straight through.
+//!
+//! `templates/` is deliberately not watched: debug builds re-read templates
+//! on every render, so editing one needs a browser refresh, not a restart.
+//!
+//! A project with `styles/app.css` (Tailwind) also gets `tailwindcss --watch`
+//! running alongside, rebuilding `static/app.css` as templates change.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ChildStdin, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -23,7 +29,7 @@ use crate::project::Project;
 use crate::ui;
 
 /// Directories watched recursively (when they exist).
-pub const WATCHED_DIRS: &[&str] = &["src", "config", "templates"];
+pub const WATCHED_DIRS: &[&str] = &["src", "config", "migrations"];
 /// Files in the project root that trigger a rebuild.
 pub const WATCHED_ROOT_FILES: &[&str] = &["Cargo.toml", "build.rs"];
 /// Directory names that are never interesting, wherever they appear.
@@ -45,6 +51,8 @@ pub struct DevOptions {
     pub debounce: Duration,
     /// How long the old process gets to exit after SIGTERM before it is killed.
     pub grace: Duration,
+    /// Regenerate this TypeScript client after every successful build.
+    pub client: Option<PathBuf>,
 }
 
 impl Default for DevOptions {
@@ -55,6 +63,7 @@ impl Default for DevOptions {
             app_args: Vec::new(),
             debounce: Duration::from_millis(300),
             grace: Duration::from_secs(5),
+            client: None,
         }
     }
 }
@@ -256,6 +265,8 @@ struct Dev<'a> {
     app: Option<Child>,
     debounce: Debouncer,
     shutdown: Arc<AtomicBool>,
+    /// `tailwindcss --watch`, which exits when its stdin closes.
+    css: Option<(Child, ChildStdin)>,
 }
 
 impl Dev<'_> {
@@ -296,6 +307,14 @@ impl Dev<'_> {
                     ui::status_info("Changed", "files changed during the build, rebuilding");
                     return;
                 }
+                if let Some(target) = &self.opts.client {
+                    let shown = target.strip_prefix(&self.project.root).unwrap_or(target);
+                    match crate::client::regenerate(self.project, &exe, target) {
+                        Ok(true) => ui::status("Client", format!("updated {}", shown.display())),
+                        Ok(false) => {}
+                        Err(e) => ui::status_warn("Client", format!("not updated: {e:#}")),
+                    }
+                }
                 self.restart(&exe);
             }
         }
@@ -309,11 +328,15 @@ impl Dev<'_> {
             }
         }
         let shown = exe.strip_prefix(&self.project.root).unwrap_or(exe);
-        match Command::new(exe)
-            .args(&self.opts.app_args)
-            .current_dir(&self.project.root)
-            .spawn()
-        {
+        let mut cmd = Command::new(exe);
+        cmd.args(&self.opts.app_args)
+            .current_dir(&self.project.root);
+        // Dev mode: 500 responses carry the real error instead of a generic
+        // message, so you (or your AI assistant) see what broke.
+        if std::env::var_os("ZAPLINE_DEV").is_none() {
+            cmd.env("ZAPLINE_DEV", "1");
+        }
+        match cmd.spawn() {
             Ok(child) => {
                 ui::status(
                     "Running",
@@ -374,6 +397,10 @@ impl Dev<'_> {
             ui::status_info("Stopping", format!("the app (pid {})", child.id()));
             stop(&mut child, self.opts.grace);
         }
+        if let Some((mut child, stdin)) = self.css.take() {
+            drop(stdin);
+            stop(&mut child, Duration::from_secs(1));
+        }
         ui::status("Stopped", "dev server");
     }
 }
@@ -424,7 +451,20 @@ pub fn run(project: &Project, opts: &DevOptions) -> Result<()> {
         app: None,
         debounce: Debouncer::new(opts.debounce),
         shutdown,
+        css: None,
     };
+    if crate::tailwind::is_used(&project.root) {
+        match crate::tailwind::watch(&project.root) {
+            Ok(css) => {
+                ui::status_info(
+                    "Watching",
+                    format!("{} with Tailwind", crate::tailwind::INPUT),
+                );
+                dev.css = Some(css);
+            }
+            Err(e) => ui::status_warn("Tailwind", format!("not running: {e:#}")),
+        }
+    }
     dev.rebuild_and_restart(&rx);
 
     while !dev.stopping() {
@@ -463,7 +503,7 @@ mod tests {
             "src/main.rs",
             "src/routes/users.rs",
             "config/default.toml",
-            "templates/index.html",
+            "migrations/20260101000000_create_todos.sql",
             "Cargo.toml",
             "build.rs",
         ] {
@@ -479,6 +519,7 @@ mod tests {
             ".git/index",
             "src/.git/HEAD",
             "README.md",
+            "templates/index.html",
             "Cargo.lock",
             "tests/api.rs",
             "node_modules/x/y.js",

@@ -1,0 +1,27 @@
+-- Accounts for `src/routes/auth.rs`. Emails are stored lowercased.
+CREATE TABLE users (
+    id BIGSERIAL PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    -- Bumped when the password changes, which ends every other session.
+    -- Set once the owner proves the address: a used reset link, or a
+    -- GitHub/Google login with that verified email. Admin access needs it.
+    email_verified BOOLEAN NOT NULL DEFAULT FALSE,
+    session_version BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Password-reset links: only a SHA-256 of each token is stored.
+CREATE TABLE password_resets (
+    token_hash TEXT PRIMARY KEY,
+    user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    expires_at BIGINT NOT NULL
+);
+
+-- GitHub/Google identities linked to accounts.
+CREATE TABLE oauth_accounts (
+    provider TEXT NOT NULL,
+    provider_id TEXT NOT NULL,
+    user_id BIGINT NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+    PRIMARY KEY (provider, provider_id)
+);

@@ -1,6 +1,6 @@
 # @@name@@
 
-A REST API built with [zapline](https://github.com/your-org/zapline): typed
+A REST API built with [zapline](https://github.com/samsamurai301/zapline): typed
 routes, request validation, and OpenAPI docs generated from your code.
 
 ```sh
@@ -12,6 +12,7 @@ cargo test           # in-process tests, no sockets
 Then open:
 
 - <http://localhost:8080/docs>: interactive API docs (Swagger UI)
+- <http://localhost:8080/_dev>: the dev console (routes and recent requests; debug builds only)
 - <http://localhost:8080/openapi.json>: the OpenAPI 3.1 document
 - <http://localhost:8080/health>: liveness probe
 
@@ -26,7 +27,7 @@ curl -X POST localhost:8080/users \
 | Path | What it is |
 |---|---|
 | `src/lib.rs` | `app()`: builds the `App` (OpenAPI docs + routes) |
-| `src/main.rs` | Serves `app()`; set `ADDR` to change the bind address (see `.env.example`) |
+| `src/main.rs` | Serves `app()`; set `ADDR` (or just `PORT`) to change the bind address (see `.env.example`) |
 | `src/models.rs` | Request and response types with validation rules |
 | `src/routes/` | One module per resource; each exposes `mount(app)` |
 | `tests/` | Integration tests using `app().test()` |

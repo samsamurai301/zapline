@@ -26,7 +26,7 @@ async fn create_user(Valid(Json(user)): Valid<Json<NewUser>>) -> StatusCode {
 Requirements:
 
 - Cargo feature `validate` (on by default, implies `json`).
-- The derive expands to paths in the `validator` crate, so add it to your `Cargo.toml`:
+- `#[model]` derives `Validate` (plus serde and `JsonSchema`) without adding any crate. The plain derive expands to paths in the `validator` crate, so add it to your `Cargo.toml`:
 
   ```toml
   validator = { version = "0.21", features = ["derive"] }

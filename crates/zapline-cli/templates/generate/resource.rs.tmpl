@@ -6,30 +6,28 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use serde::{Deserialize, Serialize};
-use zapline::openapi::JsonSchema;
 use zapline::prelude::*;
-use zapline::validate::{Valid, Validate};
 
 /// Largest page `GET @@path@@` returns.
 const MAX_PAGE: usize = 200;
 
 /// A stored @@human@@.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[model]
+#[derive(PartialEq)]
 pub struct @@pascal@@ {
     pub id: u64,
     pub name: String,
 }
 
-/// Payload for creating or replacing a @@human@@. Add your own fields here.
-#[derive(Debug, Clone, Deserialize, JsonSchema, Validate)]
+/// Payload for creating or replacing @@a_human@@. Add your own fields here.
+#[model]
 pub struct New@@pascal@@ {
     #[validate(length(min = 1, max = 200))]
     pub name: String,
 }
 
 /// Query parameters for `GET @@path@@`.
-#[derive(Debug, Deserialize, JsonSchema)]
+#[model]
 pub struct List@@pascal_plural@@Query {
     /// Maximum number of items to return (default 50, at most 200).
     pub limit: Option<usize>,
@@ -110,7 +108,7 @@ async fn get_@@singular@@(
     store.get(id).map(Json).ok_or_else(Error::not_found)
 }
 
-/// Create a @@human@@.
+/// Create @@a_human@@.
 #[post("@@path@@")]
 async fn create_@@singular@@(
     State(store): State<@@pascal@@Store>,
@@ -119,7 +117,7 @@ async fn create_@@singular@@(
     (StatusCode::CREATED, Json(store.create(new)))
 }
 
-/// Replace a @@human@@.
+/// Replace @@a_human@@.
 #[put("@@path@@/{id}")]
 async fn replace_@@singular@@(
     State(store): State<@@pascal@@Store>,
@@ -130,7 +128,7 @@ async fn replace_@@singular@@(
     Ok(Json(item))
 }
 
-/// Delete a @@human@@.
+/// Delete @@a_human@@.
 #[delete("@@path@@/{id}")]
 async fn delete_@@singular@@(
     State(store): State<@@pascal@@Store>,
