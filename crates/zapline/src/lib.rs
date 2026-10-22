@@ -61,6 +61,7 @@
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
 //! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs; [`admin`]: an admin panel for every table |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
+//! | Translations | [`i18n`]: messages per language, `Locale` extractor, plurals, `t()` in templates |
 //! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
 //! | Files | [`storage`]: local, memory and S3 storage with expiring links |
 //! | Realtime and content | [`live`] (pub/sub to browsers), [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
@@ -92,6 +93,7 @@
 //! | `password` | | [`auth::password`]: Argon2id password hashing |
 //! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
 //! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
+//! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
@@ -161,6 +163,8 @@ pub mod db;
 pub mod di;
 #[cfg(feature = "_http-client")]
 mod http_client;
+#[cfg(feature = "i18n")]
+pub mod i18n;
 #[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
 pub mod jobs;
 #[cfg(feature = "mail")]

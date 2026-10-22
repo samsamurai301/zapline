@@ -327,6 +327,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
+| Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
@@ -3018,6 +3019,102 @@ The list shows 50 rows per page, newest first (by primary key). Click a column h
 In the forms, an empty field means `NULL` when the column allows it, and the column's default when creating a row. Numbers are checked before anything is written. If the database refuses a change (a unique email taken, a missing required value), the form comes back with the database's message and what you typed.
 
 With both `postgres` and `sqlite` enabled, `admin` uses Postgres; use `admin_in::<sqlx::Sqlite>(..)` for SQLite.
+
+
+---
+
+<!-- i18n.md -->
+
+# Translations (i18n)
+
+With the `i18n` feature, an app can speak several languages. Put one TOML file per language in `locales/`, register them, and take a `Locale` in handlers:
+
+```toml
+# locales/en.toml
+hello = "Hello, {name}!"
+
+[inbox]
+count.zero = "No messages"
+count.one = "{count} message"
+count.other = "{count} messages"
+```
+
+```toml
+# locales/fr.toml
+hello = "Bonjour, {name} !"
+inbox.count.one = "{count} message"
+inbox.count.other = "{count} messages"
+```
+
+```rust
+use zapline::i18n::{I18n, Locale};
+
+#[get("/hello/{name}")]
+async fn hello(t: Locale, name: Path<String>) -> String {
+    t.t_with("hello", &[("name", &name.0)])
+}
+
+App::new()
+    .i18n(I18n::load("locales")?)
+    .mount(hello)
+```
+
+The file name is the language tag (`en`, `fr`, `pt-BR`), and nested tables become dotted keys (`inbox.count.one`). `I18n::messages(lang, toml)` adds a language from a string instead, for example one embedded with `include_str!`.
+
+## Which language
+
+For each request, `Locale` is the first available language from:
+
+1. `?lang=fr` in the URL. The app then remembers it in a `lang` cookie (one year, `SameSite=Lax`), so a language switcher is just links: `<a href="?lang=fr">Français</a>`.
+2. The `lang` cookie.
+3. The `Accept-Language` header, by its weights.
+4. The default: `en` if there is an `en.toml`, otherwise the first file alphabetically, or the one set with `.default_lang("de")`.
+
+Tags match exactly (ignoring case) or by their main part: `pt-BR` uses `pt.toml` when there is no `pt-BR.toml`, and `de-AT` uses `de.toml`.
+
+## Messages
+
+| Call | Result |
+|---|---|
+| `t.t("key")` | The message, as written |
+| `t.t_with("hello", &[("name", &user.name)])` | `{name}` filled in; any `Display` value works. `{{` is a literal `{` |
+| `t.plural("inbox.count", n, &[])` | The plural form for `n`, with `{count}` filled in |
+| `t.lang()` | The language tag, for `<html lang>` or formatting |
+
+A message missing in the visitor's language falls back to the default language, then to the key itself, so a gap shows on the page rather than failing it. `I18n::missing()` lists the gaps, which makes a good test:
+
+```rust
+#[test]
+fn every_language_is_complete() {
+    let i18n = I18n::load("locales").unwrap();
+    assert_eq!(i18n.missing(), []);
+}
+```
+
+The [dev console](dev-console.md) shows each language with its message count and missing keys.
+
+**Plurals.** `plural` picks `key.one`, `key.few`, `key.many`, `key.other` and so on by the language's rules (CLDR rules for integers, built in for English, French, Portuguese, Spanish, German, Russian, Ukrainian, Polish, Czech, Arabic, Japanese, Chinese, Korean and the many languages that follow one of their patterns). A `key.zero` message, when the language has one, is used for 0 in any language. All forms come from one language: if the visitor's language lacks the key, the default language's forms and rules are used.
+
+## In templates
+
+With the `views` feature, pass the `Locale` into the context and call it:
+
+```rust
+#[get("/")]
+async fn index(views: Views, t: Locale) -> Result<Html<String>> {
+    views.render("index.html", context! { t, unread: 3 })
+}
+```
+
+```jinja
+<html lang="{{ t.lang }}">
+<h1>{{ t("hello", name=user.name) }}</h1>
+<p>{{ t.plural("inbox.count", unread) }}</p>
+```
+
+Translated text is escaped like any other value.
+
+If you cache pages with [`ResponseCache`](caching.md), the language is part of the page: cache only pages that don't depend on it, or vary the cache by language.
 
 
 ---
@@ -6083,6 +6180,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
