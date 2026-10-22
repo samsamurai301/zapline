@@ -158,6 +158,13 @@ fn tool_list() -> Value {
             }}
         },
         {
+            "name": "generate_auth",
+            "description": "Add accounts to a project with a database: users migration, sign-up/log-in/log-out (JSON API, and htmx pages if templates exist), DB-backed sessions, a CurrentUser extractor, tests.",
+            "inputSchema": { "type": "object", "properties": {
+                "force": { "type": "boolean" }
+            }}
+        },
+        {
             "name": "db_new_migration",
             "description": "Create migrations/<timestamp>_<name>.sql, optionally with its SQL.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
@@ -282,6 +289,13 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             Ok(report_text(&generate::middleware(
                 here,
                 name,
+                flag("force"),
+            )?))
+        }
+        "generate_auth" => {
+            let project = Project::discover(here)?;
+            Ok(report_text(&generate::auth::generate(
+                &project,
                 flag("force"),
             )?))
         }

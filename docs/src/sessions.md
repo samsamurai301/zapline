@@ -133,7 +133,21 @@ How it behaves:
 
 `MemoryStore` keeps sessions in the process. It is meant for development, tests and single-instance apps: sessions vanish on restart and aren't shared between replicas. It holds at most 100,000 sessions by default (`MemoryStore::with_capacity(n)` changes that), purging expired ones as new ones arrive and evicting the sessions closest to expiry when full.
 
-For several instances, implement `SessionStore` over Redis, a database or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
+With a database ([Databases](database.md)), keep sessions there: they survive restarts and are shared by every instance. `App::database_sessions` creates the `zapline_sessions` table at startup and installs the session layer (register the database first):
+
+```rust
+use zapline::cookies::key_from_env;
+use zapline::db::Database;
+
+App::new()
+    .database(Database::from_env())
+    .cookie_key(key_from_env("SESSION_SECRET")?)
+    .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
+```
+
+`key_from_env(var)` derives the cookie key from a secret of 32 or more bytes. When the variable is unset, debug builds use a fixed development key (so sessions survive `zapline dev` restarts) and release builds fail. `key_from_secret(s)` does the same derivation from a string you load yourself.
+
+For anything else, implement `SessionStore` over Redis or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
 
 ```rust
 use std::collections::HashMap;

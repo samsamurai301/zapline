@@ -61,7 +61,7 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite; do
+          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password; do
             echo "::group::$f"
             cargo check -p zapline --no-default-features --features "$f"
             echo "::endgroup::"
@@ -139,7 +139,8 @@ jobs:
             "$ROOT/target/debug/zapline" new "demo-$t" --template "$t" --path "$WORK" --zapline-path "$ROOT/crates/zapline" --no-git
             if [ "$t" = fullstack ]; then
               # The database-backed generator must produce code that builds and passes its tests.
-              (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool)
+              (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool \
+                && "$ROOT/target/debug/zapline" g auth)
             fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)
             if [ "$t" != minimal ] && [ "$RUNNER_OS" = Linux ]; then

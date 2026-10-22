@@ -283,6 +283,22 @@ Examples:
         /// Middleware name, e.g. `audit`
         name: String,
     },
+
+    /// Accounts: sign-up, log-in, log-out, sessions and a CurrentUser extractor
+    #[command(after_long_help = "\
+Needs a project with a database (migrations/), like the fullstack template. Generates:
+  migrations/<ts>_create_users.sql   users table (email, Argon2id password hash)
+  src/routes/auth.rs                 JSON API under /api/auth, CurrentUser extractor,
+                                     sessions stored in the database
+  templates/auth/*.html              sign-up and log-in pages (when templates/base.html exists)
+  tests/auth.rs                      end-to-end tests
+and enables zapline's `cookies` and `password` features in Cargo.toml.
+
+Protect a handler by taking `CurrentUser`. Set SESSION_SECRET (32+ random bytes) in production.
+
+Examples:
+  zapline g auth")]
+    Auth,
 }
 
 /// Arguments of `zapline dev`.

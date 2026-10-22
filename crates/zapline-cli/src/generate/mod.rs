@@ -4,6 +4,7 @@
 //! how to edit `mod.rs`) and a small writing step, so conflicts and malformed
 //! markers are detected before anything is changed on disk.
 
+pub mod auth;
 pub mod db_resource;
 pub mod register;
 
@@ -354,7 +355,12 @@ fn sql_resource(
         dialect,
         html,
         test_crate: testable.then_some(krate.as_str()),
-        migration_name: crate::db::migration_file_name(&format!("create_{}", names.plural), now)?,
+        // Regenerating (--force) rewrites the existing migration instead of adding a second one.
+        migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))
+        {
+            Some(name) => name,
+            None => crate::db::migration_file_name(&format!("create_{}", names.plural), now)?,
+        },
     };
     let files = db_resource::files(&plan);
 
@@ -411,6 +417,16 @@ pub fn resource(dir: &Path, name: &str, plural: Option<&str>, force: bool) -> Re
 }
 
 /// The crate name tests import: the library name, or the package name as a fallback.
+/// The file name of an existing migration ending in `suffix`.
+fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
+    let dir = project.root.join(crate::db::MIGRATIONS_DIR);
+    fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.ends_with(suffix))
+}
+
 fn crate_name_of(project: &Project) -> String {
     project
         .lib_name

@@ -14,6 +14,7 @@
 //!   enforced by [`Authenticate`] and [`Guard`]; `403` with code `forbidden`.
 //! - **CSRF** (feature `cookies`): the double-submit [`Csrf`] middleware and
 //!   the [`CsrfToken`] extractor.
+//! - **Passwords** (feature `password`): Argon2id hashing in [`password`].
 //!
 //! ```no_run
 //! # #[cfg(feature = "jwt")] {
@@ -51,6 +52,8 @@ mod csrf;
 mod guard;
 #[cfg(feature = "jwt")]
 pub mod jwt;
+#[cfg(feature = "password")]
+pub mod password;
 
 pub use api_key::{ApiKey, ApiKeyConfig};
 pub use authenticate::{Authenticate, Authenticator, CurrentUser};

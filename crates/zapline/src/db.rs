@@ -414,3 +414,223 @@ pub(crate) fn from_sqlx(err: sqlx::Error) -> Error {
 fn internal(err: sqlx::Error) -> Error {
     Error::internal("database error").with_source(err)
 }
+
+// ---------------------------------------------------------------------------
+// Sessions in the database
+
+#[cfg(feature = "cookies")]
+pub use self::sessions::{SessionBackend, SqlSessionStore};
+
+#[cfg(feature = "cookies")]
+mod sessions {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, OnceLock};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use serde_json::{Map, Value};
+    use sqlx::Pool;
+
+    use super::DefaultDb;
+    use crate::session::{SessionLayer, SessionRecord, SessionStore};
+    use crate::{App, Error, Resources, Result};
+
+    /// Created at startup if missing; works on SQLite and Postgres.
+    const CREATE_TABLE: &str = "CREATE TABLE IF NOT EXISTS zapline_sessions (\
+        id TEXT PRIMARY KEY, data TEXT NOT NULL, expires_at BIGINT NOT NULL)";
+
+    /// Expired rows are swept on every this-many saves.
+    const SWEEP_EVERY: u32 = 256;
+
+    /// A [`SessionStore`] in the app's database (table `zapline_sessions`,
+    /// created at startup), so sessions survive restarts and are shared by
+    /// every instance. Install it with [`App::database_sessions`].
+    pub struct SqlSessionStore<DB: sqlx::Database = DefaultDb> {
+        pool: Arc<OnceLock<Pool<DB>>>,
+        saves: Arc<AtomicU32>,
+    }
+
+    impl<DB: sqlx::Database> Clone for SqlSessionStore<DB> {
+        fn clone(&self) -> Self {
+            SqlSessionStore {
+                pool: Arc::clone(&self.pool),
+                saves: Arc::clone(&self.saves),
+            }
+        }
+    }
+
+    impl<DB: sqlx::Database> std::fmt::Debug for SqlSessionStore<DB> {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.debug_struct("SqlSessionStore")
+                .field("connected", &self.pool.get().is_some())
+                .finish()
+        }
+    }
+
+    impl<DB: sqlx::Database> SqlSessionStore<DB> {
+        /// A store on `pool` (normally [`App::database_sessions`] does this).
+        pub fn new(pool: Pool<DB>) -> Self {
+            let store = Self::unbound();
+            let _ = store.pool.set(pool);
+            store
+        }
+
+        fn unbound() -> Self {
+            SqlSessionStore {
+                pool: Arc::new(OnceLock::new()),
+                saves: Arc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn pool(&self) -> Result<&Pool<DB>> {
+            self.pool.get().ok_or_else(|| {
+                Error::internal("the session store is not connected: the app has not started")
+            })
+        }
+    }
+
+    fn unix(t: SystemTime) -> i64 {
+        t.duration_since(UNIX_EPOCH)
+            .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+    }
+
+    fn record(data: &str, expires_at: i64) -> Result<SessionRecord> {
+        let data: Map<String, Value> = serde_json::from_str(data)
+            .map_err(|e| Error::internal("corrupt session data").with_source(e))?;
+        let secs = u64::try_from(expires_at).unwrap_or(0);
+        Ok(SessionRecord {
+            data,
+            expires_at: UNIX_EPOCH + Duration::from_secs(secs),
+        })
+    }
+
+    mod sealed {
+        pub trait Sealed {}
+    }
+
+    /// A database that can hold sessions: SQLite and Postgres.
+    pub trait SessionBackend: sqlx::Database + sealed::Sealed
+    where
+        SqlSessionStore<Self>: SessionStore,
+    {
+        /// Create the sessions table if it doesn't exist.
+        #[doc(hidden)]
+        fn create_table(pool: &Pool<Self>) -> impl std::future::Future<Output = Result<()>> + Send;
+    }
+
+    macro_rules! store_for {
+        ($db:ty) => {
+            impl sealed::Sealed for $db {}
+
+            impl SessionBackend for $db {
+                async fn create_table(pool: &Pool<Self>) -> Result<()> {
+                    sqlx::query(CREATE_TABLE).execute(pool).await?;
+                    Ok(())
+                }
+            }
+
+            impl SessionStore for SqlSessionStore<$db> {
+                async fn load(&self, id: &str) -> Result<Option<SessionRecord>> {
+                    let row: Option<(String, i64)> = sqlx::query_as(
+                        "SELECT data, expires_at FROM zapline_sessions WHERE id = $1 AND expires_at > $2",
+                    )
+                    .bind(id)
+                    .bind(unix(SystemTime::now()))
+                    .fetch_optional(self.pool()?)
+                    .await?;
+                    row.map(|(data, exp)| record(&data, exp)).transpose()
+                }
+
+                async fn save(&self, id: &str, record: &SessionRecord) -> Result<()> {
+                    let pool = self.pool()?;
+                    let data = serde_json::to_string(&record.data)
+                        .map_err(|e| Error::internal("cannot encode the session").with_source(e))?;
+                    sqlx::query(
+                        "INSERT INTO zapline_sessions (id, data, expires_at) VALUES ($1, $2, $3) \
+                         ON CONFLICT (id) DO UPDATE SET data = excluded.data, expires_at = excluded.expires_at",
+                    )
+                    .bind(id)
+                    .bind(data)
+                    .bind(unix(record.expires_at))
+                    .execute(pool)
+                    .await?;
+                    if self.saves.fetch_add(1, Ordering::Relaxed) % SWEEP_EVERY == SWEEP_EVERY - 1 {
+                        sqlx::query("DELETE FROM zapline_sessions WHERE expires_at <= $1")
+                            .bind(unix(SystemTime::now()))
+                            .execute(pool)
+                            .await?;
+                    }
+                    Ok(())
+                }
+
+                async fn delete(&self, id: &str) -> Result<()> {
+                    sqlx::query("DELETE FROM zapline_sessions WHERE id = $1")
+                        .bind(id)
+                        .execute(self.pool()?)
+                        .await?;
+                    Ok(())
+                }
+            }
+        };
+    }
+
+    #[cfg(feature = "sqlite")]
+    store_for!(sqlx::Sqlite);
+    #[cfg(feature = "postgres")]
+    store_for!(sqlx::Postgres);
+
+    impl App {
+        /// Server-side sessions stored in the database registered with
+        /// [`App::database`] (call that first): table `zapline_sessions`,
+        /// created at startup. `configure` adjusts the [`SessionLayer`]
+        /// (cookie name, lifetime, `secure`...). Handlers take
+        /// [`Session`](crate::session::Session) as usual.
+        ///
+        /// A cookie key must be registered too, e.g.
+        /// [`key_from_env`](crate::cookies::key_from_env).
+        ///
+        /// ```no_run
+        /// # #[cfg(feature = "sqlite")] {
+        /// use zapline::cookies::key_from_env;
+        /// use zapline::db::Database;
+        /// use zapline::prelude::*;
+        ///
+        /// # fn main() -> zapline::Result<()> {
+        /// let app = App::new()
+        ///     .database(Database::from_env())
+        ///     .cookie_key(key_from_env("SESSION_SECRET")?)
+        ///     .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)));
+        /// # Ok(()) }
+        /// # }
+        /// ```
+        pub fn database_sessions(
+            self,
+            configure: impl FnOnce(SessionLayer) -> SessionLayer,
+        ) -> Self {
+            self.database_sessions_in::<DefaultDb>(configure)
+        }
+
+        /// [`database_sessions`](Self::database_sessions) on a database
+        /// other than [`DefaultDb`] (for apps with both backends enabled).
+        pub fn database_sessions_in<DB: SessionBackend>(
+            self,
+            configure: impl FnOnce(SessionLayer) -> SessionLayer,
+        ) -> Self
+        where
+            SqlSessionStore<DB>: SessionStore,
+        {
+            let store = SqlSessionStore::<DB>::unbound();
+            let bind = store.clone();
+            self.on_startup(move |res: Resources| async move {
+                let pool: Pool<DB> = res.get().ok_or_else(|| {
+                    Error::internal(
+                        "database_sessions needs a database: call `.database(..)` before `.database_sessions(..)`",
+                    )
+                })?;
+                DB::create_table(&pool).await?;
+                let _ = bind.pool.set(pool);
+                Ok(())
+            })
+            .wrap(configure(SessionLayer::new(store)))
+        }
+    }
+}

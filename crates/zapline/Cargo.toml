@@ -16,6 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies", "views",
+    "password",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -36,6 +37,7 @@ cookies = ["json", "dep:cookie", "dep:getrandom", "dep:hmac", "dep:sha2"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
 views = ["dep:minijinja"]
+password = ["dep:argon2", "dep:getrandom"]
 
 [dependencies]
 zapline-macros = { path = "../zapline-macros", version = "0.1.0", optional = true }
@@ -76,6 +78,7 @@ async-compression = { version = "0.4", optional = true, features = ["tokio", "gz
 jsonwebtoken = { version = "11", optional = true, default-features = false, features = ["rust_crypto", "use_pem"] }
 cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
 getrandom = { version = "0.2", optional = true }
+argon2 = { version = "0.5", optional = true, default-features = false, features = ["alloc", "password-hash"] }
 minijinja = { version = "2.24", optional = true, features = ["loader"] }
 sqlx = { version = "0.8.6", optional = true, default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros"] }
 # Signed CSRF tokens; already in the tree through `cookie` (`signed`).

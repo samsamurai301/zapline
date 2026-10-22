@@ -34,7 +34,56 @@ Authentication is split in two so each part can be swapped:
 
 Policies **fail closed**: a route with a policy can never become public because a middleware was forgotten or installed in the wrong place. See [Policies fail closed](#policies-fail-closed).
 
-Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`). CSRF is in [Cookies, sessions & CSRF](sessions.md).
+Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`), and password hashing, which needs `password`. CSRF is in [Cookies, sessions & CSRF](sessions.md).
+
+## Accounts in one command: `zapline g auth`
+
+For apps with users who sign up with an email and password, generate the whole thing instead of assembling it. In a project with a database (the `fullstack` template, or any project with `migrations/`):
+
+```sh
+zapline g auth
+```
+
+| File | What it holds |
+|---|---|
+| `migrations/<ts>_create_users.sql` | `users` table: unique (lowercased) email, Argon2id password hash |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `templates/auth/signup.html`, `login.html` | htmx pages at `/signup` and `/login` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, the HTML forms |
+
+It also enables zapline's `cookies` and `password` features and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
+
+```rust
+use crate::routes::auth::CurrentUser;
+
+#[get("/api/notes")]
+async fn my_notes(db: Db, CurrentUser(user): CurrentUser) -> Result<Json<Vec<Note>>> {
+    let notes = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE user_id = $1")
+        .bind(user.id)
+        .fetch_all(&*db)
+        .await?;
+    Ok(Json(notes))
+}
+```
+
+Take `Option<CurrentUser>` to serve visitors and users differently. The generated code is yours to change: it is about 200 lines with no framework magic.
+
+What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
+
+## Passwords
+
+With the `password` feature, `zapline::auth::password` hashes and checks passwords with Argon2id (OWASP parameters, PHC strings that carry their salt and parameters):
+
+```rust
+use zapline::auth::password;
+
+let hash = password::hash("correct horse battery staple").await?;
+assert!(password::verify("correct horse battery staple", &hash).await?);
+```
+
+Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
 
 ## Credential extractors
 

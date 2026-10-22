@@ -141,6 +141,7 @@ pub fn execute(cli: Cli) -> Result<()> {
                     generate::handler(here, &name, method, path.as_deref(), g.force)?
                 }
                 GenerateKind::Middleware { name } => generate::middleware(here, &name, g.force)?,
+                GenerateKind::Auth => generate::auth::generate(&Project::discover(here)?, g.force)?,
             };
             report.print();
             Ok(())

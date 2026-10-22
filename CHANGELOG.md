@@ -12,6 +12,10 @@ The first public release.
 - `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
 - `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
 - `zapline db new` / `zapline db migrate`.
+- `zapline g auth`: accounts in one command (users migration, sign-up/log-in/log-out as JSON API and htmx pages, `CurrentUser` extractor, tests).
+- `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing.
+- `App::database_sessions`: sessions stored in the database (`SqlSessionStore`, SQLite and Postgres). `cookies::key_from_env` / `key_from_secret` derive the cookie key from a secret, with a development fallback in debug builds.
+- `TestResponse::assert_text` and `assert_contains`.
 - `zapline client`: a typed, dependency-free TypeScript client generated from the OpenAPI document; `zapline dev --client <file>` regenerates it after every build for end-to-end types.
 - `zapline::extract::{empty_as_none, checkbox}` serde helpers for HTML forms.
 - `ZAPLINE_DEV=1` (set by `zapline dev`) shows the real cause of 500 errors.

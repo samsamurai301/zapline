@@ -161,6 +161,20 @@ pub const RESOURCE_TEST: &str = include_str!("../templates/generate/resource_tes
 pub const HANDLER: &str = include_str!("../templates/generate/handler.rs.tmpl");
 /// Integration test for a generated handler.
 pub const HANDLER_TEST: &str = include_str!("../templates/generate/handler_test.rs.tmpl");
+/// `src/routes/auth.rs` of `generate auth`, with `// @@html` sections.
+pub const AUTH: &str = include_str!("../templates/generate/auth/auth.rs.tmpl");
+/// `tests/auth.rs` of `generate auth`.
+pub const AUTH_TEST: &str = include_str!("../templates/generate/auth/auth_test.rs.tmpl");
+/// The users table, SQLite.
+pub const AUTH_MIGRATION_SQLITE: &str =
+    include_str!("../templates/generate/auth/create_users.sqlite.sql.tmpl");
+/// The users table, Postgres.
+pub const AUTH_MIGRATION_POSTGRES: &str =
+    include_str!("../templates/generate/auth/create_users.postgres.sql.tmpl");
+/// `templates/auth/signup.html`.
+pub const AUTH_SIGNUP_PAGE: &str = include_str!("../templates/generate/auth/signup.html.tmpl");
+/// `templates/auth/login.html`.
+pub const AUTH_LOGIN_PAGE: &str = include_str!("../templates/generate/auth/login.html.tmpl");
 /// Source of a generated middleware module.
 pub const MIDDLEWARE: &str = include_str!("../templates/generate/middleware.rs.tmpl");
 /// Integration test for a generated middleware.

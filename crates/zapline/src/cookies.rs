@@ -299,6 +299,54 @@ macro_rules! jar_responses {
 }
 jar_responses!(CookieJar, SignedCookieJar, PrivateCookieJar);
 
+/// Development secret for [`key_from_env`] in debug builds. Public on
+/// purpose: it only keeps dev sessions alive across restarts.
+const DEV_SECRET: &str = "zapline insecure development key: set a real secret in production";
+
+/// The cookie [`Key`] derived from the secret in environment variable `var`
+/// (any string of at least 32 bytes, e.g. `openssl rand -base64 48`).
+///
+/// When `var` is unset or empty, debug builds use a fixed development key, so signed
+/// cookies and sessions survive `zapline dev` restarts, and release builds
+/// fail: a production app must not start with a guessable key.
+///
+/// ```
+/// # use zapline::prelude::*;
+/// let app = App::new().cookie_key(zapline::cookies::key_from_env("SESSION_SECRET")?);
+/// # Ok::<(), zapline::Error>(())
+/// ```
+pub fn key_from_env(var: &str) -> Result<Key> {
+    match std::env::var(var).ok().filter(|s| !s.is_empty()) {
+        Some(secret) => key_from_secret(&secret).map_err(|e| {
+            let msg = format!("{var}: {}", e.message());
+            Error::internal(msg).with_code("cookie_key_invalid")
+        }),
+        None if cfg!(debug_assertions) => key_from_secret(DEV_SECRET),
+        None => Err(Error::internal(format!(
+            "{var} is not set: release builds need a secret of at least 32 bytes for cookies and sessions"
+        ))
+        .with_code("cookie_key_missing")),
+    }
+}
+
+/// A 64-byte [`Key`] derived from `secret` (HMAC-SHA256 expansion). The
+/// secret must be at least 32 bytes.
+pub fn key_from_secret(secret: &str) -> Result<Key> {
+    use hmac::{Hmac, Mac};
+    if secret.len() < 32 {
+        return Err(Error::internal("the secret must be at least 32 bytes long"));
+    }
+    let mut bytes = [0u8; 64];
+    for (i, chunk) in bytes.chunks_mut(32).enumerate() {
+        let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(secret.as_bytes())
+            .map_err(|_| Error::internal("invalid secret"))?;
+        mac.update(b"zapline.cookie-key.v1");
+        mac.update(&[i as u8]);
+        chunk.copy_from_slice(&mac.finalize().into_bytes());
+    }
+    Ok(Key::from(&bytes))
+}
+
 impl App {
     /// Register the [`Key`] used by signed/private cookie jars, sessions and
     /// CSRF protection. Use [`Key::generate`] for development and a stable,

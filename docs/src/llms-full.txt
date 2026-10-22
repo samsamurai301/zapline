@@ -330,7 +330,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -349,6 +349,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
+| `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
@@ -422,7 +423,7 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 |---|---|
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
-| `generate_resource`, `generate_handler`, `generate_middleware` | The files created and edited |
+| `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
 | `db_new_migration` | Creates a migration, with its SQL if given |
 | `db_migrate` | Applies pending migrations |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
@@ -2639,7 +2640,56 @@ Authentication is split in two so each part can be swapped:
 
 Policies **fail closed**: a route with a policy can never become public because a middleware was forgotten or installed in the wrong place. See [Policies fail closed](#policies-fail-closed).
 
-Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`). CSRF is in [Cookies, sessions & CSRF](sessions.md).
+Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`), and password hashing, which needs `password`. CSRF is in [Cookies, sessions & CSRF](sessions.md).
+
+## Accounts in one command: `zapline g auth`
+
+For apps with users who sign up with an email and password, generate the whole thing instead of assembling it. In a project with a database (the `fullstack` template, or any project with `migrations/`):
+
+```sh
+zapline g auth
+```
+
+| File | What it holds |
+|---|---|
+| `migrations/<ts>_create_users.sql` | `users` table: unique (lowercased) email, Argon2id password hash |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `templates/auth/signup.html`, `login.html` | htmx pages at `/signup` and `/login` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, the HTML forms |
+
+It also enables zapline's `cookies` and `password` features and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
+
+```rust
+use crate::routes::auth::CurrentUser;
+
+#[get("/api/notes")]
+async fn my_notes(db: Db, CurrentUser(user): CurrentUser) -> Result<Json<Vec<Note>>> {
+    let notes = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE user_id = $1")
+        .bind(user.id)
+        .fetch_all(&*db)
+        .await?;
+    Ok(Json(notes))
+}
+```
+
+Take `Option<CurrentUser>` to serve visitors and users differently. The generated code is yours to change: it is about 200 lines with no framework magic.
+
+What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
+
+## Passwords
+
+With the `password` feature, `zapline::auth::password` hashes and checks passwords with Argon2id (OWASP parameters, PHC strings that carry their salt and parameters):
+
+```rust
+use zapline::auth::password;
+
+let hash = password::hash("correct horse battery staple").await?;
+assert!(password::verify("correct horse battery staple", &hash).await?);
+```
+
+Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
 
 ## Credential extractors
 
@@ -3233,7 +3283,21 @@ How it behaves:
 
 `MemoryStore` keeps sessions in the process. It is meant for development, tests and single-instance apps: sessions vanish on restart and aren't shared between replicas. It holds at most 100,000 sessions by default (`MemoryStore::with_capacity(n)` changes that), purging expired ones as new ones arrive and evicting the sessions closest to expiry when full.
 
-For several instances, implement `SessionStore` over Redis, a database or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
+With a database ([Databases](database.md)), keep sessions there: they survive restarts and are shared by every instance. `App::database_sessions` creates the `zapline_sessions` table at startup and installs the session layer (register the database first):
+
+```rust
+use zapline::cookies::key_from_env;
+use zapline::db::Database;
+
+App::new()
+    .database(Database::from_env())
+    .cookie_key(key_from_env("SESSION_SECRET")?)
+    .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
+```
+
+`key_from_env(var)` derives the cookie key from a secret of 32 or more bytes. When the variable is unset, debug builds use a fixed development key (so sessions survive `zapline dev` restarts) and release builds fail. `key_from_secret(s)` does the same derivation from a string you load yourself.
+
+For anything else, implement `SessionStore` over Redis or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
 
 ```rust
 use std::collections::HashMap;

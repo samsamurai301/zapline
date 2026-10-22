@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block title %}Log in · @@package@@{% endblock %}
+{% block content %}
+<h1>Log in</h1>
+
+<form hx-post="/login">
+  {% block form %}
+  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
+  <label>Email <input type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></label>
+  <label>Password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="current-password"></label>
+  <button>Log in</button>
+  {% endblock %}
+</form>
+
+<p><small>No account yet? <a href="/signup">Sign up</a></small></p>
+{% endblock %}
