@@ -77,6 +77,8 @@ zapline g resource product name price:float stock:int featured:bool   # migratio
 zapline dev                                                      # http://localhost:8080/products and /docs
 ```
 
+Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, and 12 end-to-end tests, about 100 lines beyond what the CLI generated.
+
 Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
 
 zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
@@ -159,6 +161,7 @@ async fn unknown_user_is_404() {
 - **For AI assistants**: [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) (index) and [`llms-full.txt`](https://samsamurai301.github.io/zapline/llms-full.txt) (the whole guide in one file). Agents working on zapline itself should read [`AGENTS.md`](AGENTS.md).
 - **[The guide](https://samsamurai301.github.io/zapline/)** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
 - **API reference**: `cargo doc -p zapline --all-features --open`
+- **The saas example** in [`examples/saas`](examples/saas): accounts, password reset, per-user data, durable jobs, email and a schedule in one app.
 - **Examples** in [`examples/examples`](examples/examples): `cheatsheet`, `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the internals and the plugin extension points.
 

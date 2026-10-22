@@ -44,6 +44,10 @@ Run cargo @("check", "-p", "zapline")
 
 Step "examples"
 Run cargo @("build", "-p", "zapline-examples", "--examples")
+# The flagship app is its own project (own lockfile, sqlite only).
+Push-Location examples/saas
+$env:CARGO_TARGET_DIR = (Join-Path $PSScriptRoot "../target/saas")
+try { Run cargo @("test", "-q") } finally { Remove-Item Env:\CARGO_TARGET_DIR; Pop-Location }
 
 Step "docs"
 $env:RUSTDOCFLAGS = "-D warnings"

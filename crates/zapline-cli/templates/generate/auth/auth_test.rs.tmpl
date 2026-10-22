@@ -59,14 +59,20 @@ async fn signup_rejects_duplicates_and_weak_input() {
     client.post("/api/auth/signup").json(&creds("b@example.com", "short")).send().await.assert_status(422);
     client.post("/api/auth/signup").json(&creds("not-an-email", "long enough")).send().await.assert_status(422);
 }
-/// The token from the newest reset email. Mail is sent just after the
-/// response, so wait for it briefly.
-async fn reset_token(client: &TestClient, sent_before: usize) -> String {
+/// The token from the newest password-reset email, once there are more than
+/// `resets_before` of them. Mail is sent just after the response, so wait
+/// for it briefly.
+async fn reset_token(client: &TestClient, resets_before: usize) -> String {
     let mailer: Mailer = client.resources().await.require().unwrap();
     for _ in 0..200 {
-        let sent = mailer.sent();
-        if sent.len() > sent_before {
-            let text = sent.last().unwrap().text.clone().unwrap_or_default();
+        let resets: Vec<String> = mailer
+            .sent()
+            .into_iter()
+            .filter(|m| m.subject == "Reset your password")
+            .filter_map(|m| m.text)
+            .collect();
+        if resets.len() > resets_before {
+            let text = resets.last().unwrap();
             let start = text.find("token=").expect("a reset link") + "token=".len();
             return text[start..].split_whitespace().next().unwrap().to_string();
         }

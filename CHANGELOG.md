@@ -16,6 +16,8 @@ The first public release.
 - `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing, and `new_token` / `hash_token` for single-use links.
 - `zapline g auth` includes password reset by email: hashed single-use tokens that expire after an hour, JSON endpoints and htmx pages, and tests.
 - `zapline::jobs`: durable background jobs in the app's database (SQLite or Postgres), with retries and backoff, `FOR UPDATE SKIP LOCKED` on Postgres so instances share one queue, and `run_pending` for deterministic tests.
+- `zapline g job <name>`: a durable job, registered in `src/jobs/mod.rs` and `app()`, with a test.
+- `examples/saas`: a complete multi-user app (accounts, password reset, per-user data, a welcome email job, a schedule) built from `zapline new` + `g auth` + `g job`.
 - `zapline::mail` (feature `mail`): SMTP email, a dev inbox at `/_dev/mail` when `SMTP_URL` is unset in debug builds, `Mailer::sent` for tests, and `Email` as a durable job.
 - `App::database_sessions`: sessions stored in the database (`SqlSessionStore`, SQLite and Postgres). `cookies::key_from_env` / `key_from_secret` derive the cookie key from a secret, with a development fallback in debug builds.
 - `TestResponse::assert_text` and `assert_contains`.
