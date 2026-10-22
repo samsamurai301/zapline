@@ -13,6 +13,9 @@
 //! "Continue with GitHub / Google" turns on when `GITHUB_CLIENT_ID` and
 //! `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) are set. The callback URL
 //! to register there is `{APP_URL}/auth/github/callback`.
+//!
+//! The admin panel at `/admin` lets in only the accounts listed in
+//! `ADMIN_EMAILS` (comma-separated), in every build.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -22,6 +25,7 @@ use zapline::cookies::key_from_env;
 use zapline::db::{sqlx, Db};
 use zapline::extract::FromRequestParts;
 use zapline::mail::{Email, Mailer};
+use zapline::middleware::Next;
 use zapline::prelude::*;
 use zapline::session::Session;
 use zapline::tasks::BackgroundTasks;
@@ -101,6 +105,24 @@ impl FromRequestParts for CurrentUser {
     }
 }
 
+/// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
+async fn admins_only(mut req: Request, next: Next) -> Response {
+    let user = match CurrentUser::from_request_parts(&mut req).await {
+        Ok(CurrentUser(user)) => user,
+        // @@html
+        Err(_) => return Redirect::to("/login").into_response(),
+        // html@@
+        // @@api
+        Err(e) => return e.into_response(),
+        // api@@
+    };
+    let admins = std::env::var("ADMIN_EMAILS").unwrap_or_default();
+    if !admins.split(',').any(|email| email.trim().eq_ignore_ascii_case(&user.email)) {
+        return Error::forbidden().into_response();
+    }
+    next.run(req).await
+}
+
 fn login_required() -> Error {
     Error::unauthorized().with_code("login_required")
 }
@@ -119,7 +141,8 @@ pub fn mount(app: App) -> App {
         .mount((signup_page, login_page, signup_form, login_form, logout_form))
         .mount((forgot_page, forgot_form, reset_page, reset_form))
         // html@@
-        .mount((github_callback, google_callback));
+        .mount((github_callback, google_callback))
+        .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]));
     let mut social = SocialLogins::default();
     for (name, label) in PROVIDERS {
         if let Ok(provider) = OAuth::from_env(name) {

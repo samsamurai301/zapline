@@ -59,7 +59,7 @@
 //! | API docs and validation | [`openapi`], [`validate`] |
 //! | Security | [`auth`] (bearer, basic, API keys, JWT, social login, guards, CSRF), [`cookies`], [`session`] |
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
-//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs |
+//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs; [`admin`]: an admin panel for every table |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
 //! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
 //! | Files | [`storage`]: local, memory and S3 storage with expiring links |
@@ -150,6 +150,8 @@ pub mod cookies;
 pub mod session;
 
 // ---- application structure ---------------------------------------------------
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub mod admin;
 #[cfg(feature = "cache")]
 pub mod cache;
 #[cfg(feature = "config")]

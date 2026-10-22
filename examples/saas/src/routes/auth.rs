@@ -18,6 +18,7 @@ use zapline::db::{sqlx, Db};
 use zapline::extract::FromRequestParts;
 use zapline::jobs::Jobs;
 use zapline::mail::{Email, Mailer};
+use zapline::middleware::Next;
 use zapline::prelude::*;
 use zapline::session::Session;
 use zapline::tasks::BackgroundTasks;
@@ -111,6 +112,23 @@ pub fn mount(app: App) -> App {
             logout_form,
         ))
         .mount((forgot_page, forgot_form, reset_page, reset_form))
+        .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]))
+}
+
+/// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
+async fn admins_only(mut req: Request, next: Next) -> Response {
+    let user = match CurrentUser::from_request_parts(&mut req).await {
+        Ok(CurrentUser(user)) => user,
+        Err(_) => return Redirect::to("/login").into_response(),
+    };
+    let admins = std::env::var("ADMIN_EMAILS").unwrap_or_default();
+    if !admins
+        .split(',')
+        .any(|email| email.trim().eq_ignore_ascii_case(&user.email))
+    {
+        return Error::forbidden().into_response();
+    }
+    next.run(req).await
 }
 
 // ---- accounts -----------------------------------------------------------------

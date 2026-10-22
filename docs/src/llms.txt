@@ -46,6 +46,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Views & htmx](https://samsamurai301.github.io/zapline/views.html): `zapline::view` (feature `views`) renders HTML with [MiniJinja](https://docs.rs/minijinja) templates (Jinja2 syntax: `{{ value }}`, `{% for %}`, `{% extends %}`
 - [Durable jobs](https://samsamurai301.github.io/zapline/jobs.html): Work that must not be lost (emails, webhooks, image processing, billing) goes in a **job**: a struct stored in your database until a worker has run it. Jobs sur
 - [Email](https://samsamurai301.github.io/zapline/mail.html): `zapline::mail` sends email over SMTP in production, keeps it in a **dev inbox** you can open in the browser while developing, and captures it in tests.
+- [Admin panel](https://samsamurai301.github.io/zapline/admin.html): `App::admin` serves an admin panel for every table in your database: browse, search, sort and page through rows, and create, edit and delete them through forms.
 
 ## Security
 

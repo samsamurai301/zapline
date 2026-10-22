@@ -18,6 +18,9 @@ pub fn app(db: Database) -> App {
         // Routes, recent requests, jobs and mail at /_dev (debug builds only).
         .dev_console()
         .database(db)
+        // Every table at /admin (debug builds only; `zapline g auth` opens it
+        // to the accounts in ADMIN_EMAILS).
+        .admin(|admin| admin)
         .views("templates")
         // Pub/sub for live pages: see `/live/todos` in routes/todos.rs.
         .live(Live::new())

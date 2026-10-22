@@ -17,7 +17,9 @@ to install (SQLite until you set `DATABASE_URL`):
   docs at <http://localhost:8080/docs>.
 - **A dev console** at <http://localhost:8080/_dev>: every route, the last
   requests, the job queue (retry failed jobs with one click) and the inbox.
-- **12 end-to-end tests**, each on its own in-memory database.
+- **An admin panel** at <http://localhost:8080/admin> for every table, open to
+  the accounts listed in `ADMIN_EMAILS`.
+- **13 end-to-end tests**, each on its own in-memory database.
 
 ```sh
 zapline dev          # http://localhost:8080 , rebuilds and restarts on change

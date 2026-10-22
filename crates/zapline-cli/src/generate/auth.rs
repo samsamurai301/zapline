@@ -19,12 +19,15 @@ use crate::templates;
 /// Keeps or drops the `// @@html` ... `// html@@` sections of a template.
 pub fn html_sections(template: &str, html: bool) -> String {
     let mut out = String::with_capacity(template.len());
-    let mut inside = false;
+    // Which kind of section we are in: `// @@html` lines are kept for
+    // projects with pages, `// @@api` lines for those without.
+    let mut inside: Option<bool> = None;
     for line in template.split_inclusive('\n') {
         match line.trim() {
-            "// @@html" => inside = true,
-            "// html@@" => inside = false,
-            _ if inside && !html => {}
+            "// @@html" => inside = Some(true),
+            "// @@api" => inside = Some(false),
+            "// html@@" | "// api@@" => inside = None,
+            _ if inside.is_some_and(|for_html| for_html != html) => {}
             _ => out.push_str(line),
         }
     }
@@ -124,7 +127,7 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
 }
 
 /// The variables auth reads, appended to `.env.example` when missing.
-const ENV_VARS: [(&str, &str); 6] = [
+const ENV_VARS: [(&str, &str); 7] = [
     (
         "SESSION_SECRET",
         "# Signs session cookies; required in release builds. `openssl rand -base64 48`\nSESSION_SECRET=\n",
@@ -148,6 +151,10 @@ const ENV_VARS: [(&str, &str); 6] = [
         "GOOGLE_CLIENT_ID",
         "# \"Continue with Google\": an OAuth client with redirect URI {APP_URL}/auth/google/callback\n\
          GOOGLE_CLIENT_ID=\nGOOGLE_CLIENT_SECRET=\n",
+    ),
+    (
+        "ADMIN_EMAILS",
+        "# Accounts allowed into the admin panel at /admin, comma-separated.\nADMIN_EMAILS=\n",
     ),
 ];
 
@@ -237,9 +244,9 @@ mod tests {
 
     #[test]
     fn html_sections_are_kept_or_dropped() {
-        let t = "a\n// @@html\nb\n// html@@\nc\n";
+        let t = "a\n// @@html\nb\n// html@@\nc\n// @@api\nd\n// api@@\n";
         assert_eq!(html_sections(t, true), "a\nb\nc\n");
-        assert_eq!(html_sections(t, false), "a\nc\n");
+        assert_eq!(html_sections(t, false), "a\nc\nd\n");
     }
 
     #[test]

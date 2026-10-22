@@ -35,6 +35,7 @@
 - [Views & htmx](views.md)
 - [Durable jobs](jobs.md)
 - [Email](mail.md)
+- [Admin panel](admin.md)
 
 # Security
 

@@ -221,7 +221,7 @@ pub(crate) fn internal(routes: Routes) -> Routes {
 
 /// Only this machine may see the console (requests without a peer address
 /// come from [`TestClient`](crate::test::TestClient)).
-fn local(req: &Request) -> bool {
+pub(crate) fn local(req: &Request) -> bool {
     req.remote_addr().is_none_or(|a| a.ip().is_loopback())
 }
 

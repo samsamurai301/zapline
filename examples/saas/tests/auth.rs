@@ -301,3 +301,35 @@ async fn html_forms_redirect_or_show_the_error() {
         bad.text()
     );
 }
+
+#[tokio::test]
+async fn only_admin_emails_get_into_the_admin_panel() {
+    // The only test that reads ADMIN_EMAILS.
+    std::env::set_var("ADMIN_EMAILS", "boss@example.com, Owner@Example.com");
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .get("/admin")
+        .send()
+        .await
+        .assert_status(303)
+        .assert_header("location", "/login");
+
+    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 200)] {
+        client
+            .post("/api/auth/signup")
+            .json(&creds(email, "correct horse"))
+            .send()
+            .await
+            .assert_status(201);
+        client
+            .get("/admin/todos")
+            .send()
+            .await
+            .assert_status(status);
+        client
+            .post("/api/auth/logout")
+            .send()
+            .await
+            .assert_status(204);
+    }
+}

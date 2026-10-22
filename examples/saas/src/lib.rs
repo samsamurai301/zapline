@@ -22,6 +22,8 @@ pub fn app(db: Database) -> App {
         // Routes, recent requests, jobs and mail at /_dev (debug builds only).
         .dev_console()
         .database(db)
+        // Every table at /admin, for the accounts in ADMIN_EMAILS (routes/auth.rs).
+        .admin(|admin| admin)
         .jobs(jobs::register)
         .views("templates")
         .static_files("/static", ServeDir::new("static"))

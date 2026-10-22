@@ -63,7 +63,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed), multipart uploads |
 | Observability | `tracing` spans per request, Prometheus `/metrics` with route labels, `/health/live` and `/health/ready` with checks |
 | Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
-| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases; accounts in one command (`zapline g auth`: Argon2id, database sessions, password reset by email, GitHub/Google login, htmx pages); durable jobs with retries in the same database; email with a dev inbox; file storage on disk or S3 with expiring links; caching (stampede-free `get_or_set`, page caching, ETags); live updates pushed to every open page over SSE or WebSockets; a dev console at `/_dev` (routes, recent requests, job queue, inbox); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
+| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases; accounts in one command (`zapline g auth`: Argon2id, database sessions, password reset by email, GitHub/Google login, htmx pages); durable jobs with retries in the same database; email with a dev inbox; file storage on disk or S3 with expiring links; caching (stampede-free `get_or_set`, page caching, ETags); live updates pushed to every open page over SSE or WebSockets; an admin panel at `/admin` for every table, read from the schema (search, sort, edit, no code per table); a dev console at `/_dev` (routes, recent requests, job queue, inbox); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
 | Tooling | `zapline new` (minimal, api, full and fullstack templates), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `routes`, `openapi`, `doctor`, `bench` |
 
 ## Getting started
@@ -77,7 +77,7 @@ zapline g resource product name price:float stock:int featured:bool   # migratio
 zapline dev                                                      # http://localhost:8080/products and /docs
 ```
 
-Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, and 12 end-to-end tests, about 100 lines beyond what the CLI generated.
+Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, an admin panel for the accounts in `ADMIN_EMAILS`, and 13 end-to-end tests, about 100 lines beyond what the CLI generated.
 
 Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
 

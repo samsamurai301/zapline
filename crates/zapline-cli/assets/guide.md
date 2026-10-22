@@ -326,6 +326,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
+| Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
@@ -2951,6 +2952,76 @@ assert!(sent[0].text.as_deref().unwrap().contains("/join"));
 
 ---
 
+<!-- admin.md -->
+
+# Admin panel
+
+`App::admin` serves an admin panel for every table in your database: browse, search, sort and page through rows, and create, edit and delete them through forms. There is no code per table. It reads the schema on each request, so a table added by a new migration shows up on the next reload.
+
+```rust
+App::new()
+    .database(Database::from_env())
+    .admin(|admin| admin) // http://localhost:8080/admin
+```
+
+It works on SQLite and Postgres and needs no extra Cargo feature. The `fullstack` template turns it on.
+
+## Who can open it
+
+Without `protect`, the panel behaves like the [dev console](dev-console.md): it exists only in debug builds and answers only requests from the same machine. In a release build that call does nothing, so it can stay in the code.
+
+To use it in production, protect it with a [middleware](middleware.md) that decides who is an admin. The panel is then served in every build, to whoever the middleware lets through:
+
+```rust
+use zapline::middleware::Next;
+
+async fn admins_only(mut req: Request, next: Next) -> Response {
+    let user = match CurrentUser::from_request_parts(&mut req).await {
+        Ok(CurrentUser(user)) => user,
+        Err(_) => return Redirect::to("/login").into_response(),
+    };
+    let admins = std::env::var("ADMIN_EMAILS").unwrap_or_default();
+    if !admins.split(',').any(|e| e.trim().eq_ignore_ascii_case(&user.email)) {
+        return Error::forbidden().into_response();
+    }
+    next.run(req).await
+}
+
+app.admin(|admin| admin.protect(admins_only))
+```
+
+[`zapline g auth`](auth.md#accounts-in-one-command-zapline-g-auth) generates exactly this: the accounts listed in `ADMIN_EMAILS` get in, others get `403`, and visitors are sent to `/login`. Calling `admin` again replaces the earlier setup, which is how the generated `auth::mount` protects the panel that the template turned on.
+
+Form posts must come from the same site: a request whose `Origin` doesn't match its `Host` gets `403 cross_origin`, on top of the `SameSite=Lax` session cookie.
+
+## What it shows
+
+| Shown | Not shown |
+|---|---|
+| Tables whose names are plain identifiers (letters, digits, `_`) | The framework's tables (`_sqlx_migrations`, `zapline_sessions`, `zapline_jobs`) and those passed to `.exclude([...])` |
+| Every other column, typed: checkboxes for booleans, number inputs for numbers, text areas for JSON and long text, binary columns as their size | Columns whose names contain `password`, `secret` or `token` or end in `_hash`, and those passed to `.hide([...])` (`"table.column"` or `"column"`). Hidden columns are never read or written. |
+
+Rows are edited by their primary key; tables without a single-column primary key are browse-only, and `.read_only()` makes the whole panel browse-only.
+
+| Setting | Effect |
+|---|---|
+| `.path("/backoffice")` | Serve it somewhere other than `/admin` |
+| `.protect(middleware)` | Put `middleware` in front of every admin route, and serve it in release builds and to other machines |
+| `.exclude(["audit_log"])` | Leave tables out |
+| `.hide(["users.email", "ip_address"])` | Leave columns out |
+| `.read_only()` | No create, edit or delete |
+
+## Lists and forms
+
+The list shows 50 rows per page, newest first (by primary key). Click a column header to sort by it, again to reverse. The search box matches text, JSON and date columns case-insensitively (`%` and `_` are literal), and a number also matches the primary key.
+
+In the forms, an empty field means `NULL` when the column allows it, and the column's default when creating a row. Numbers are checked before anything is written. If the database refuses a change (a unique email taken, a missing required value), the form comes back with the database's message and what you typed.
+
+With both `postgres` and `sqlite` enabled, `admin` uses Postgres; use `admin_in::<sqlx::Sqlite>(..)` for SQLite.
+
+
+---
+
 <!-- auth.md -->
 
 # Authentication & authorization
@@ -3002,11 +3073,11 @@ zapline g auth
 | File | What it holds |
 |---|---|
 | `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS` |
 | `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
-It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
 
 **Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
 
@@ -6018,7 +6089,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
 
-With `postgres` or `sqlite` (and `json`), `zapline::jobs` adds [durable jobs](jobs.md) stored in the same database.
+With `postgres` or `sqlite` (and `json`), `zapline::jobs` adds [durable jobs](jobs.md) stored in the same database. With `postgres` or `sqlite`, `App::admin` adds an [admin panel](admin.md) for every table.
 | `full` | | Every feature above except the database backends (pick `postgres` and/or `sqlite`) | all | |
 
 `openapi`, `validate`, `jwt` and `cookies` turn on `json` as well, because their error bodies, schemas and session data are JSON.
