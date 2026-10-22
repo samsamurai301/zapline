@@ -542,3 +542,34 @@ fn doctor_reports_the_toolchain() {
     assert!(text.contains("wrk"), "{text}");
     assert!(text.contains("docker"), "{text}");
 }
+
+#[test]
+fn generate_job_registers_it_in_the_app() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "shop", "fullstack");
+    let log = expect_success(&run_in(&root, &["g", "job", "send-receipt"]));
+    assert!(log.contains("Created src/jobs/send_receipt.rs"), "{log}");
+    assert!(log.contains("Created tests/send_receipt_job.rs"), "{log}");
+    assert!(log.contains("Created src/jobs/mod.rs"), "{log}");
+    assert!(log.contains("Modified src/lib.rs"), "{log}");
+
+    expect_success(&run_in(&root, &["g", "job", "purge"]));
+    let jobs = fs::read_to_string(root.join("src/jobs/mod.rs")).unwrap();
+    assert!(
+        jobs.contains("pub mod purge;\npub mod send_receipt;\n"),
+        "{jobs}"
+    );
+    assert!(
+        jobs.contains(".register::<send_receipt::SendReceipt>()"),
+        "{jobs}"
+    );
+    assert!(jobs.contains(".register::<purge::Purge>()"), "{jobs}");
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".jobs(jobs::register)").count(), 1, "{lib}");
+    assert!(lib.contains("pub mod jobs;\npub mod routes;"), "{lib}");
+
+    // Jobs live in the database.
+    let api = new_project(tmp.path(), "svc", "api");
+    let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
+    assert!(log.contains("no migrations/ directory"), "{log}");
+}

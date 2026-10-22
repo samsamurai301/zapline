@@ -299,6 +299,24 @@ Protect a handler by taking `CurrentUser`. Set SESSION_SECRET (32+ random bytes)
 Examples:
   zapline g auth")]
     Auth,
+
+    /// A durable background job, stored in the database and retried on failure
+    #[command(after_long_help = "\
+Needs a project with a database (migrations/), like the fullstack template. Generates:
+  src/jobs/<name>.rs      the job: payload struct + `impl Job`
+  src/jobs/mod.rs         declares and registers it (`jobs::register`)
+  tests/<name>_job.rs     runs the job once
+and adds `.jobs(jobs::register)` to `app()` in src/lib.rs.
+
+Enqueue from a handler that takes `jobs: Jobs`: `jobs.enqueue(MyJob { .. }).await?`.
+
+Examples:
+  zapline g job send_welcome
+  zapline g job nightly-report")]
+    Job {
+        /// Job name, e.g. `send_welcome`
+        name: String,
+    },
 }
 
 /// Arguments of `zapline dev`.

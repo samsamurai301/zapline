@@ -165,6 +165,14 @@ fn tool_list() -> Value {
             }}
         },
         {
+            "name": "generate_job",
+            "description": "Add a durable background job (stored in the database, retried with backoff): src/jobs/<name>.rs, registered in src/jobs/mod.rs and app(), plus a test. Enqueue with `jobs.enqueue(MyJob { .. }).await?`.",
+            "inputSchema": { "type": "object", "required": ["name"], "properties": {
+                "name": { "type": "string", "description": "e.g. send_welcome" },
+                "force": { "type": "boolean" }
+            }}
+        },
+        {
             "name": "db_new_migration",
             "description": "Create migrations/<timestamp>_<name>.sql, optionally with its SQL.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
@@ -296,6 +304,15 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             let project = Project::discover(here)?;
             Ok(report_text(&generate::auth::generate(
                 &project,
+                flag("force"),
+            )?))
+        }
+        "generate_job" => {
+            let name = s("name").context("`name` is required")?;
+            let project = Project::discover(here)?;
+            Ok(report_text(&generate::job::generate(
+                &project,
+                name,
                 flag("force"),
             )?))
         }

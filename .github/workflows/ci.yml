@@ -140,7 +140,7 @@ jobs:
             if [ "$t" = fullstack ]; then
               # The database-backed generator must produce code that builds and passes its tests.
               (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool \
-                && "$ROOT/target/debug/zapline" g auth)
+                && "$ROOT/target/debug/zapline" g auth && "$ROOT/target/debug/zapline" g job send_welcome)
             fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)
             if [ "$t" != minimal ] && [ "$RUNNER_OS" = Linux ]; then

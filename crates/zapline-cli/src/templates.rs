@@ -179,6 +179,12 @@ pub const AUTH_LOGIN_PAGE: &str = include_str!("../templates/generate/auth/login
 pub const AUTH_FORGOT_PAGE: &str = include_str!("../templates/generate/auth/forgot.html.tmpl");
 /// Sets a new password from a reset link.
 pub const AUTH_RESET_PAGE: &str = include_str!("../templates/generate/auth/reset.html.tmpl");
+/// A durable job (`zapline generate job`).
+pub const JOB: &str = include_str!("../templates/generate/job.rs.tmpl");
+/// The test for a generated job.
+pub const JOB_TEST: &str = include_str!("../templates/generate/job_test.rs.tmpl");
+/// `src/jobs/mod.rs` for the first generated job.
+pub const JOBS_MOD: &str = include_str!("../templates/generate/jobs_mod.rs.tmpl");
 /// Source of a generated middleware module.
 pub const MIDDLEWARE: &str = include_str!("../templates/generate/middleware.rs.tmpl");
 /// Integration test for a generated middleware.
