@@ -320,6 +320,7 @@ impl Telemetry {
 
     /// Build the subscriber without installing it, e.g. for
     /// `tracing::dispatcher::with_default` in tests.
+    #[cfg_attr(not(feature = "otlp"), allow(unused_mut))]
     pub fn into_dispatch(mut self) -> Result<Dispatch, TelemetryError> {
         let filter = self.build_filter()?;
         #[cfg(feature = "otlp")]

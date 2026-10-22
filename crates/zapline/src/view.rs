@@ -53,7 +53,7 @@ pub struct Views(Arc<Inner>);
 
 struct Inner {
     dir: PathBuf,
-    configure: Option<Box<Configure>>,
+    configure: Option<Arc<Configure>>,
     /// `None` in reload mode: a fresh environment per render.
     cached: Option<Environment<'static>>,
 }
@@ -74,7 +74,7 @@ impl Views {
         Self::build(dir.into(), None, reload)
     }
 
-    fn build(dir: PathBuf, configure: Option<Box<Configure>>, reload: bool) -> Self {
+    fn build(dir: PathBuf, configure: Option<Arc<Configure>>, reload: bool) -> Self {
         let mut inner = Inner {
             dir,
             configure,
@@ -133,6 +133,23 @@ impl Views {
         }
     }
 
+    /// The same templates with more set up on the environment (for
+    /// features that add template functions, like `asset()`).
+    #[allow(dead_code)]
+    pub(crate) fn extended(
+        &self,
+        extra: impl Fn(&mut Environment<'static>) + Send + Sync + 'static,
+    ) -> Views {
+        let before = self.0.configure.clone();
+        let configure: Arc<Configure> = Arc::new(move |env: &mut Environment<'static>| {
+            if let Some(before) = &before {
+                before(env);
+            }
+            extra(env);
+        });
+        Self::build(self.0.dir.clone(), Some(configure), self.0.cached.is_none())
+    }
+
     fn with_env<R>(&self, f: impl FnOnce(&Environment<'static>) -> R) -> R {
         match &self.0.cached {
             Some(env) => f(env),
@@ -188,7 +205,7 @@ impl App {
     ) -> Self {
         let views = Views::build(
             dir.into(),
-            Some(Box::new(configure)),
+            Some(Arc::new(configure)),
             cfg!(debug_assertions),
         );
         self.state(views)

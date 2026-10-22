@@ -321,7 +321,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
 | Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
-| Static files | `ServeDir::new("public")` (`fs` feature) |
+| Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
@@ -5197,6 +5197,40 @@ Things the framework cannot decide for you:
 - Everything under the root is public. Don't point `ServeDir` at a directory that mixes public and private files.
 - If users can upload `.html` or `.svg` files and you serve them back from your own origin, a script in the file runs with your origin's privileges (stored XSS). Serve user uploads from a separate domain, restrict the extensions you accept, or store files under generated names and send a download `Content-Disposition` through your own handler. `SecurityHeaders` already adds `X-Content-Type-Options: nosniff`.
 - File serving does a short blocking filesystem lookup on a worker thread (`spawn_blocking`), once per request. Put a CDN or reverse proxy in front for hot assets.
+
+## Fingerprinted assets
+
+`App::assets(prefix, dir)` serves a directory like `static_files`, and also gives every file a URL with a hash of its content, so browsers can cache it forever and still get the new version the moment it changes:
+
+```rust
+use zapline::fs::Assets;
+use zapline::prelude::*;
+
+#[get("/")]
+async fn home(assets: Assets) -> Html<String> {
+    // "/static/app.3f2a1b9c.css"
+    Html(format!(r#"<link rel="stylesheet" href="{}">"#, assets.url("app.css")))
+}
+
+fn app() -> App {
+    App::new().assets("/static", "static").mount(home)
+}
+```
+
+In templates (feature `views`) it is a function, whether `.views(..)` comes before or after `.assets(..)`:
+
+```html
+<link rel="stylesheet" href="{{ asset('app.css') }}">
+<script src="{{ asset('js/app.js') }}" defer></script>
+```
+
+- `/static/app.3f2a1b9c.css` is served with `Cache-Control: public, max-age=31536000, immutable`.
+- An old hash still serves today's file, with `no-cache`, so pages cached before a deploy keep working.
+- `/static/app.css` (no hash) is still served, without the long cache.
+- A file that does not exist keeps its plain URL; hidden files stay hidden.
+- Hashes are 8 hex digits of the content. In debug builds they are recomputed when a file's size or modification time changes, so `zapline dev` picks up edits; release builds hash each file once.
+
+No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
 
 ## `ServeFile`
 

@@ -24,7 +24,9 @@ pub fn app(db: Database) -> App {
         .views("templates")
         // Pub/sub for live pages: see `/live/todos` in routes/todos.rs.
         .live(Live::new())
-        .static_files("/static", ServeDir::new("static"))
+        // static/ at /static; asset("app.css") in templates gives a URL with a
+        // content hash that browsers may cache for a year.
+        .assets("/static", "static")
         .plugin(Health::new().check("database", DbCheck::new()))
         .openapi(OpenApi::new(
             env!("CARGO_PKG_NAME"),

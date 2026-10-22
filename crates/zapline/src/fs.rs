@@ -104,6 +104,8 @@ struct DirConfig {
     fallback_file: Option<PathBuf>,
     show_hidden: bool,
     opts: Options,
+    /// Also answer `name.{hash}.ext` with `name.ext` (see [`App::assets`]).
+    fingerprints: Option<Assets>,
 }
 
 #[derive(Clone, Default)]
@@ -125,6 +127,7 @@ impl ServeDir {
                 fallback_file: None,
                 show_hidden: false,
                 opts: Options::default(),
+                fingerprints: None,
             }),
         }
     }
@@ -636,6 +639,37 @@ async fn serve_dir(cfg: Arc<DirConfig>, req: Request) -> Response {
         }
         other => other,
     };
+    let found = match (found, &cfg.fingerprints) {
+        (Lookup::NotFound, Some(assets)) => match assets.unfingerprint(&tail, cfg.show_hidden) {
+            Some((rel, hash)) => {
+                let (c, a) = (cfg.clone(), assets.clone());
+                let enc = cfg.opts.encodings(req.headers());
+                let looked = tokio::task::spawn_blocking(move || {
+                    let found = c.lookup(&rel, false, &enc);
+                    // A current fingerprint is forever; a stale one gets
+                    // today's file, but only for this visit.
+                    let current = a.hash_of(&rel).as_deref() == Some(hash.as_str());
+                    (found, current)
+                })
+                .await;
+                match looked {
+                    Ok((Lookup::Found(f), current)) => {
+                        let mut opts = cfg.opts.clone();
+                        opts.cache_control = Some(HeaderValue::from_static(if current {
+                            "public, max-age=31536000, immutable"
+                        } else {
+                            "no-cache"
+                        }));
+                        return respond(&req, f, &opts).await;
+                    }
+                    Ok((other, _)) => other,
+                    Err(e) => Lookup::Failed(io::Error::other(e)),
+                }
+            }
+            None => Lookup::NotFound,
+        },
+        (found, _) => found,
+    };
     match found {
         Lookup::Found(f) => respond(&req, f, &cfg.opts).await,
         Lookup::RedirectSlash => redirect_slash(&req),
@@ -1088,5 +1122,172 @@ mod tests {
         assert_eq!(enc("*"), vec![Encoding::Br, Encoding::Gzip]);
         assert_eq!(enc("identity"), vec![]);
         assert_eq!(opts.encodings(&HeaderMap::new()), vec![]);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Fingerprinted assets
+
+/// URLs with a content hash for the files of an [`App::assets`]
+/// directory, so browsers and CDNs can cache them forever:
+/// `assets.url("app.css")` is `/static/app.3f2a1b9c.css`, and changes when
+/// the file does. A handler argument, and `asset("app.css")` in templates.
+///
+/// ```no_run
+/// use zapline::fs::Assets;
+/// use zapline::prelude::*;
+///
+/// #[get("/")]
+/// async fn home(assets: Assets) -> Html<String> {
+///     Html(format!("<link rel=stylesheet href=\"{}\">", assets.url("app.css")))
+/// }
+///
+/// App::new().assets("/static", "static").mount(home).run("0.0.0.0:8080")
+/// # ;
+/// ```
+#[derive(Clone)]
+pub struct Assets(Arc<AssetsInner>);
+
+struct AssetsInner {
+    prefix: String,
+    root: PathBuf,
+    /// Relative path -> (size, mtime, hash).
+    hashes: std::sync::Mutex<std::collections::HashMap<PathBuf, Fingerprint>>,
+}
+
+/// A file's size and modification time when it was hashed, and the hash.
+type Fingerprint = (u64, Option<SystemTime>, String);
+
+impl fmt::Debug for Assets {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Assets")
+            .field("prefix", &self.0.prefix)
+            .field("root", &self.0.root)
+            .finish()
+    }
+}
+
+/// Hex digits in a fingerprint.
+const HASH_LEN: usize = 8;
+
+impl Assets {
+    fn new(prefix: &str, root: PathBuf) -> Self {
+        Assets(Arc::new(AssetsInner {
+            prefix: prefix.trim().trim_end_matches('/').to_owned(),
+            root,
+            hashes: std::sync::Mutex::default(),
+        }))
+    }
+
+    /// The URL of `path` (relative to the assets directory) with its
+    /// content hash, or without one if the file doesn't exist.
+    pub fn url(&self, path: &str) -> String {
+        let path = path.trim_start_matches('/');
+        let Some(rel) = sanitize(path, false) else {
+            return format!("{}/{path}", self.0.prefix);
+        };
+        let Some(hash) = self.hash_of(&rel) else {
+            return format!("{}/{path}", self.0.prefix);
+        };
+        let (dir, file) = path.rsplit_once('/').map_or(("", path), |(d, f)| (d, f));
+        let named = match file.rsplit_once('.') {
+            Some((stem, ext)) if !stem.is_empty() => format!("{stem}.{hash}.{ext}"),
+            _ => format!("{file}.{hash}"),
+        };
+        if dir.is_empty() {
+            format!("{}/{named}", self.0.prefix)
+        } else {
+            format!("{}/{dir}/{named}", self.0.prefix)
+        }
+    }
+
+    /// The content hash of `rel`, recomputed when its size or mtime changes
+    /// (in debug builds; release builds hash each file once).
+    fn hash_of(&self, rel: &Path) -> Option<String> {
+        let path = self.0.root.join(rel);
+        let lock = || self.0.hashes.lock().unwrap_or_else(|e| e.into_inner());
+        if !cfg!(debug_assertions) {
+            if let Some((_, _, hash)) = lock().get(rel) {
+                return Some(hash.clone());
+            }
+        }
+        let meta = std::fs::metadata(&path).ok().filter(|m| m.is_file())?;
+        let (len, mtime) = (meta.len(), meta.modified().ok());
+        if let Some((l, m, hash)) = lock().get(rel) {
+            if *l == len && *m == mtime {
+                return Some(hash.clone());
+            }
+        }
+        let bytes = std::fs::read(&path).ok()?;
+        // FNV-1a: stable across builds and platforms, and plenty for naming.
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in &bytes {
+            h ^= u64::from(*b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+        let hash = format!("{:016x}", h)[..HASH_LEN].to_owned();
+        lock().insert(rel.to_owned(), (len, mtime, hash.clone()));
+        Some(hash)
+    }
+
+    /// `css/app.3f2a1b9c.css` -> (`css/app.css`, `3f2a1b9c`).
+    fn unfingerprint(&self, tail: &str, show_hidden: bool) -> Option<(PathBuf, String)> {
+        let (dir, file) = tail.rsplit_once('/').map_or(("", tail), |(d, f)| (d, f));
+        let is_hash = |s: &str| s.len() == HASH_LEN && s.bytes().all(|b| b.is_ascii_hexdigit());
+        let (plain, hash) = match file.rsplitn(3, '.').collect::<Vec<_>>()[..] {
+            [ext, hash, stem] if is_hash(hash) && !stem.is_empty() => {
+                (format!("{stem}.{ext}"), hash)
+            }
+            [hash, stem] if is_hash(hash) && !stem.is_empty() => (stem.to_owned(), hash),
+            _ => return None,
+        };
+        let joined = if dir.is_empty() {
+            plain
+        } else {
+            format!("{dir}/{plain}")
+        };
+        Some((sanitize(&joined, show_hidden)?, hash.to_ascii_lowercase()))
+    }
+}
+
+impl crate::extract::FromRequestParts for Assets {
+    async fn from_request_parts(req: &mut Request) -> crate::Result<Self> {
+        req.state::<Assets>().cloned().ok_or_else(|| {
+            Error::internal(
+                "no assets registered: add `.assets(\"/static\", \"static\")` to the app",
+            )
+        })
+    }
+}
+
+impl App {
+    /// Serve `dir` under `prefix` like [`static_files`](Self::static_files),
+    /// plus fingerprinted URLs from [`Assets::url`] (or `asset("app.css")`
+    /// in templates) that browsers and CDNs may cache for a year: a new
+    /// version of a file gets a new URL.
+    ///
+    /// ```
+    /// let app = zapline::App::new().assets("/static", "static");
+    /// ```
+    pub fn assets(self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
+        let dir = dir.into();
+        let assets = Assets::new(prefix, dir.clone());
+        let mut serve = ServeDir::new(dir);
+        serve.config().fingerprints = Some(assets.clone());
+        let app = self.static_files(prefix, serve).state(assets.clone());
+        #[cfg(feature = "views")]
+        let app = app.on_startup(move |res: crate::lifecycle::Resources| async move {
+            if let Some(views) = res.get::<crate::view::Views>() {
+                res.insert(views.extended(move |env| {
+                    let assets = assets.clone();
+                    // Escaped here so `/` isn't turned into `&#x2f;`.
+                    env.add_function("asset", move |path: &str| {
+                        minijinja::Value::from_safe_string(crate::dev::escape(&assets.url(path)))
+                    });
+                }));
+            }
+            Ok(())
+        });
+        app
     }
 }

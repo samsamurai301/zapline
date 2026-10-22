@@ -26,7 +26,9 @@ pub fn app(db: Database) -> App {
         .admin(|admin| admin)
         .jobs(jobs::register)
         .views("templates")
-        .static_files("/static", ServeDir::new("static"))
+        // static/ at /static; asset("app.css") in templates gives a URL with a
+        // content hash that browsers may cache for a year.
+        .assets("/static", "static")
         .plugin(Health::new().check("database", DbCheck::new()))
         .openapi(OpenApi::new(
             env!("CARGO_PKG_NAME"),

@@ -85,7 +85,7 @@
 //! | `http2` | | HTTP/2 in the server |
 //! | `tls` | | [`tls`]: HTTPS with rustls |
 //! | `ws` | | [`ws`]: WebSockets |
-//! | `fs` | | [`fs`]: static files with ranges, ETags and precompressed variants |
+//! | `fs` | | [`fs`]: static files with ranges, ETags, precompressed variants and content-hashed URLs |
 //! | `multipart` | | [`multipart`]: `multipart/form-data` uploads |
 //! | `compression` | | [`middleware::Compression`]: gzip, brotli, zstd and deflate |
 //! | `jwt` | | JSON Web Tokens: [`auth::Jwt`], [`auth::JwtConfig`], [`auth::Claims`] |
