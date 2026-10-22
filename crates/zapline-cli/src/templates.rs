@@ -37,6 +37,7 @@ macro_rules! file {
 }
 
 const MINIMAL: &[TemplateFile] = &[
+    file!("AGENTS.md", "common/AGENTS.md.tmpl"),
     file!("Cargo.toml", "minimal/Cargo.toml.tmpl"),
     file!(".gitignore", "common/gitignore.tmpl"),
     file!("README.md", "minimal/README.md.tmpl"),
@@ -46,6 +47,7 @@ const MINIMAL: &[TemplateFile] = &[
 ];
 
 const API: &[TemplateFile] = &[
+    file!("AGENTS.md", "common/AGENTS.md.tmpl"),
     file!("Cargo.toml", "api/Cargo.toml.tmpl"),
     file!(".gitignore", "common/gitignore.tmpl"),
     file!(".dockerignore", "common/dockerignore.tmpl"),
@@ -64,6 +66,7 @@ const API: &[TemplateFile] = &[
 ];
 
 const FULL: &[TemplateFile] = &[
+    file!("AGENTS.md", "common/AGENTS.md.tmpl"),
     file!("Cargo.toml", "full/Cargo.toml.tmpl"),
     file!(".gitignore", "common/gitignore.tmpl"),
     file!(".dockerignore", "common/dockerignore.tmpl"),

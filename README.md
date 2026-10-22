@@ -1,6 +1,14 @@
 # zapline
 
-**The productive, batteries-included Rust web framework: FastAPI ergonomics, enterprise structure, and top-of-the-chart performance.**
+[![CI](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml/badge.svg)](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/zapline.svg)](https://crates.io/crates/zapline)
+[![docs.rs](https://img.shields.io/docsrs/zapline)](https://docs.rs/zapline)
+[![guide](https://img.shields.io/badge/guide-mdBook-blue)](https://samsamurai301.github.io/zapline/)
+[![license](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#license)
+
+**FastAPI ergonomics at actix-web speed, built for humans and AI coding agents.**
+
+A batteries-included Rust web framework: typed handlers, OpenAPI generated from your code, validation, DI, auth, sessions, realtime, metrics, a thread-per-core server, and a CLI that scaffolds, generates and live-reloads. Small API surface, one obvious way to do each thing, and docs packaged so an AI assistant can learn the common 90% of the framework in under 2k tokens.
 
 ```rust
 use serde::{Deserialize, Serialize};
@@ -38,6 +46,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
 | 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
 | 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
+| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~1.6k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline routes --json` and `zapline openapi` give agents the app's shape without reading the code. |
 | 🧩 **Pay for what you use** | Optional features are Cargo features built on public extension points. Unused features cost nothing at runtime. |
 
 ## Features at a glance
@@ -60,12 +69,12 @@ That's a complete service. The request body is parsed and validated, and invalid
 ## Getting started
 
 ```sh
-cargo install --path crates/zapline-cli      # provides `zapline` and `cargo zapline`
+cargo install zapline-cli                    # provides `zapline` and `cargo zapline`
 zapline new my-api                           # --template minimal | api | full
 cd my-api && zapline dev                     # rebuilds and restarts on change
 ```
 
-zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install --path crates\zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
+zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
 
 Or add it to an existing project:
 
@@ -142,9 +151,11 @@ async fn unknown_user_is_404() {
 
 ## Documentation
 
-- **The guide** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
+- **[Cheatsheet](docs/src/cheatsheet.md)**: one runnable file with the canonical way to do each common task. Start here, or point your AI assistant at it.
+- **For AI assistants**: [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) (index) and [`llms-full.txt`](https://samsamurai301.github.io/zapline/llms-full.txt) (the whole guide in one file). Agents working on zapline itself should read [`AGENTS.md`](AGENTS.md).
+- **[The guide](https://samsamurai301.github.io/zapline/)** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
 - **API reference**: `cargo doc -p zapline --all-features --open`
-- **Examples** in [`examples/examples`](examples/examples): `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
+- **Examples** in [`examples/examples`](examples/examples): `cheatsheet`, `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the internals and the plugin extension points.
 
 ## Benchmarks

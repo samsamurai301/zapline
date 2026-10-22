@@ -1,0 +1,24 @@
+name: Bug report
+description: Something doesn't work as documented
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: The smallest handler/app that shows the problem. A failing `app.test()` test is ideal.
+      render: rust
+  - type: input
+    id: version
+    attributes:
+      label: Versions
+      description: zapline version, `rustc --version`, OS
+    validations:
+      required: true

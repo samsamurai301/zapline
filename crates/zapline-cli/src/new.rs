@@ -429,6 +429,7 @@ mod tests {
             (
                 Template::Minimal,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",
@@ -440,6 +441,7 @@ mod tests {
             (
                 Template::Api,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",
@@ -460,6 +462,7 @@ mod tests {
             (
                 Template::Full,
                 &[
+                    "AGENTS.md",
                     "Cargo.toml",
                     "src/main.rs",
                     "src/lib.rs",

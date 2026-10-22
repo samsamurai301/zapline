@@ -117,6 +117,7 @@ fn new_minimal_project() {
         files_of(&root),
         [
             ".gitignore",
+            "AGENTS.md",
             "Cargo.toml",
             "README.md",
             "src/lib.rs",

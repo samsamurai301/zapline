@@ -1,10 +1,15 @@
 [package]
 name = "zapline-macros"
-description = "Procedural macros for zapline"
+description = "Route attribute macros (#[get], #[post], ...) for the zapline web framework"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/zapline-macros"
+keywords = ["web", "http", "framework", "macros", "zapline"]
+categories = ["web-programming::http-server"]
 
 [lib]
 proc-macro = true

@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 The first public release.
 
+### AI-assisted development
+- `AGENTS.md` in the repository and in every project `zapline new` creates: commands, layout and the one canonical way to do each task.
+- A runnable cheatsheet (`examples/examples/cheatsheet.rs`, ~1.6k tokens) that covers the common 90% of the API.
+- `llms.txt` and `llms-full.txt` generated from the guide (`scripts/gen-llms.sh`) and published with the docs site.
+
 ### Core
 - Radix-tree router with typed path parameters, nested route groups, per-route typed metadata, 404/405 handling and automatic HEAD.
 - Extractors: `Path`, `Query`, `Json`, `Form`, `Bytes`, `String`, `State`, `Extension`, `HeaderMap`, `Method`, `Uri`, `ConnInfo`, `MatchedPath` and `Request`, plus `Option<T>` and `Result<T, Error>` wrappers. Rejections carry stable error codes and structured details.
