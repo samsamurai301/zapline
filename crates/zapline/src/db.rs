@@ -128,9 +128,9 @@ impl<DB: sqlx::Database> Database<DB> {
 
     /// Maximum pool size. Defaults to 4 × the number of CPUs, at least 10.
     ///
-    /// On the thread-per-core runtime (the default on Linux) each worker
-    /// thread gets its own pool of `n / workers` connections (rounded up),
-    /// so a request's database I/O never leaves its core.
+    /// With Postgres on the thread-per-core runtime (the default on Linux)
+    /// each worker thread gets its own pool of `n / workers` connections
+    /// (rounded up), so a request's database I/O never leaves its core.
     pub fn max_connections(mut self, n: u32) -> Self {
         self.max_connections = Some(n);
         self

@@ -1,5 +1,10 @@
 # Benchmarks
 
+For the full TechEmpower-style suite (database tests, latency percentiles,
+memory, all in Docker on any OS), see [`tfb/`](tfb/README.md) and its
+[latest results](tfb/results.md). This page covers the quick HTTP-only
+harness.
+
 `servers/` has three binaries that implement identical endpoints:
 
 | endpoint | response |
@@ -11,6 +16,7 @@
 All three use mimalloc and the workspace release profile (fat LTO, 1 codegen
 unit, `panic = "abort"`). Each uses its framework's default server settings,
 apart from the worker count and actix's backlog (set to match zapline's 4096).
+`run.sh` starts them with `NO_DB=1`, which leaves out the database endpoints.
 
 ## Running
 

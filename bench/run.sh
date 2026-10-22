@@ -40,7 +40,7 @@ lat() { grep -E "^\s+Latency\s+[0-9]" | awk '{print $2}'; }
 declare -A RESULT
 for fw in "${FRAMEWORKS[@]}"; do
   port=${PORTS[$fw]}
-  WORKERS=$WORKERS taskset -c "$SERVER_CPUS" "target/release/$fw" >/dev/null 2>&1 &
+  NO_DB=1 WORKERS=$WORKERS taskset -c "$SERVER_CPUS" "target/release/$fw" >/dev/null 2>&1 &
   pid=$!
   for _ in $(seq 50); do curl -sf "http://127.0.0.1:$port/plaintext" >/dev/null && break; sleep 0.1; done
 

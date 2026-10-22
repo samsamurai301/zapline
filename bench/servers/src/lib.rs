@@ -43,12 +43,12 @@ pub fn database_url() -> String {
     })
 }
 
-/// Total pool size, shared by every worker (`POOL`, default 32).
+/// Total pool size (`POOL`, default 64).
 pub fn pool_size() -> u32 {
     std::env::var("POOL")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(32)
+        .unwrap_or(64)
 }
 
 pub fn workers() -> usize {

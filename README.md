@@ -177,7 +177,7 @@ The same three endpoints are implemented identically in zapline, axum 0.8, and a
 _2 server workers on CPUs 0,1; wrk 2 threads / 256 connections on CPUs 2,3; best of 3 × 10s; 4 CPUs total, Linux 6.18.44-fc-v139._
 <!-- BENCH:END -->
 
-These numbers come from the complete framework with default features (OpenAPI, validation, tracing and so on compiled in). Features you don't use add no per-request cost. Hot-path changes are verified by instruction counts per request (callgrind), not only wall-clock time. Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
+These numbers come from the complete framework with default features (OpenAPI, validation, tracing and so on compiled in). Features you don't use add no per-request cost. Hot-path changes are verified by instruction counts per request (callgrind), not only wall-clock time. For the full TechEmpower-style comparison (database tests, latency, memory) that runs anywhere with Docker, see [`bench/tfb`](bench/tfb/README.md) and its [results](bench/tfb/results.md). Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
 
 ## Project status
 
