@@ -143,6 +143,8 @@ pub struct Telemetry {
     thread_names: bool,
     file_line: bool,
     writer: Option<BoxMakeWriter>,
+    #[cfg(feature = "otlp")]
+    otlp: Option<crate::otlp::OtlpConfig>,
 }
 
 impl Default for Telemetry {
@@ -174,7 +176,48 @@ impl Telemetry {
             thread_names: false,
             file_line: false,
             writer: None,
+            #[cfg(feature = "otlp")]
+            otlp: None,
         }
+    }
+
+    /// Also send spans to an OpenTelemetry collector over OTLP/HTTP (feature
+    /// `otlp`): `endpoint` is its base URL (`http://localhost:4318`) or the
+    /// full `/v1/traces` URL. Without this call, setting
+    /// `OTEL_EXPORTER_OTLP_ENDPOINT` (or `..._TRACES_ENDPOINT`) does the
+    /// same. `OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME` and
+    /// `OTEL_RESOURCE_ATTRIBUTES` are honored.
+    ///
+    /// ```no_run
+    /// zapline::telemetry::Telemetry::new()
+    ///     .otlp("http://localhost:4318")
+    ///     .service_name("shop")
+    ///     .init();
+    /// ```
+    #[cfg(feature = "otlp")]
+    pub fn otlp(mut self, endpoint: impl AsRef<str>) -> Self {
+        let name = self.otlp.take().and_then(|c| c.service_name);
+        let mut config = crate::otlp::OtlpConfig::new(endpoint.as_ref());
+        config.service_name = name;
+        self.otlp = Some(config);
+        self
+    }
+
+    /// The `service.name` traces are reported under (default:
+    /// `OTEL_SERVICE_NAME`, else the executable's name).
+    ///
+    /// ```
+    /// let t = zapline::telemetry::Telemetry::new().service_name("shop");
+    /// ```
+    #[cfg(feature = "otlp")]
+    pub fn service_name(mut self, name: impl Into<String>) -> Self {
+        let config = self.otlp.get_or_insert_with(|| crate::otlp::OtlpConfig {
+            url: String::new(),
+            headers: Vec::new(),
+            service_name: None,
+        });
+        config.service_name = Some(name.into());
+        self
     }
 
     pub fn format(mut self, format: Format) -> Self {
@@ -277,12 +320,25 @@ impl Telemetry {
 
     /// Build the subscriber without installing it, e.g. for
     /// `tracing::dispatcher::with_default` in tests.
-    pub fn into_dispatch(self) -> Result<Dispatch, TelemetryError> {
+    pub fn into_dispatch(mut self) -> Result<Dispatch, TelemetryError> {
         let filter = self.build_filter()?;
+        #[cfg(feature = "otlp")]
+        let otlp = {
+            let configured = self.otlp.take();
+            let name = configured.as_ref().and_then(|c| c.service_name.clone());
+            configured
+                .filter(|c| !c.url.is_empty())
+                .or_else(crate::otlp::OtlpConfig::from_env)
+                .map(|mut c| {
+                    c.service_name = c.service_name.or(name);
+                    c.layer()
+                })
+        };
         let layer = self.fmt_layer();
-        Ok(Dispatch::new(
-            tracing_subscriber::registry().with(filter).with(layer),
-        ))
+        let registry = tracing_subscriber::registry().with(filter).with(layer);
+        #[cfg(feature = "otlp")]
+        let registry = registry.with(otlp);
+        Ok(Dispatch::new(registry))
     }
 
     fn build_filter(&self) -> Result<EnvFilter, TelemetryError> {
@@ -653,6 +709,7 @@ impl Middleware for Trace {
                 url.path = %req.path(),
                 client.address = client.map(display),
                 request_id = request_id.map(display),
+                traceparent = req.headers().get("traceparent").and_then(|v| v.to_str().ok()).map(display),
                 http.status_code = Empty,
                 latency_ms = Empty,
             )

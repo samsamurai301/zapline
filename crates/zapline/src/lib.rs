@@ -96,6 +96,7 @@
 //! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
 //! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
 //! | `redis` | | [`redis`]: Redis client; shared cache, live updates, rate limits and sessions |
+//! | `otlp` | | OpenTelemetry traces over OTLP/HTTP from [`telemetry`] |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
@@ -171,6 +172,8 @@ pub mod i18n;
 pub mod jobs;
 #[cfg(feature = "mail")]
 pub mod mail;
+#[cfg(feature = "otlp")]
+mod otlp;
 #[cfg(feature = "redis")]
 pub mod redis;
 #[cfg(feature = "storage")]

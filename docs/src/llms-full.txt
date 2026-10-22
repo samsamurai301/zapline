@@ -329,6 +329,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
 | Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()` ([Several instances](scaling.md)) |
+| OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
@@ -5601,6 +5602,39 @@ fn app() -> App {
 
 When the subscriber filters out every level `Trace` could emit, it costs one level comparison per request. The simpler `Logger` middleware prints one line per request to stderr and needs no setup; prefer `Trace` in services.
 
+## Traces to OpenTelemetry (OTLP)
+
+With the `otlp` feature, spans go to any OpenTelemetry collector or backend that accepts OTLP/HTTP (Jaeger, Grafana Tempo, Honeycomb, Datadog, the OpenTelemetry Collector...), with no OpenTelemetry SDK in your dependencies. Set the standard variable and that's it:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_SERVICE_NAME=shop cargo run
+```
+
+`telemetry::init()` (and any `Telemetry`) picks it up. Or configure it in code:
+
+```rust
+Telemetry::new()
+    .otlp("http://localhost:4318") // or the full .../v1/traces URL
+    .service_name("shop")
+    .init();
+```
+
+| Variable | Use |
+|---|---|
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Collector base URL; traces go to `{url}/v1/traces` |
+| `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full traces URL (wins over the above) |
+| `OTEL_EXPORTER_OTLP_HEADERS` | `key=value,key2=value2`, e.g. an API key (values may be percent-encoded) |
+| `OTEL_SERVICE_NAME` | `service.name` (default: the executable's name) |
+| `OTEL_RESOURCE_ATTRIBUTES` | Extra resource attributes, `deployment.environment=prod,...` |
+
+What you get:
+
+- Each request [`Trace`](#request-tracing-with-trace) records becomes a server span named like `GET /users/{id}`, with `http.request.method`, `http.route`, `url.path`, `http.response.status_code` and `client.address`. 5xx responses are marked as errors.
+- Your own `tracing` spans (`info_span!("load_user")`, `#[instrument]`) become child spans, and log events inside them become span events.
+- A request with a W3C `traceparent` header continues that trace, so a call from another traced service shows up as one trace.
+
+Spans are exported from a background thread in batches of up to 512, at least every second. If the collector is down, a warning is printed once and spans beyond 8,192 waiting are dropped, so the app never blocks or grows without bound. Only the spans your log filter enables are exported: with `RUST_LOG=warn`, request spans (`INFO`) are filtered out too.
+
 ## Metrics
 
 `Metrics` instruments every route and serves a Prometheus scrape endpoint. Install it with `.plugin(Metrics::new())`, then `curl localhost:8080/metrics`:
@@ -6244,6 +6278,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
+| `otlp` | `full` | OpenTelemetry trace export over OTLP/HTTP: `Telemetry::otlp`, or just `OTEL_EXPORTER_OTLP_ENDPOINT` ([Observability](observability.md#traces-to-opentelemetry-otlp)) | `tracing`, `json` | `hyper-rustls` (hyper client, rustls) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
