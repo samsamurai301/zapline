@@ -52,9 +52,9 @@ use lettre::message::{header::ContentType, Mailbox, MultiPart, SinglePart};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde::{Deserialize, Serialize};
 
-use crate::dev::{escape, DevPanel};
+use crate::dev::{escape, internal, DevPanel};
 use crate::extract::FromRequestParts;
-use crate::{App, Error, Html, Request, Result};
+use crate::{App, Error, Html, Request, Result, Routes};
 
 /// How many messages the development outbox keeps.
 const OUTBOX_SIZE: usize = 50;
@@ -370,7 +370,8 @@ impl App {
                 )
             })
         });
-        app.get(DEV_INBOX_PATH, dev_inbox).dev_panel(panel)
+        app.mount(internal(Routes::new().get(DEV_INBOX_PATH, dev_inbox)))
+            .dev_panel(panel)
     }
 }
 

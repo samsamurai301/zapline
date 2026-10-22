@@ -374,7 +374,7 @@ fn module(plan: &Plan<'_>) -> String {
         n.plural
     );
     s.push('\n');
-    s.push_str("use zapline::db::{sqlx, Db};\n");
+    s.push_str("use zapline::db::{sqlx, Db, ListParams, Listing, Paged};\n");
     s.push_str("use zapline::prelude::*;\n");
     if plan.html {
         s.push_str("use zapline::view::{context, HxRequest, Views};\n");
@@ -417,14 +417,48 @@ fn module(plan: &Plan<'_>) -> String {
     }
     s.push_str("}\n\n");
 
-    let _ = writeln!(s, "/// Query parameters for `GET {api}`.");
-    s.push_str("#[model]\n");
-    s.push_str("pub struct ListQuery {\n");
-    s.push_str("    /// Maximum number of items to return (default 50, at most 200).\n");
-    s.push_str("    pub limit: Option<i64>,\n");
-    s.push_str("    /// Number of items to skip (default 0).\n");
-    s.push_str("    pub offset: Option<i64>,\n");
-    s.push_str("}\n\n");
+    // What the list endpoint accepts.
+    let sortable: Vec<String> = plan
+        .fields
+        .iter()
+        .filter(|f| f.ty != FieldType::Text)
+        .map(|f| format!("\"{}\"", f.name))
+        .collect();
+    let searchable: Vec<String> = plan
+        .fields
+        .iter()
+        .filter(|f| matches!(f.ty, FieldType::String | FieldType::Text))
+        .map(|f| format!("\"{}\"", f.name))
+        .collect();
+    let mut accepts = vec!["`?limit=&offset=`".to_owned(), "`?sort=-id`".to_owned()];
+    let mut chain = format!(
+        "    Listing::new(\"{t}\", \"{select_cols}\")\n        .sortable([{}])\n",
+        sortable.join(", "),
+        t = n.plural,
+    );
+    if !searchable.is_empty() {
+        accepts.push(format!(
+            "`?q=` (searches {})",
+            searchable.join(", ").replace('"', "")
+        ));
+        let _ = writeln!(chain, "        .search([{}])", searchable.join(", "));
+    }
+    for f in plan.fields {
+        let filter = match f.ty {
+            FieldType::Int => "filter_int",
+            FieldType::Bool => "filter_bool",
+            FieldType::String => "filter_text",
+            FieldType::Text | FieldType::Float => continue,
+        };
+        accepts.push(format!("`?{}=`", f.name));
+        let _ = writeln!(chain, "        .{filter}(\"{}\")", f.name);
+    }
+    let _ = writeln!(
+        s,
+        "/// `GET {api}` accepts {}.\nfn listing() -> Listing {{\n{}}}\n",
+        accepts.join(", "),
+        chain
+    );
 
     // Mount.
     let mut handlers = vec!["list", "get_one", "create", "replace", "remove"];
@@ -441,14 +475,6 @@ fn module(plan: &Plan<'_>) -> String {
     // Queries.
     s.push_str(
         "// ---- queries ---------------------------------------------------------------\n\n",
-    );
-    let _ = writeln!(
-        s,
-        "async fn fetch_page(db: &Db, limit: i64, offset: i64) -> Result<Vec<{p}>> {{\n    \
-         let rows = sqlx::query_as::<_, {p}>(\"SELECT {select_cols} FROM {t} ORDER BY id LIMIT $1 OFFSET $2\")\n        \
-         .bind(limit)\n        .bind(offset)\n        .fetch_all(&**db)\n        .await?;\n    Ok(rows)\n}}\n",
-        p = n.pascal,
-        t = n.plural,
     );
     let _ = writeln!(
         s,
@@ -474,10 +500,8 @@ fn module(plan: &Plan<'_>) -> String {
     let _ = writeln!(
         s,
         "/// List {ph}.\n#[get(\"{api}\", tag = \"{t}\")]\n\
-         async fn list(db: Db, Query(q): Query<ListQuery>) -> Result<Json<Vec<{p}>>> {{\n    \
-         let limit = q.limit.unwrap_or(50).clamp(1, 200);\n    \
-         let offset = q.offset.unwrap_or(0).max(0);\n    \
-         Ok(Json(fetch_page(&db, limit, offset).await?))\n}}\n",
+         async fn list(db: Db, params: ListParams) -> Result<Json<Paged<{p}>>> {{\n    \
+         Ok(Json(listing().fetch(&db, &params).await?))\n}}\n",
         ph = n.plural_human,
         p = n.pascal,
         t = n.plural,
@@ -527,8 +551,10 @@ fn module(plan: &Plan<'_>) -> String {
         let _ = writeln!(
             s,
             "async fn render(views: &Views, db: &Db, hx: &HxRequest) -> Result<Html<String>> {{\n    \
-             let items = fetch_page(db, 200, 0).await?;\n    \
+             let page: Paged<{p}> = listing().page_size(200, 200).fetch(db, &ListParams::default()).await?;\n    \
+             let items = page.items;\n    \
              views.page_or_block(hx, \"{t}/index.html\", \"list\", context! {{ items }})\n}}\n",
+            p = n.pascal,
             t = n.plural,
         );
         let _ = writeln!(
@@ -674,8 +700,9 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
          let res = client.get(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 200);\n    \
          assert_eq!(res.json::<Value>()[\"{f}\"], created[\"{f}\"]);\n\n    \
-         let list: Vec<Value> = client.get(\"{api}\").send().await.json();\n    \
-         assert_eq!(list.len(), 1);\n\n    \
+         let list: Value = client.get(\"{api}\").send().await.json();\n    \
+         assert_eq!(list[\"total\"], 1);\n    \
+         assert_eq!(list[\"items\"][0][\"id\"], id);\n\n    \
          let res = client.put(&format!(\"{api}/{{id}}\")).json(&json!({body})).send().await;\n    \
          assert_eq!(res.status(), 200);\n\n    \
          let res = client.delete(&format!(\"{api}/{{id}}\")).send().await;\n    \

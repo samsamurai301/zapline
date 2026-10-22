@@ -186,9 +186,11 @@ impl App {
                 let panels = panels.clone();
                 async move { act(req, panels).await }
             };
-            Routes::new()
-                .get(DEV_CONSOLE_PATH, page)
-                .post(&format!("{DEV_CONSOLE_PATH}/{{panel}}"), act)
+            internal(
+                Routes::new()
+                    .get(DEV_CONSOLE_PATH, page)
+                    .post(&format!("{DEV_CONSOLE_PATH}/{{panel}}"), act),
+            )
         })
     }
 
@@ -206,6 +208,15 @@ impl App {
             .get_or_insert_default::<Panels>()
             .clone()
     }
+}
+
+/// Keep framework routes (the console, the dev inbox, signed file links)
+/// out of the OpenAPI spec and the typed clients generated from it.
+#[allow(dead_code)]
+pub(crate) fn internal(routes: Routes) -> Routes {
+    #[cfg(feature = "openapi")]
+    let routes = routes.meta_all(crate::openapi::OperationDoc::hidden_route());
+    routes
 }
 
 /// Only this machine may see the console (requests without a peer address

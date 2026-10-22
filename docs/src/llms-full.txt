@@ -323,6 +323,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
+| List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
@@ -2598,6 +2599,43 @@ With both features enabled, `Db` and `Database` default to Postgres; use `Sqlite
 | not-null / check violation | 422, code `constraint_violation` |
 | pool timeout | 503, code `db_pool_timeout` |
 | anything else | 500 (details logged, not sent) |
+
+## List endpoints: paging, sorting, filters, search
+
+`Listing` turns the query string into a safe, paged query. Callers get pagination, sorting, filters and search; you write one expression:
+
+```rust
+use zapline::db::{sqlx, Db, ListParams, Listing, Paged};
+
+#[get("/api/posts")]
+async fn list(db: Db, params: ListParams) -> Result<Json<Paged<Post>>> {
+    let page = Listing::new("posts", "id, title, published, author_id")
+        .sortable(["title", "published"])
+        .search(["title", "body"])
+        .filter_bool("published")
+        .filter_int("author_id")
+        .fetch(&db, &params)
+        .await?;
+    Ok(Json(page))
+}
+```
+
+`GET /api/posts?q=rust&published=true&sort=-id&limit=20&offset=40` returns:
+
+```json
+{"items": [...], "total": 57, "limit": 20, "offset": 40}
+```
+
+| Query | Meaning |
+|---|---|
+| `limit`, `offset` | Page size (default 50, capped at 200; change with `.page_size(default, max)`) and start. |
+| `sort=title`, `sort=-title`, `sort=-done,title` | Ascending, descending, several keys. Only `.sortable(..)` columns and the key (`id`) are allowed. Ties are broken by the key, so pages are stable. |
+| `q=words` | Case-insensitive substring match over the `.search(..)` columns. `%` and `_` match themselves. |
+| `published=true`, `author_id=7`, `status=paid` | Equality filters declared with `.filter_bool`, `.filter_int` and `.filter_text`. |
+
+Nothing from the request reaches the SQL text: values are bound as parameters, and sort columns must be on the allow-list. Bad input is a `400` with code `invalid_sort`, `invalid_filter` or `invalid_page`, and the message lists what's allowed.
+
+For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition the request can't remove. `zapline generate resource` writes a `listing()` like this for every resource, with sorting on every column, search on the text fields and a filter per field. It works on SQLite and Postgres, and `ListParams` documents `limit`, `offset`, `sort` and `q` in the OpenAPI spec.
 
 ## Migrations
 

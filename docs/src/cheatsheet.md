@@ -29,6 +29,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
+| List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |

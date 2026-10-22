@@ -61,6 +61,43 @@ With both features enabled, `Db` and `Database` default to Postgres; use `Sqlite
 | pool timeout | 503, code `db_pool_timeout` |
 | anything else | 500 (details logged, not sent) |
 
+## List endpoints: paging, sorting, filters, search
+
+`Listing` turns the query string into a safe, paged query. Callers get pagination, sorting, filters and search; you write one expression:
+
+```rust
+use zapline::db::{sqlx, Db, ListParams, Listing, Paged};
+
+#[get("/api/posts")]
+async fn list(db: Db, params: ListParams) -> Result<Json<Paged<Post>>> {
+    let page = Listing::new("posts", "id, title, published, author_id")
+        .sortable(["title", "published"])
+        .search(["title", "body"])
+        .filter_bool("published")
+        .filter_int("author_id")
+        .fetch(&db, &params)
+        .await?;
+    Ok(Json(page))
+}
+```
+
+`GET /api/posts?q=rust&published=true&sort=-id&limit=20&offset=40` returns:
+
+```json
+{"items": [...], "total": 57, "limit": 20, "offset": 40}
+```
+
+| Query | Meaning |
+|---|---|
+| `limit`, `offset` | Page size (default 50, capped at 200; change with `.page_size(default, max)`) and start. |
+| `sort=title`, `sort=-title`, `sort=-done,title` | Ascending, descending, several keys. Only `.sortable(..)` columns and the key (`id`) are allowed. Ties are broken by the key, so pages are stable. |
+| `q=words` | Case-insensitive substring match over the `.search(..)` columns. `%` and `_` match themselves. |
+| `published=true`, `author_id=7`, `status=paid` | Equality filters declared with `.filter_bool`, `.filter_int` and `.filter_text`. |
+
+Nothing from the request reaches the SQL text: values are bound as parameters, and sort columns must be on the allow-list. Bad input is a `400` with code `invalid_sort`, `invalid_filter` or `invalid_page`, and the message lists what's allowed.
+
+For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition the request can't remove. `zapline generate resource` writes a `listing()` like this for every resource, with sorting on every column, search on the text fields and a filter per field. It works on SQLite and Postgres, and `ListParams` documents `limit`, `offset`, `sort` and `q` in the OpenAPI spec.
+
 ## Migrations
 
 Migrations are plain SQL files in `migrations/`, applied in file-name order, each exactly once (sqlx tracks them in `_sqlx_migrations`).

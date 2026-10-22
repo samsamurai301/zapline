@@ -41,8 +41,10 @@ use bytes::Bytes;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 
+use crate::dev::internal;
 use crate::extract::FromRequestParts;
 use crate::response::{IntoResponse, Response};
+use crate::router::Routes;
 use crate::{header, App, Error, HeaderValue, Request, Result};
 
 #[cfg(feature = "s3")]
@@ -500,7 +502,9 @@ impl App {
         let serve = storage.served_by_app();
         let app = self.state(storage);
         if serve {
-            app.get(&format!("{FILES_PATH}/{{*key}}"), serve_file)
+            app.mount(internal(
+                Routes::new().get(&format!("{FILES_PATH}/{{*key}}"), serve_file),
+            ))
         } else {
             app
         }
