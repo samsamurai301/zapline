@@ -114,12 +114,12 @@ fn log_error(msg: fmt::Arguments<'_>) {
 }
 
 #[cfg(feature = "tracing")]
-fn log_warn(msg: fmt::Arguments<'_>) {
+pub(crate) fn log_warn(msg: fmt::Arguments<'_>) {
     tracing::warn!("{msg}");
 }
 
 #[cfg(not(feature = "tracing"))]
-fn log_warn(msg: fmt::Arguments<'_>) {
+pub(crate) fn log_warn(msg: fmt::Arguments<'_>) {
     eprintln!("[zapline] warning: {msg}");
 }
 

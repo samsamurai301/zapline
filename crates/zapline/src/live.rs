@@ -77,6 +77,8 @@ impl Update {
 pub struct Live {
     topics: Arc<Mutex<HashMap<String, broadcast::Sender<Update>>>>,
     capacity: usize,
+    #[cfg(feature = "redis")]
+    relay: Option<Arc<relay::Relay>>,
 }
 
 impl Default for Live {
@@ -103,6 +105,8 @@ impl Live {
         Live {
             topics: Arc::default(),
             capacity: DEFAULT_CAPACITY,
+            #[cfg(feature = "redis")]
+            relay: None,
         }
     }
 
@@ -122,14 +126,43 @@ impl Live {
         self.topics.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Also deliver updates to (and from) every other instance of the app
+    /// through Redis pub/sub (feature `redis`), on channels
+    /// `zapline:live:{topic}`. Register the hub with [`App::live`], which
+    /// runs the listener.
+    ///
+    /// ```
+    /// use zapline::live::Live;
+    /// use zapline::redis::Redis;
+    ///
+    /// let live = Live::new().redis(Redis::new("redis://localhost")?);
+    /// # Ok::<(), zapline::Error>(())
+    /// ```
+    #[cfg(feature = "redis")]
+    #[must_use]
+    pub fn redis(mut self, redis: crate::redis::Redis) -> Self {
+        self.relay = Some(Arc::new(relay::Relay::new(redis)));
+        self
+    }
+
     /// Send `data` as an `event` to everyone subscribed to `topic`, and
-    /// return how many subscribers there were.
+    /// return how many subscribers there were in this process.
     ///
     /// ```
     /// let live = zapline::live::Live::new();
     /// assert_eq!(live.publish("orders", "created", r#"{"id":7}"#), 0);
     /// ```
     pub fn publish(&self, topic: &str, event: &str, data: impl Into<String>) -> usize {
+        let data = data.into();
+        #[cfg(feature = "redis")]
+        if let Some(relay) = &self.relay {
+            relay.send(topic, event, &data);
+        }
+        self.deliver(topic, event, data)
+    }
+
+    /// Hand an update to this process's subscribers.
+    fn deliver(&self, topic: &str, event: &str, data: String) -> usize {
         let mut topics = self.lock();
         let Some(sender) = topics.get(topic) else {
             return 0;
@@ -137,7 +170,7 @@ impl Live {
         let update = Update {
             topic: topic.to_owned(),
             event: event.to_owned(),
-            data: data.into(),
+            data,
         };
         match sender.send(update) {
             Ok(n) => n,
@@ -305,6 +338,141 @@ impl App {
                 html
             })
         });
-        self.state(live).dev_panel(panel)
+        #[cfg(feature = "redis")]
+        let app = match live.relay.clone() {
+            Some(relay) => {
+                let hub = live.clone();
+                self.background(move |_res, shutdown: crate::tasks::Shutdown| async move {
+                    relay
+                        .listen(shutdown, move |topic, event, data| {
+                            hub.deliver(topic, event, data);
+                        })
+                        .await;
+                })
+            }
+            None => self,
+        };
+        #[cfg(not(feature = "redis"))]
+        let app = self;
+        app.state(live).dev_panel(panel)
+    }
+}
+
+#[cfg(feature = "redis")]
+mod relay {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+    use std::time::Duration;
+
+    use serde::{Deserialize, Serialize};
+    use tokio::sync::mpsc;
+
+    use crate::redis::Redis;
+    use crate::tasks::{log_warn, Shutdown};
+
+    const CHANNEL: &str = "zapline:live:";
+
+    /// What goes over Redis: the update, and which process sent it (so it
+    /// isn't delivered twice there).
+    #[derive(Serialize, Deserialize)]
+    struct Wire<'a> {
+        o: &'a str,
+        e: &'a str,
+        d: &'a str,
+    }
+
+    pub(super) struct Relay {
+        redis: Redis,
+        origin: String,
+        /// Updates waiting to be published, in order.
+        outbox: OnceLock<mpsc::UnboundedSender<(String, String)>>,
+    }
+
+    impl Relay {
+        pub(super) fn new(redis: Redis) -> Self {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos(),
+            );
+            h.write_u32(std::process::id());
+            Relay {
+                redis,
+                origin: format!("{:016x}", h.finish()),
+                outbox: OnceLock::new(),
+            }
+        }
+
+        pub(super) fn send(&self, topic: &str, event: &str, data: &str) {
+            let wire = Wire {
+                o: &self.origin,
+                e: event,
+                d: data,
+            };
+            let Ok(payload) = serde_json::to_string(&wire) else {
+                return;
+            };
+            let outbox = self.outbox.get_or_init(|| {
+                let (tx, mut rx) = mpsc::unbounded_channel::<(String, String)>();
+                let redis = self.redis.clone();
+                match tokio::runtime::Handle::try_current() {
+                    Ok(rt) => {
+                        rt.spawn(async move {
+                            while let Some((channel, payload)) = rx.recv().await {
+                                if let Err(e) = redis.cmd(["PUBLISH", &channel, &payload]).await {
+                                    log_warn(format_args!("live: {}", e.message()));
+                                }
+                            }
+                        });
+                    }
+                    Err(_) => log_warn(format_args!(
+                        "live: publishing outside a Tokio runtime; updates stay in this process"
+                    )),
+                }
+                tx
+            });
+            let _ = outbox.send((format!("{CHANNEL}{topic}"), payload));
+        }
+
+        /// Deliver other instances' updates until shutdown, reconnecting
+        /// with backoff when Redis goes away.
+        pub(super) async fn listen(
+            &self,
+            shutdown: Shutdown,
+            deliver: impl Fn(&str, &str, String),
+        ) {
+            let mut backoff = Duration::from_millis(500);
+            while !shutdown.is_shutdown() {
+                match self.redis.psubscribe(&format!("{CHANNEL}*")).await {
+                    Ok(mut sub) => loop {
+                        backoff = Duration::from_millis(500);
+                        tokio::select! {
+                            message = sub.next() => match message {
+                                Ok((channel, payload)) => {
+                                    let Some(topic) = channel.strip_prefix(CHANNEL) else { continue };
+                                    let Ok(wire) = serde_json::from_slice::<Wire<'_>>(&payload) else { continue };
+                                    if wire.o != self.origin {
+                                        deliver(topic, wire.e, wire.d.to_owned());
+                                    }
+                                }
+                                Err(e) => {
+                                    log_warn(format_args!("live: lost the Redis subscription: {e}"));
+                                    break;
+                                }
+                            },
+                            () = shutdown.wait() => return,
+                        }
+                    },
+                    Err(e) => log_warn(format_args!("live: {}", e.message())),
+                }
+                tokio::select! {
+                    () = tokio::time::sleep(backoff) => {}
+                    () = shutdown.wait() => return,
+                }
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
     }
 }

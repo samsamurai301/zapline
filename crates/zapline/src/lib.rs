@@ -63,6 +63,7 @@
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
 //! | Translations | [`i18n`]: messages per language, `Locale` extractor, plurals, `t()` in templates |
 //! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
+//! | Several instances | [`redis`]: shared cache, live updates, rate limits and sessions |
 //! | Files | [`storage`]: local, memory and S3 storage with expiring links |
 //! | Realtime and content | [`live`] (pub/sub to browsers), [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
@@ -94,6 +95,7 @@
 //! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
 //! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
 //! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
+//! | `redis` | | [`redis`]: Redis client; shared cache, live updates, rate limits and sessions |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
@@ -169,6 +171,8 @@ pub mod i18n;
 pub mod jobs;
 #[cfg(feature = "mail")]
 pub mod mail;
+#[cfg(feature = "redis")]
+pub mod redis;
 #[cfg(feature = "storage")]
 pub mod storage;
 pub mod tasks;

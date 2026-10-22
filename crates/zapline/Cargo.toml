@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies", "views",
-    "password", "mail", "storage", "cache", "oauth", "i18n",
+    "password", "mail", "storage", "cache", "oauth", "i18n", "redis",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -26,6 +26,7 @@ openapi = ["json", "dep:schemars", "zapline-macros?/openapi"]
 validate = ["json", "dep:validator", "zapline-macros?/validate"]
 config = ["dep:toml"]
 i18n = ["dep:toml"]
+redis = ["json"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 http2 = ["hyper/http2", "hyper-util/http2", "hyper-util/server-auto"]
 tls = ["dep:tokio-rustls"]

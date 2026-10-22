@@ -65,7 +65,7 @@ async fn ws(live: Live, upgrade: WebSocketUpgrade) -> Response {
 
 ## Several instances
 
-`Live` reaches the subscribers of one process. Behind a load balancer with several instances, a shared backend (Redis or Postgres `LISTEN/NOTIFY`) is on the roadmap.
+`Live::new()` reaches the subscribers of one process. Behind a load balancer with several instances, use `Live::new().redis(redis)` (feature `redis`) so every update reaches visitors on every instance: see [Running several instances](scaling.md).
 
 ## Testing
 

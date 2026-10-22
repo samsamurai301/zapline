@@ -677,6 +677,9 @@ pub struct RateLimit {
     proxies: TrustedProxies,
     ipv6_prefix: u8,
     store: Arc<Store>,
+    /// Shared buckets for every instance of the app, instead of `store`.
+    #[cfg(feature = "redis")]
+    redis: Option<crate::redis::Redis>,
 }
 
 impl RateLimit {
@@ -690,6 +693,8 @@ impl RateLimit {
             proxies: TrustedProxies::default(),
             ipv6_prefix: 64,
             store: Arc::new(Store::new(DEFAULT_MAX_KEYS)),
+            #[cfg(feature = "redis")]
+            redis: None,
         }
     }
 
@@ -798,6 +803,27 @@ impl RateLimit {
         self
     }
 
+    /// Keep the buckets in Redis (feature `redis`), so the limit holds
+    /// across every instance of the app. Each check is one round trip; if
+    /// Redis can't be reached, requests are let through (with a warning)
+    /// rather than failing.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use zapline::middleware::RateLimit;
+    /// use zapline::redis::Redis;
+    ///
+    /// let limit = RateLimit::per_ip(100, Duration::from_secs(60))
+    ///     .redis(Redis::new("redis://localhost")?);
+    /// # Ok::<(), zapline::Error>(())
+    /// ```
+    #[cfg(feature = "redis")]
+    #[must_use]
+    pub fn redis(mut self, redis: crate::redis::Redis) -> Self {
+        self.redis = Some(redis);
+        self
+    }
+
     /// The client IP as this limiter sees it (honoring trusted proxies).
     pub fn client_ip(&self, req: &Request) -> Option<IpAddr> {
         self.proxies.client_ip(req)
@@ -837,17 +863,121 @@ impl RateLimit {
     }
 
     fn reject(&self, out: &Outcome, limit: &HeaderValue) -> Response {
-        let retry = ceil_secs(out.retry_ns).max(1);
-        let mut err = Error::too_many_requests()
-            .with_code("rate_limited")
-            .with_header(RETRY_AFTER, num_header(retry));
-        if self.headers {
-            err = err
-                .with_header(RATELIMIT_LIMIT, limit.clone())
-                .with_header(RATELIMIT_REMAINING, HeaderValue::from_static("0"))
-                .with_header(RATELIMIT_RESET, num_header(ceil_secs(out.reset_ns)));
+        reject(out, limit, self.headers)
+    }
+
+    /// The bucket's Redis key: the same for a client on every instance.
+    #[cfg(feature = "redis")]
+    fn redis_key(&self, req: &Request, salt: &Salt<'_>) -> Option<String> {
+        // Fixed keys, so every process hashes alike; route salts use the
+        // route's path instead of its (per-process) address.
+        #[allow(deprecated)]
+        let mut h = std::hash::SipHasher::new();
+        match salt {
+            Salt::Route(_) => req.matched_path().unwrap_or("").hash(&mut h),
+            Salt::Scope(scope) => scope.hash(&mut h),
+            Salt::Default => {}
         }
-        err.into_response()
+        match &self.key {
+            KeyKind::Global => 0u8.hash(&mut h),
+            KeyKind::Ip => self.hash_ip(req, &mut h),
+            KeyKind::Header(name) => match req.headers().get(name) {
+                Some(v) => {
+                    2u8.hash(&mut h);
+                    v.as_bytes().hash(&mut h);
+                }
+                None => self.hash_ip(req, &mut h),
+            },
+            KeyKind::Custom(k) => {
+                3u8.hash(&mut h);
+                k.key(req)?.hash(&mut h);
+            }
+        }
+        Some(format!("zapline:ratelimit:{:016x}", h.finish()))
+    }
+}
+
+/// GCRA in Redis, timed by the server's clock: `{allowed, reset_us, retry_us}`.
+#[cfg(feature = "redis")]
+const GCRA_SCRIPT: &str = r#"
+local t = redis.call('TIME')
+local now = tonumber(t[1]) * 1000000 + tonumber(t[2])
+local interval, tolerance = tonumber(ARGV[1]), tonumber(ARGV[2])
+local tat = math.max(tonumber(redis.call('GET', KEYS[1]) or 0), now)
+local new_tat = tat + interval
+local allow_at = new_tat - tolerance
+if now < allow_at then return {0, tat - now, allow_at - now} end
+redis.call('SET', KEYS[1], string.format('%d', new_tat), 'PX', math.ceil((new_tat - now) / 1000) + 1)
+return {1, new_tat - now, 0}
+"#;
+
+#[cfg(feature = "redis")]
+async fn redis_check(redis: &crate::redis::Redis, key: &str, quota: &Quota) -> Option<Outcome> {
+    use crate::redis::Reply;
+    let interval = (quota.interval / 1000).max(1);
+    let tolerance = (quota.tolerance / 1000).max(interval);
+    let reply = redis
+        .cmd([
+            "EVAL",
+            GCRA_SCRIPT,
+            "1",
+            key,
+            &interval.to_string(),
+            &tolerance.to_string(),
+        ])
+        .await;
+    let parts = match reply {
+        Ok(Reply::Array(parts)) => parts,
+        Ok(other) => {
+            crate::tasks::log_warn(format_args!("rate limit: unexpected Redis reply {other:?}"));
+            return None;
+        }
+        Err(e) => {
+            crate::tasks::log_warn(format_args!("rate limit: {}", e.message()));
+            return None;
+        }
+    };
+    let n = |i: usize| parts.get(i).and_then(Reply::int).unwrap_or(0).max(0) as u64;
+    let (allowed, reset_us, retry_us) = (n(0) == 1, n(1), n(2));
+    Some(Outcome {
+        allowed,
+        remaining: if allowed {
+            tolerance.saturating_sub(reset_us) / interval
+        } else {
+            0
+        },
+        reset_ns: reset_us.saturating_mul(1000),
+        retry_ns: retry_us.saturating_mul(1000),
+    })
+}
+
+/// The `429` answer, with `Retry-After` (and `RateLimit-*` when `headers`).
+fn reject(out: &Outcome, limit: &HeaderValue, headers: bool) -> Response {
+    let retry = ceil_secs(out.retry_ns).max(1);
+    let mut err = Error::too_many_requests()
+        .with_code("rate_limited")
+        .with_header(RETRY_AFTER, num_header(retry));
+    if headers {
+        err = err
+            .with_header(RATELIMIT_LIMIT, limit.clone())
+            .with_header(RATELIMIT_REMAINING, HeaderValue::from_static("0"))
+            .with_header(RATELIMIT_RESET, num_header(ceil_secs(out.reset_ns)));
+    }
+    err.into_response()
+}
+
+/// Add `RateLimit-*` headers unless an inner limiter set tighter ones.
+fn add_headers(res: &mut Response, limit: HeaderValue, remaining: u64, reset: u64) {
+    let h = res.headers_mut();
+    // With nested limiters, report the most restrictive one.
+    let tighter = h
+        .get(&RATELIMIT_REMAINING)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        .is_none_or(|existing| remaining < existing);
+    if tighter {
+        h.insert(RATELIMIT_LIMIT, limit);
+        h.insert(RATELIMIT_REMAINING, num_header(remaining));
+        h.insert(RATELIMIT_RESET, num_header(reset));
     }
 }
 
@@ -895,6 +1025,27 @@ impl Middleware for RateLimit {
             },
             None => (&self.quota, &self.limit_header, Salt::Default),
         };
+        #[cfg(feature = "redis")]
+        if let Some(redis) = &self.redis {
+            let Some(key) = self.redis_key(&req, &salt) else {
+                return next.run(req);
+            };
+            let (redis, quota, limit, headers) =
+                (redis.clone(), *quota, limit.clone(), self.headers);
+            return Box::pin(async move {
+                let Some(out) = redis_check(&redis, &key, &quota).await else {
+                    return next.run(req).await;
+                };
+                if !out.allowed {
+                    return reject(&out, &limit, headers);
+                }
+                let mut res = next.run(req).await;
+                if headers {
+                    add_headers(&mut res, limit, out.remaining, ceil_secs(out.reset_ns));
+                }
+                res
+            });
+        }
         let out = match (&self.key, &salt) {
             (KeyKind::Global, Salt::Default) => self.store.check_global(quota),
             _ => match self.key_hash(&req, &salt) {
@@ -914,17 +1065,7 @@ impl Middleware for RateLimit {
         let (remaining, reset) = (out.remaining, ceil_secs(out.reset_ns));
         Box::pin(async move {
             let mut res = fut.await;
-            let h = res.headers_mut();
-            // With nested limiters, report the most restrictive one.
-            let tighter = h
-                .get(&RATELIMIT_REMAINING)
-                .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
-                .is_none_or(|existing| remaining < existing);
-            if tighter {
-                h.insert(RATELIMIT_LIMIT, limit);
-                h.insert(RATELIMIT_REMAINING, num_header(remaining));
-                h.insert(RATELIMIT_RESET, num_header(reset));
-            }
+            add_headers(&mut res, limit, remaining, reset);
             res
         })
     }

@@ -39,6 +39,7 @@ let app = App::new().cache(Cache::memory()).mount(stats);
 | `cache.set(key, &value, ttl)` | Any `Serialize` value (stored as JSON) |
 | `cache.delete(key)` / `delete_prefix("posts:")` / `clear()` | Invalidate after writes |
 | `Cache::memory().max_entries(n)` | Capacity (default 10,000). When full, expired entries go first, then the soonest to expire. |
+| `Cache::redis(redis)` | The same API in Redis (feature `redis`), shared by every instance; see [Running several instances](scaling.md). |
 
 Name keys like `posts:42` so a write can drop a whole family with `delete_prefix`.
 

@@ -65,7 +65,14 @@ struct Inner {
     /// One lock per key being computed by `get_or_set`, so concurrent
     /// misses compute once.
     inflight: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Shared storage instead of `entries`.
+    #[cfg(feature = "redis")]
+    redis: Option<crate::redis::Redis>,
 }
+
+/// Where Redis keeps cache entries.
+#[cfg(feature = "redis")]
+const REDIS_PREFIX: &str = "zapline:cache:";
 
 struct Entry {
     value: Bytes,
@@ -93,6 +100,32 @@ impl Cache {
                 entries: Mutex::default(),
                 max_entries: DEFAULT_ENTRIES,
                 inflight: Mutex::default(),
+                #[cfg(feature = "redis")]
+                redis: None,
+            }),
+        }
+    }
+
+    /// A cache in Redis, shared by every instance of the app (feature
+    /// `redis`). Keys live under `zapline:cache:` and expire on their own;
+    /// if Redis is down, reads miss and writes are skipped (with a warning)
+    /// rather than failing requests.
+    ///
+    /// ```
+    /// use zapline::cache::Cache;
+    /// use zapline::redis::Redis;
+    ///
+    /// let cache = Cache::redis(Redis::new("redis://localhost")?);
+    /// # Ok::<(), zapline::Error>(())
+    /// ```
+    #[cfg(feature = "redis")]
+    pub fn redis(redis: crate::redis::Redis) -> Self {
+        Cache {
+            inner: Arc::new(Inner {
+                entries: Mutex::default(),
+                max_entries: DEFAULT_ENTRIES,
+                inflight: Mutex::default(),
+                redis: Some(redis),
             }),
         }
     }
@@ -110,6 +143,8 @@ impl Cache {
                 entries: Mutex::default(),
                 max_entries: n.max(1),
                 inflight: Mutex::default(),
+                #[cfg(feature = "redis")]
+                redis: self.inner.redis.clone(),
             }),
         }
     }
@@ -127,6 +162,18 @@ impl Cache {
     /// # Ok(()) }
     /// ```
     pub async fn get<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        #[cfg(feature = "redis")]
+        if let Some(redis) = &self.inner.redis {
+            let reply = redis.cmd(["GET", &format!("{REDIS_PREFIX}{key}")]).await;
+            return match reply {
+                Ok(crate::redis::Reply::Bulk(bytes)) => serde_json::from_slice(&bytes).ok(),
+                Ok(_) => None,
+                Err(e) => {
+                    redis_trouble(&e);
+                    None
+                }
+            };
+        }
         let bytes = {
             let mut entries = lock(&self.inner.entries);
             match entries.get(key) {
@@ -163,6 +210,22 @@ impl Cache {
     ) -> Result<()> {
         let value = serde_json::to_vec(value)
             .map_err(|e| Error::internal("cannot cache a value").with_source(e))?;
+        #[cfg(feature = "redis")]
+        if let Some(redis) = &self.inner.redis {
+            let ms = ttl.as_millis().max(1).to_string();
+            let key = format!("{REDIS_PREFIX}{key}");
+            let set = [
+                b"SET".as_slice(),
+                key.as_bytes(),
+                &value,
+                b"PX",
+                ms.as_bytes(),
+            ];
+            if let Err(e) = redis.cmd(set).await {
+                redis_trouble(&e);
+            }
+            return Ok(());
+        }
         let now = Instant::now();
         let mut entries = lock(&self.inner.entries);
         if entries.len() >= self.inner.max_entries && !entries.contains_key(key) {
@@ -187,6 +250,13 @@ impl Cache {
     /// # }
     /// ```
     pub async fn delete(&self, key: &str) {
+        #[cfg(feature = "redis")]
+        if let Some(redis) = &self.inner.redis {
+            if let Err(e) = redis.cmd(["UNLINK", &format!("{REDIS_PREFIX}{key}")]).await {
+                redis_trouble(&e);
+            }
+            return;
+        }
         lock(&self.inner.entries).remove(key);
     }
 
@@ -200,6 +270,14 @@ impl Cache {
     /// # }
     /// ```
     pub async fn delete_prefix(&self, prefix: &str) {
+        #[cfg(feature = "redis")]
+        if let Some(redis) = &self.inner.redis {
+            let pattern = format!("{REDIS_PREFIX}{}*", crate::redis::glob_escape(prefix));
+            if let Err(e) = crate::redis::delete_matching(redis, &pattern).await {
+                redis_trouble(&e);
+            }
+            return;
+        }
         lock(&self.inner.entries).retain(|k, _| !k.starts_with(prefix));
     }
 
@@ -267,8 +345,18 @@ impl Cache {
     /// # }
     /// ```
     pub async fn clear(&self) {
+        #[cfg(feature = "redis")]
+        if self.inner.redis.is_some() {
+            return self.delete_prefix("").await;
+        }
         lock(&self.inner.entries).clear();
     }
+}
+
+/// Redis being down degrades the cache to misses; say so in the logs.
+#[cfg(feature = "redis")]
+fn redis_trouble(e: &Error) {
+    crate::tasks::log_warn(format_args!("cache: {}", e.message()));
 }
 
 /// Make room for one entry: drop the expired ones, then the soonest to
