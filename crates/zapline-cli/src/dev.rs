@@ -9,10 +9,13 @@
 //!
 //! `templates/` is deliberately not watched: debug builds re-read templates
 //! on every render, so editing one needs a browser refresh, not a restart.
+//!
+//! A project with `styles/app.css` (Tailwind) also gets `tailwindcss --watch`
+//! running alongside, rebuilding `static/app.css` as templates change.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus};
+use std::process::{Child, ChildStdin, Command, ExitStatus};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
@@ -262,6 +265,8 @@ struct Dev<'a> {
     app: Option<Child>,
     debounce: Debouncer,
     shutdown: Arc<AtomicBool>,
+    /// `tailwindcss --watch`, which exits when its stdin closes.
+    css: Option<(Child, ChildStdin)>,
 }
 
 impl Dev<'_> {
@@ -392,6 +397,10 @@ impl Dev<'_> {
             ui::status_info("Stopping", format!("the app (pid {})", child.id()));
             stop(&mut child, self.opts.grace);
         }
+        if let Some((mut child, stdin)) = self.css.take() {
+            drop(stdin);
+            stop(&mut child, Duration::from_secs(1));
+        }
         ui::status("Stopped", "dev server");
     }
 }
@@ -442,7 +451,20 @@ pub fn run(project: &Project, opts: &DevOptions) -> Result<()> {
         app: None,
         debounce: Debouncer::new(opts.debounce),
         shutdown,
+        css: None,
     };
+    if crate::tailwind::is_used(&project.root) {
+        match crate::tailwind::watch(&project.root) {
+            Ok(css) => {
+                ui::status_info(
+                    "Watching",
+                    format!("{} with Tailwind", crate::tailwind::INPUT),
+                );
+                dev.css = Some(css);
+            }
+            Err(e) => ui::status_warn("Tailwind", format!("not running: {e:#}")),
+        }
+    }
     dev.rebuild_and_restart(&rx);
 
     while !dev.stopping() {

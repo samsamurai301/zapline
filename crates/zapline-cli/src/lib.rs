@@ -25,6 +25,7 @@ pub mod openapi;
 pub mod project;
 pub mod render;
 pub mod routes;
+pub mod tailwind;
 pub mod templates;
 pub mod ui;
 
@@ -145,6 +146,7 @@ pub fn execute(cli: Cli) -> Result<()> {
                 GenerateKind::Job { name } => {
                     generate::job::generate(&Project::discover(here)?, &name, g.force)?
                 }
+                GenerateKind::Tailwind => tailwind::generate(&Project::discover(here)?, g.force)?,
             };
             report.print();
             Ok(())
@@ -197,6 +199,16 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Client(a) => {
             let project = Project::discover(Path::new("."))?;
             client::run(&project, a.bin.as_deref(), &a.output)
+        }
+        Command::Css { minify, watch } => {
+            let project = Project::discover(Path::new("."))?;
+            if watch {
+                let (mut child, _stdin) = tailwind::watch(&project.root)?;
+                child.wait().context("tailwindcss failed")?;
+                Ok(())
+            } else {
+                tailwind::build(&project.root, minify)
+            }
         }
         Command::Mcp => mcp::run(),
         Command::Doctor => doctor::run(),

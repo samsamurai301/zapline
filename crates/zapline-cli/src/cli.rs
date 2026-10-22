@@ -165,6 +165,16 @@ Examples:
         filter: Option<String>,
     },
 
+    /// Compile styles/app.css to static/app.css with Tailwind (see `zapline g tailwind`)
+    Css {
+        /// Minify the output
+        #[arg(long)]
+        minify: bool,
+        /// Rebuild whenever templates or styles change
+        #[arg(long, conflicts_with = "minify")]
+        watch: bool,
+    },
+
     /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
     #[command(after_long_help = "\
 Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
@@ -317,6 +327,17 @@ Examples:
         /// Job name, e.g. `send_welcome`
         name: String,
     },
+
+    /// Tailwind CSS without Node: styles/app.css compiled to static/app.css
+    #[command(after_long_help = "\
+Creates styles/app.css (`@import \"tailwindcss\"` plus the CSS that was in static/app.css)
+and builds static/app.css with the standalone Tailwind binary, downloaded once and
+checked against its SHA-256. From then on `zapline dev` rebuilds it as you edit
+templates, and `zapline css` builds it on demand.
+
+Examples:
+  zapline g tailwind")]
+    Tailwind,
 }
 
 /// Arguments of `zapline dev`.

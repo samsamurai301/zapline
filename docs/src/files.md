@@ -138,6 +138,23 @@ In templates (feature `views`) it is a function, whether `.views(..)` comes befo
 
 No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
 
+## Tailwind CSS without Node
+
+```sh
+zapline g tailwind
+```
+
+This writes `styles/app.css` and compiles it to `static/app.css` with Tailwind's official standalone binary. zapline downloads it once into your user cache (`~/.cache/zapline`), pinned to one version and checked against its SHA-256 before it runs; set `ZAPLINE_TAILWIND=/path/to/tailwindcss` to use your own. No Node, npm or `package.json`.
+
+- `zapline dev` runs Tailwind's watcher alongside the app: add a class in `templates/` and `static/app.css` (and its hashed URL) is updated by the time you refresh.
+- `zapline css` builds once; `zapline css --minify` for a smaller file before you deploy.
+- Commit `static/app.css`. It is what the server (and the Docker image) serves, so deploys need no Tailwind.
+
+What the generator does with what you already had:
+
+- The CSS that was in `static/app.css` moves into `styles/app.css`, in `@layer components`, so utility classes can override it.
+- Stylesheets your `templates/base.html` loaded from a CDN (Pico, in the `fullstack` template) move into `styles/app.css` as `@import url(..) layer(base)`. They keep styling plain elements in place of Tailwind's reset, and utilities win over them. For Tailwind alone, replace the lines above `@source` with `@import "tailwindcss";`.
+
 ## `ServeFile`
 
 `ServeFile::new(path)` serves one file, whatever the request path. It is a handler, so it goes anywhere a handler goes. It has the same `ETag`, range, `HEAD` and precompression behavior, and `.cache_control(..)`, `.precompressed_gzip()` and `.precompressed_br()`. A missing file answers `404`.

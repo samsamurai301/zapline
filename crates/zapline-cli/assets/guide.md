@@ -335,7 +335,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 
 
@@ -356,7 +356,9 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g middleware <name>` | Add a middleware function |
 | `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
-| `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. |
+| `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
+| `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
+| `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
@@ -5231,6 +5233,23 @@ In templates (feature `views`) it is a function, whether `.views(..)` comes befo
 - Hashes are 8 hex digits of the content. In debug builds they are recomputed when a file's size or modification time changes, so `zapline dev` picks up edits; release builds hash each file once.
 
 No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
+
+## Tailwind CSS without Node
+
+```sh
+zapline g tailwind
+```
+
+This writes `styles/app.css` and compiles it to `static/app.css` with Tailwind's official standalone binary. zapline downloads it once into your user cache (`~/.cache/zapline`), pinned to one version and checked against its SHA-256 before it runs; set `ZAPLINE_TAILWIND=/path/to/tailwindcss` to use your own. No Node, npm or `package.json`.
+
+- `zapline dev` runs Tailwind's watcher alongside the app: add a class in `templates/` and `static/app.css` (and its hashed URL) is updated by the time you refresh.
+- `zapline css` builds once; `zapline css --minify` for a smaller file before you deploy.
+- Commit `static/app.css`. It is what the server (and the Docker image) serves, so deploys need no Tailwind.
+
+What the generator does with what you already had:
+
+- The CSS that was in `static/app.css` moves into `styles/app.css`, in `@layer components`, so utility classes can override it.
+- Stylesheets your `templates/base.html` loaded from a CDN (Pico, in the `fullstack` template) move into `styles/app.css` as `@import url(..) layer(base)`. They keep styling plain elements in place of Tailwind's reset, and utilities win over them. For Tailwind alone, replace the lines above `@source` with `@import "tailwindcss";`.
 
 ## `ServeFile`
 

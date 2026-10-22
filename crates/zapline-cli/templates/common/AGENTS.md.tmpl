@@ -18,6 +18,7 @@ zapline generate resource <name>    # new CRUD module + tests, auto-registered
 zapline generate handler <name> --method get
 zapline generate auth               # accounts + password reset (needs a database)
 zapline generate job <name>         # durable background job (needs a database)
+zapline generate tailwind           # Tailwind CSS without Node; then `zapline css`
 ```
 
 Run `zapline test` after every change (it wraps `cargo test` and prints a
