@@ -25,6 +25,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Config | `Config::load()?` reads `config/default.toml`, `config/{profile}.toml`, `APP__*` env and `.env` |
 | Startup / shutdown | `App::on_startup(\|res\| async move { res.insert(pool); Ok(()) })` (then `State<Pool>`), `App::on_shutdown(..)` |
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
+| Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |

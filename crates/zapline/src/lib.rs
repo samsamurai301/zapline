@@ -63,7 +63,7 @@
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
 //! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
 //! | Files | [`storage`]: local, memory and S3 storage with expiring links |
-//! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
+//! | Realtime and content | [`live`] (pub/sub to browsers), [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
 //! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
@@ -129,6 +129,7 @@ pub mod validate;
 // ---- protocols & content -----------------------------------------------------
 #[cfg(feature = "fs")]
 pub mod fs;
+pub mod live;
 #[cfg(feature = "multipart")]
 pub mod multipart;
 pub mod sse;

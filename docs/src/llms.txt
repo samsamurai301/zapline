@@ -57,6 +57,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 
 - [WebSockets](https://samsamurai301.github.io/zapline/websockets.html): Take a `WebSocketUpgrade` in a `GET` handler and give it an async callback:
 - [Server-Sent Events & streaming](https://samsamurai301.github.io/zapline/streaming.html): Return `Sse` with a stream of `Event`s and each event reaches the client as soon as the stream yields it:
+- [Live updates (pub/sub)](https://samsamurai301.github.io/zapline/live.html): `zapline::live` pushes changes to every open page as they happen: publish to a topic, and every browser subscribed to it gets the message. With htmx you write n
 - [Static files & uploads](https://samsamurai301.github.io/zapline/files.html): Serve a directory with one line, and accept `multipart/form-data` uploads with an extractor:
 - [File storage (local, S3)](https://samsamurai301.github.io/zapline/storage.html): `zapline::storage` keeps files under string keys like `avatars/42/me.png`. The same code works with a local directory while developing, memory in tests, and S3 
 

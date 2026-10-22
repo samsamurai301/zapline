@@ -8,7 +8,8 @@
   <button>Add</button>
 </form>
 
-<ul id="todos">
+{# Live: other tabs and users see changes as they happen. #}
+<ul id="todos" hx-ext="sse" sse-connect="/live/todos" sse-swap="list">
   {% block list %}
   {% for todo in todos %}
   <li class="{{ 'done' if todo.done }}">

@@ -2,9 +2,11 @@
 //!
 //! The page and the API share the queries below. Each htmx action answers
 //! with the re-rendered `list` block of `templates/todos/index.html`, which
-//! htmx swaps into the page.
+//! htmx swaps into the page, and publishes it on the `todos` topic so every
+//! other open page updates live (over SSE, see `/live/todos`).
 
 use zapline::db::{sqlx, Db};
+use zapline::live::Live;
 use zapline::prelude::*;
 use zapline::view::{context, HxRequest, Views};
 
@@ -26,7 +28,15 @@ pub struct NewTodo {
 
 /// Adds the todo routes.
 pub fn mount(app: App) -> App {
-    app.mount((page, create_form, toggle, remove, list_json, create_json))
+    app.mount((
+        page,
+        live_updates,
+        create_form,
+        toggle,
+        remove,
+        list_json,
+        create_json,
+    ))
 }
 
 // ---- queries -----------------------------------------------------------------
@@ -55,10 +65,29 @@ async fn render_list(views: &Views, db: &Db, hx: &HxRequest) -> Result<Html<Stri
     views.page_or_block(hx, "todos/index.html", "list", context! { todos })
 }
 
+/// After a change: the new list for this browser, and for every other page
+/// listening on `/live/todos`.
+async fn changed(views: &Views, db: &Db, hx: &HxRequest, live: &Live) -> Result<Html<String>> {
+    let todos = all(db).await?;
+    let list = views.render_block("todos/index.html", "list", context! { todos => &todos })?;
+    live.publish("todos", "list", list.0.clone());
+    if hx.is_partial() {
+        Ok(list)
+    } else {
+        views.render("todos/index.html", context! { todos })
+    }
+}
+
 /// The todo page (or just its list, for htmx).
 #[get("/", tag = "pages")]
 async fn page(views: Views, db: Db, hx: HxRequest) -> Result<Html<String>> {
     render_list(&views, &db, &hx).await
+}
+
+/// Server-Sent Events with the new list whenever it changes.
+#[get("/live/todos", tag = "pages")]
+async fn live_updates(live: Live) -> Response {
+    live.sse("todos").into_response()
 }
 
 /// Add a todo from the page's form.
@@ -67,30 +96,43 @@ async fn create_form(
     views: Views,
     db: Db,
     hx: HxRequest,
+    live: Live,
     Valid(Form(new)): Valid<Form<NewTodo>>,
 ) -> Result<Html<String>> {
     insert(&db, new.title.trim()).await?;
-    render_list(&views, &db, &hx).await
+    changed(&views, &db, &hx, &live).await
 }
 
 /// Flip a todo between done and not done.
 #[post("/todos/{id}/toggle", tag = "pages")]
-async fn toggle(views: Views, db: Db, hx: HxRequest, Path(id): Path<i64>) -> Result<Html<String>> {
+async fn toggle(
+    views: Views,
+    db: Db,
+    hx: HxRequest,
+    live: Live,
+    Path(id): Path<i64>,
+) -> Result<Html<String>> {
     sqlx::query("UPDATE todos SET done = NOT done WHERE id = $1")
         .bind(id)
         .execute(&*db)
         .await?;
-    render_list(&views, &db, &hx).await
+    changed(&views, &db, &hx, &live).await
 }
 
 /// Delete a todo.
 #[delete("/todos/{id}", tag = "pages")]
-async fn remove(views: Views, db: Db, hx: HxRequest, Path(id): Path<i64>) -> Result<Html<String>> {
+async fn remove(
+    views: Views,
+    db: Db,
+    hx: HxRequest,
+    live: Live,
+    Path(id): Path<i64>,
+) -> Result<Html<String>> {
     sqlx::query("DELETE FROM todos WHERE id = $1")
         .bind(id)
         .execute(&*db)
         .await?;
-    render_list(&views, &db, &hx).await
+    changed(&views, &db, &hx, &live).await
 }
 
 // ---- JSON API ------------------------------------------------------------------

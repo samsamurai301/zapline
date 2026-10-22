@@ -14,6 +14,7 @@ cargo test           # every test gets its own in-memory database
 - <http://localhost:8080/>: the todo app (htmx)
 - <http://localhost:8080/docs>: the JSON API, interactive docs
 - <http://localhost:8080/health/ready>: readiness, including the database
+- Open the todo page in two tabs: changes show up in both at once (`/live/todos`, see `src/routes/todos.rs`)
 - <http://localhost:8080/_dev>: the dev console (routes, recent requests, jobs, mail; debug builds only)
 
 Edit a file in `templates/` and refresh: templates reload without a rebuild

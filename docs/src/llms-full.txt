@@ -319,6 +319,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Config | `Config::load()?` reads `config/default.toml`, `config/{profile}.toml`, `APP__*` env and `.env` |
 | Startup / shutdown | `App::on_startup(\|res\| async move { res.insert(pool); Ok(()) })` (then `State<Pool>`), `App::on_shutdown(..)` |
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
+| Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
@@ -4757,6 +4758,92 @@ async fn upload(Path(name): Path<u64>, body: BodyStream) -> Result<StatusCode> {
 | `limit()`, `bytes_read()` | The current limit and the number of bytes received so far |
 
 The limit is enforced across chunks: once more bytes arrive than allowed, the stream yields a `413 Payload Too Large` error and ends. A `Content-Length` that already exceeds the limit fails on the first read, before any bytes are consumed. For form uploads with metadata and several files, use `Multipart` instead (see [Static files & uploads](files.md#uploads-with-multipart)).
+
+
+---
+
+<!-- live.md -->
+
+# Live updates
+
+`zapline::live` pushes changes to every open page as they happen: publish to a topic, and every browser subscribed to it gets the message. With htmx you write no JavaScript. It's always available (no feature flag).
+
+```rust
+use zapline::live::Live;
+use zapline::prelude::*;
+
+#[get("/live/chat")]
+async fn listen(live: Live) -> Response {
+    live.sse("chat").into_response()
+}
+
+#[post("/chat")]
+async fn say(live: Live, views: Views, Form(msg): Form<Message>) -> Result<StatusCode> {
+    let html = views.render("chat/message.html", context! { msg })?;
+    live.publish("chat", "message", html.0);
+    Ok(StatusCode::NO_CONTENT)
+}
+
+let app = App::new().live(Live::new()).mount((listen, say));
+```
+
+```html
+<script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" defer></script>
+
+<div hx-ext="sse" sse-connect="/live/chat" sse-swap="message" hx-swap="beforeend"></div>
+```
+
+`sse-swap` names the event to swap in. Here every `message` is appended to the `<div>`.
+
+Projects created with `zapline new --template fullstack` already work this way: open the todo page in two tabs, change a todo in one, and the other updates. The handlers publish the re-rendered `list` block after each change.
+
+## The API
+
+| Call | |
+|---|---|
+| `live.publish(topic, event, data)` | Send to everyone on `topic`. Returns how many got it. |
+| `live.publish_json(topic, event, &value)` | The same, with `value` as JSON. |
+| `live.sse(topic)` | An SSE response streaming the topic, with a keep-alive every 15 s. |
+| `live.subscribe(topic)` | A `Subscription`: `sub.next().await`, or use it as a `Stream`. |
+| `Live::new().capacity(n)` | Messages kept for a subscriber that falls behind (default 256). |
+
+Topics are just strings. Use `room:42` or `user:7` for one room or one user, and check access in the handler that calls `live.sse` (for example by taking a `CurrentUser` argument).
+
+A topic exists while someone listens. A slow subscriber skips the messages it missed rather than slowing everyone else down. The [dev console](dev-console.md) lists topics and their subscriber counts.
+
+## WebSockets
+
+Forward a subscription to a socket:
+
+```rust,ignore
+#[get("/ws/chat")]
+async fn ws(live: Live, upgrade: WebSocketUpgrade) -> Response {
+    upgrade.on_upgrade(move |mut socket| async move {
+        let mut sub = live.subscribe("chat");
+        while let Some(update) = sub.next().await {
+            if socket.send(Message::text(update.data)).await.is_err() {
+                break;
+            }
+        }
+    })
+}
+```
+
+## Several instances
+
+`Live` reaches the subscribers of one process. Behind a load balancer with several instances, a shared backend (Redis or Postgres `LISTEN/NOTIFY`) is on the roadmap.
+
+## Testing
+
+Subscribe in the test and assert on what a handler published:
+
+```rust,ignore
+let client = app(Database::sqlite_memory()).test();
+let live: Live = client.resources().await.require()?;
+let mut updates = live.subscribe("todos");
+client.post("/todos").form(&[("title", "x")]).send().await;
+assert!(updates.next().await.unwrap().data.contains("x"));
+```
 
 
 ---

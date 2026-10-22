@@ -2,6 +2,7 @@
 
 use serde_json::json;
 use zapline::db::Database;
+use zapline::live::Live;
 
 use @@crate_name@@::app;
 use @@crate_name@@::routes::todos::Todo;
@@ -79,4 +80,21 @@ async fn toggle_and_delete() {
 async fn readiness_checks_the_database() {
     let client = app(Database::sqlite_memory()).test();
     assert_eq!(client.get("/health/ready").send().await.status(), 200);
+}
+
+#[tokio::test]
+async fn changes_are_pushed_to_every_open_page() {
+    let client = app(Database::sqlite_memory()).test();
+    let live: Live = client.resources().await.require().unwrap();
+    let mut updates = live.subscribe("todos");
+
+    client
+        .post("/todos")
+        .header("hx-request", "true")
+        .form(&[("title", "ship it")])
+        .send()
+        .await;
+    let update = updates.next().await.unwrap();
+    assert_eq!(update.event, "list");
+    assert!(update.data.contains("ship it"), "{}", update.data);
 }
