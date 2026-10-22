@@ -6,6 +6,8 @@ One runnable file showing the canonical way to do each common task: models with 
 {{#include ../../examples/examples/cheatsheet.rs}}
 ```
 
+Viewing this on GitHub? The code block above only renders on the [docs site](https://samsamurai301.github.io/zapline/cheatsheet.html); the file itself is [`examples/examples/cheatsheet.rs`](../../examples/examples/cheatsheet.rs).
+
 Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http://localhost:8080/docs>.
 
 ## Everything else in one line each
