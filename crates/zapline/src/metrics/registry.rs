@@ -268,6 +268,19 @@ impl Core for CounterCore {
     }
 }
 
+/// Adds `v` to an `f64` stored as bits in an `AtomicU64` (a CAS loop, so it
+/// works on every supported toolchain without `fetch_update`/`try_update`).
+fn atomic_add_f64(cell: &AtomicU64, v: f64) {
+    let mut cur = cell.load(Relaxed);
+    loop {
+        let new = (f64::from_bits(cur) + v).to_bits();
+        match cell.compare_exchange_weak(cur, new, Relaxed, Relaxed) {
+            Ok(_) => return,
+            Err(actual) => cur = actual,
+        }
+    }
+}
+
 #[doc(hidden)]
 pub struct GaugeCore(AtomicU64);
 
@@ -276,9 +289,7 @@ impl GaugeCore {
         f64::from_bits(self.0.load(Relaxed))
     }
     fn add(&self, v: f64) {
-        let _ = self.0.fetch_update(Relaxed, Relaxed, |b| {
-            Some((f64::from_bits(b) + v).to_bits())
-        });
+        atomic_add_f64(&self.0, v);
     }
 }
 
@@ -313,9 +324,7 @@ impl HistogramCore {
         }
         let i = bounds.partition_point(|&b| b < v);
         self.counts[i].fetch_add(1, Relaxed);
-        let _ = self.sum.fetch_update(Relaxed, Relaxed, |b| {
-            Some((f64::from_bits(b) + v).to_bits())
-        });
+        atomic_add_f64(&self.sum, v);
     }
     fn count(&self) -> u64 {
         self.counts.iter().map(|c| c.load(Relaxed)).sum()
