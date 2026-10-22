@@ -152,6 +152,17 @@ Examples:
         filter: Option<String>,
     },
 
+    /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
+    #[command(after_long_help = "\
+Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
+new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
+db_migrate, check, test, routes, openapi. Start it from the project directory.
+
+Setup:
+  Claude Code   claude mcp add zapline -- zapline mcp
+  Cursor/others {\"mcpServers\": {\"zapline\": {\"command\": \"zapline\", \"args\": [\"mcp\"]}}}")]
+    Mcp,
+
     /// Check that the tools zapline relies on are installed
     Doctor,
 

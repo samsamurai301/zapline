@@ -17,6 +17,7 @@ pub mod db;
 pub mod dev;
 pub mod doctor;
 pub mod generate;
+pub mod mcp;
 pub mod naming;
 pub mod new;
 pub mod openapi;
@@ -180,6 +181,7 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             finish(brief::test(&project, filter.as_deref())?)
         }
+        Command::Mcp => mcp::run(),
         Command::Doctor => doctor::run(),
         Command::Bench(a) => {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());

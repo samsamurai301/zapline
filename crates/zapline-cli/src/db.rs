@@ -109,8 +109,8 @@ pub fn migrate(project: &Project, bin: Option<&str>) -> Result<()> {
         RUN_TIMEOUT,
     )?;
     if !captured.status.success() {
-        // The app's own error (connection refused, bad SQL) went to stderr.
-        bail!("migrating failed: the app exited with {}", captured.status);
+        // The app's own error (connection refused, bad SQL) is on stderr.
+        return Err(captured.failure("while migrating"));
     }
     if !captured.stdout.contains("migrations are up to date") {
         bail!(

@@ -10,6 +10,9 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. |
+| `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
+| `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
+| `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json]` | Export the OpenAPI document |
 | `zapline doctor` | Check rustc and cargo versions, git, docker and wrk |
@@ -45,3 +48,32 @@ Both commands run your app with an environment variable. The app prints or write
 - `ZAPLINE_EXPORT_OPENAPI=<path>`: the OpenAPI plugin writes the spec and exits.
 
 So the commands are safe to run without databases or other services, for example in CI to check a committed `openapi.json`.
+
+## AI assistants: `zapline mcp`
+
+`zapline mcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server on stdin/stdout. It lets Claude Code, Cursor, Zed, VS Code and other MCP clients call zapline directly, and every tool answers in as few tokens as it can:
+
+| Tool | Returns |
+|---|---|
+| `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
+| `new_project` | Creates a project from a template |
+| `generate_resource`, `generate_handler`, `generate_middleware` | The files created and edited |
+| `db_new_migration` | Creates a migration, with its SQL if given |
+| `db_migrate` | Applies pending migrations |
+| `check`, `test` | The condensed output of `zapline check` / `zapline test` |
+| `routes` | One `METHOD path` line per route |
+| `openapi` | The OpenAPI document, compact |
+
+When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
+
+Register it from the project directory:
+
+```sh
+claude mcp add zapline -- zapline mcp          # Claude Code
+```
+
+```json
+{ "mcpServers": { "zapline": { "command": "zapline", "args": ["mcp"] } } }
+```
+
+The second form is the `mcp.json` / settings entry most other clients use.

@@ -8,8 +8,8 @@ tests expect.
 ## Commands
 
 ```sh
-cargo test                          # in-process tests, no sockets, fast
-cargo clippy --all-targets -- -D warnings
+zapline test [name]                 # tests; prints only totals + failures
+zapline check [--clippy]            # one line per error/warning, with the fix
 cargo fmt
 zapline dev                         # run with live reload on :8080
 zapline routes --json               # machine-readable route table
@@ -18,8 +18,13 @@ zapline generate resource <name>    # new CRUD module + tests, auto-registered
 zapline generate handler <name> --method get
 ```
 
-Run `cargo test` after every change. A change is done when fmt, clippy and
-tests pass.
+Run `zapline test` after every change (it wraps `cargo test` and prints a
+fraction of the output). A change is done when `cargo fmt`,
+`zapline check --clippy` and `zapline test` pass.
+
+With an MCP-capable assistant, `zapline mcp` serves all of this as tools
+(plus `docs`, which answers with just the guide section you need):
+`claude mcp add zapline -- zapline mcp`.
 
 ## Conventions (one way to do each thing)
 

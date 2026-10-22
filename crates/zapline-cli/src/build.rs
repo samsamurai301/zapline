@@ -4,7 +4,8 @@ use std::ffi::{OsStr, OsString};
 use std::io::{BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -105,6 +106,19 @@ pub fn executable_from_message(line: &str, bin: &str) -> Option<PathBuf> {
     msg.get("executable")?.as_str().map(PathBuf::from)
 }
 
+/// Whether the app's stderr is passed through to ours (the default) or only
+/// kept for error messages (`zapline mcp`, whose clients don't show stderr).
+static ECHO_STDERR: AtomicBool = AtomicBool::new(true);
+
+/// Pass the app's stderr through (`true`, the default) or only keep its tail
+/// for error messages.
+pub fn set_echo_stderr(echo: bool) {
+    ECHO_STDERR.store(echo, Ordering::Relaxed);
+}
+
+/// Lines of the app's stderr kept for error messages.
+const STDERR_TAIL_LINES: usize = 20;
+
 /// Captured output of a finished process.
 #[derive(Debug)]
 pub struct Captured {
@@ -112,6 +126,21 @@ pub struct Captured {
     pub status: ExitStatus,
     /// Everything written to stdout.
     pub stdout: String,
+    /// The last lines written to stderr.
+    pub stderr_tail: String,
+}
+
+impl Captured {
+    /// An error saying the app failed to `what`, with the end of its stderr
+    /// when that was not already shown.
+    pub fn failure(&self, what: &str) -> anyhow::Error {
+        let mut msg = format!("the app exited with {} {what}", self.status);
+        if !ECHO_STDERR.load(Ordering::Relaxed) && !self.stderr_tail.trim().is_empty() {
+            msg.push_str("\napp stderr:\n");
+            msg.push_str(self.stderr_tail.trim_end());
+        }
+        anyhow!(msg)
+    }
 }
 
 /// Runs `cmd` with stdout captured and stderr passed through, killing it after
@@ -120,9 +149,29 @@ pub struct Captured {
 pub fn run_captured(mut cmd: Command, timeout: Duration) -> Result<Captured> {
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::piped());
     let mut child = cmd.spawn().context("failed to start the app")?;
     let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("no stdout"))?;
+    let stderr = child.stderr.take().ok_or_else(|| anyhow!("no stderr"))?;
+
+    // Echo stderr as it comes (or not) and keep its last lines.
+    let tail = Arc::new(Mutex::new(std::collections::VecDeque::<String>::new()));
+    let tail_writer = Arc::clone(&tail);
+    let echo = ECHO_STDERR.load(Ordering::Relaxed);
+    std::thread::spawn(move || {
+        for line in BufReader::new(stderr).lines() {
+            let Ok(line) = line else { break };
+            if echo {
+                eprintln!("{line}");
+            }
+            if let Ok(mut t) = tail_writer.lock() {
+                if t.len() == STDERR_TAIL_LINES {
+                    t.pop_front();
+                }
+                t.push_back(line);
+            }
+        }
+    });
 
     // Stream chunks to the main thread so that a grandchild holding the pipe
     // open (or a killed process tree) can never block us.
@@ -164,9 +213,14 @@ pub fn run_captured(mut cmd: Command, timeout: Duration) -> Result<Captured> {
             Err(_) => break,
         }
     }
+    let stderr_tail = tail
+        .lock()
+        .map(|t| t.iter().map(|l| format!("{l}\n")).collect())
+        .unwrap_or_default();
     Ok(Captured {
         status,
         stdout: String::from_utf8_lossy(&bytes).into_owned(),
+        stderr_tail,
     })
 }
 

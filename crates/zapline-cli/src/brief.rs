@@ -282,8 +282,15 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
     }
     let mut cmd = cargo();
     cmd.args(["test", "--quiet", "--no-fail-fast"]);
-    if let Some(f) = filter {
-        cmd.arg(f);
+    match filter {
+        // `zapline test users` runs tests/users.rs when there is one.
+        Some(f) if project.root.join("tests").join(format!("{f}.rs")).is_file() => {
+            cmd.args(["--test", f]);
+        }
+        Some(f) => {
+            cmd.arg(f);
+        }
+        None => {}
     }
     let mut child = cmd
         .current_dir(&project.root)
@@ -315,6 +322,13 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
         report.failed,
         report.ignored
     ));
+    if report.passed + report.failed == 0 {
+        if let Some(f) = filter {
+            out.push_str(&format!(
+                "hint: no test name contains `{f}`; pass part of a test name or a tests/<file> name\n"
+            ));
+        }
+    }
     Ok((status.success(), out))
 }
 
