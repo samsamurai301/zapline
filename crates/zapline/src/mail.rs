@@ -52,6 +52,7 @@ use lettre::message::{header::ContentType, Mailbox, MultiPart, SinglePart};
 use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use serde::{Deserialize, Serialize};
 
+use crate::dev::{escape, DevPanel};
 use crate::extract::FromRequestParts;
 use crate::{App, Error, Html, Request, Result};
 
@@ -358,11 +359,18 @@ impl App {
     pub fn mailer(self, mailer: Mailer) -> Self {
         let outbox = mailer.is_outbox();
         let app = self.state(mailer);
-        if outbox {
-            app.get(DEV_INBOX_PATH, dev_inbox)
-        } else {
-            app
+        if !outbox {
+            return app;
         }
+        let panel = DevPanel::new("mail", "Mail", |req: &Request| {
+            let count = req.state::<Mailer>().map_or(0, |m| m.sent().len());
+            Box::pin(async move {
+                format!(
+                    "<p>{count} email(s) kept in the <a href=\"{DEV_INBOX_PATH}\">dev inbox</a>.</p>"
+                )
+            })
+        });
+        app.get(DEV_INBOX_PATH, dev_inbox).dev_panel(panel)
     }
 }
 
@@ -403,21 +411,6 @@ async fn dev_inbox(mail: Mailer) -> Html<String> {
         page.push_str("</article>");
     }
     Html(page)
-}
-
-fn escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            c => out.push(c),
-        }
-    }
-    out
 }
 
 /// Turn `http(s)://` URLs in already-escaped text into links, so reset and

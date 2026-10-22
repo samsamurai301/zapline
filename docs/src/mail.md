@@ -44,7 +44,7 @@ Without `SMTP_URL`, a **debug** build uses the outbox described below, and a **r
 
 ## The dev inbox
 
-An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use.
+An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use, and the [dev console](dev-console.md) links it.
 
 ## Sending in the background
 

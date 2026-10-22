@@ -64,6 +64,7 @@
 //! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
+//! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
 //!
 //! # Cargo features
 //!
@@ -99,6 +100,7 @@
 // ---- core -----------------------------------------------------------------
 mod app;
 mod body;
+pub mod dev;
 mod error;
 pub mod extract;
 mod handler;

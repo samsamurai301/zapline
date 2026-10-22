@@ -19,6 +19,8 @@ use zapline::tasks::Schedule;
 /// tests pass `Database::sqlite_memory()`.
 pub fn app(db: Database) -> App {
     App::new()
+        // Routes, recent requests, jobs and mail at /_dev (debug builds only).
+        .dev_console()
         .database(db)
         .jobs(jobs::register)
         .views("templates")

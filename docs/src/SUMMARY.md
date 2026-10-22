@@ -18,6 +18,7 @@
 - [Middleware](middleware.md)
 - [State, lifecycle & plugins](lifecycle.md)
 - [Testing](testing.md)
+- [Dev console](dev-console.md)
 
 # Building APIs
 

@@ -324,6 +324,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
+| Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts + password reset), `g job <name>` (durable job), `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
@@ -1068,6 +1069,45 @@ let addr = listener.local_addr()?;
 tokio::spawn(app().serve(listener));
 // connect to `addr` with any client
 ```
+
+
+---
+
+<!-- dev-console.md -->
+
+# Dev console
+
+One call gives a running app a page that shows what it is made of and what it is doing:
+
+```rust
+use zapline::prelude::*;
+
+#[get("/")]
+async fn index() -> &'static str { "hi" }
+
+fn main() -> std::io::Result<()> {
+    App::new()
+        .dev_console()
+        .mount(index)
+        .run("127.0.0.1:8080")
+}
+```
+
+Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `minimal`) already have it.
+
+| Panel | Shows |
+|---|---|
+| Recent requests | The last 50 requests: status (4xx and 5xx highlighted), method, path with query, and how long the app took. |
+| Routes | Every route with its summary and tags (from doc comments and `#[get(.., tag = "..")]`). Parameterless `GET` routes are links. |
+| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. |
+| Mail | When the [mailer](mail.md) is the dev outbox: how many emails were kept, with a link to the inbox at `/_dev/mail`. |
+
+## Safe to leave in
+
+- **Debug builds only.** In a release build (`cargo build --release`, the Dockerfiles) `.dev_console()` does nothing: no route, no middleware, no cost.
+- **This machine only.** Requests from any other address get a `404`, so a debug build bound to `0.0.0.0` doesn't show its routes or jobs to the network.
+
+The console's own requests are not listed under recent requests.
 
 
 ---
@@ -2676,6 +2716,8 @@ let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
+In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+
 The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
@@ -2758,7 +2800,7 @@ Without `SMTP_URL`, a **debug** build uses the outbox described below, and a **r
 
 ## The dev inbox
 
-An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use.
+An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use, and the [dev console](dev-console.md) links it.
 
 ## Sending in the background
 

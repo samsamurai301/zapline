@@ -73,6 +73,8 @@ let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
+In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+
 The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.

@@ -98,6 +98,7 @@ use sqlx::Pool;
 use tokio::sync::Notify;
 
 use crate::db::DefaultDb;
+use crate::dev::{escape, DevPanel};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
 use crate::lifecycle::WeakResources;
@@ -273,6 +274,10 @@ pub struct JobStats {
     pub failed: u64,
 }
 
+/// A failed job for the dev console: id, name, attempts, last error.
+#[doc(hidden)]
+pub type FailedRow = (i64, String, i64, Option<String>);
+
 /// A row as claimed by a worker.
 #[doc(hidden)]
 #[derive(Debug)]
@@ -388,6 +393,42 @@ impl<DB: JobBackend> Jobs<DB> {
             self.shared.wake.notify_waiters();
         }
         Ok(n)
+    }
+
+    /// The most recent failed jobs: id, name, attempts and last error.
+    async fn failed(&self, limit: i64) -> Result<Vec<FailedRow>> {
+        DB::failed(&self.pool, limit).await
+    }
+
+    /// The dev console's view of the queue.
+    async fn panel(&self) -> String {
+        let (stats, failed) = match (self.stats().await, self.failed(20).await) {
+            (Ok(stats), Ok(failed)) => (stats, failed),
+            (Err(e), _) | (_, Err(e)) => {
+                return format!("<p class=s5>{}</p>", escape(&error_text(&e)));
+            }
+        };
+        let mut names: Vec<&str> = self.shared.runners.keys().copied().collect();
+        names.sort_unstable();
+        let mut html = format!(
+            "<p>{} queued · {} running · {} failed<br><small>registered: {}</small></p>",
+            stats.queued,
+            stats.running,
+            stats.failed,
+            escape(&names.join(", "))
+        );
+        if !failed.is_empty() {
+            html.push_str("<table><tr><th>Id<th>Job<th>Attempts<th>Last error</tr>");
+            for (id, name, attempts, error) in failed {
+                html.push_str(&format!(
+                    "<tr><td>{id}<td><code>{}</code><td>{attempts}<td><code>{}</code></tr>",
+                    escape(&name),
+                    escape(error.as_deref().unwrap_or(""))
+                ));
+            }
+            html.push_str("</table>");
+        }
+        html
     }
 
     /// Claim and run one due job. `Ok(false)` when none is due.
@@ -554,6 +595,9 @@ pub trait JobBackend: sqlx::Database + sealed::Sealed {
     fn counts(pool: &Pool<Self>) -> impl Future<Output = Result<Vec<(String, i64)>>> + Send;
     #[doc(hidden)]
     fn retry_failed(pool: &Pool<Self>, now: i64) -> impl Future<Output = Result<u64>> + Send;
+    #[doc(hidden)]
+    fn failed(pool: &Pool<Self>, limit: i64)
+        -> impl Future<Output = Result<Vec<FailedRow>>> + Send;
 }
 
 /// The columns every backend shares (the id column differs).
@@ -688,6 +732,19 @@ macro_rules! backend_for {
                 .await?;
                 Ok(done.rows_affected())
             }
+
+            async fn failed(
+                pool: &Pool<Self>,
+                limit: i64,
+            ) -> Result<Vec<FailedRow>> {
+                Ok(sqlx::query_as(
+                    "SELECT id, name, attempts, last_error FROM zapline_jobs \
+                     WHERE status = 'failed' ORDER BY id DESC LIMIT $1",
+                )
+                .bind(limit)
+                .fetch_all(pool)
+                .await?)
+            }
         }
     };
 }
@@ -759,6 +816,29 @@ impl App {
             });
             Ok(())
         });
+        let panel = DevPanel::new(
+            format!("jobs-{}", DB::NAME.to_ascii_lowercase()),
+            format!("Jobs ({})", DB::NAME),
+            |req: &Request| {
+                let jobs = req.state::<Jobs<DB>>().cloned();
+                Box::pin(async move {
+                    match jobs {
+                        Some(jobs) => jobs.panel().await,
+                        None => "<p class=dim>Not started.</p>".to_owned(),
+                    }
+                }) as BoxFuture<String>
+            },
+        )
+        .action("Retry failed jobs", |req: &Request| {
+            let jobs = req.state::<Jobs<DB>>().cloned();
+            Box::pin(async move {
+                if let Some(jobs) = jobs {
+                    jobs.retry_failed().await?;
+                }
+                Ok(())
+            })
+        });
+        app = app.dev_panel(panel);
         for _ in 0..workers {
             app = app.background(|res: Resources, shutdown: Shutdown| async move {
                 match res.get::<Jobs<DB>>() {

@@ -29,6 +29,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Middleware](https://samsamurai301.github.io/zapline/middleware.html): Middleware is an async function that receives the request plus `next`, the rest of the pipeline:
 - [State, lifecycle & plugins](https://samsamurai301.github.io/zapline/lifecycle.html): Register any `Clone + Send + Sync + 'static` value and extract it with `State<T>`:
 - [Testing](https://samsamurai301.github.io/zapline/testing.html): `App::test()` turns an app into an in-process client. It runs the full pipeline (global middleware, routing, route middleware, extractors, handlers, error rende
+- [Dev console](https://samsamurai301.github.io/zapline/dev-console.html): One call gives a running app a page that shows what it is made of and what it is doing:
 
 ## Building APIs
 

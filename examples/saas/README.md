@@ -15,6 +15,8 @@ to install (SQLite until you set `DATABASE_URL`):
   <http://localhost:8080/_dev/mail> while developing.
 - **htmx pages** rendered on the server, plus a **JSON API** with OpenAPI
   docs at <http://localhost:8080/docs>.
+- **A dev console** at <http://localhost:8080/_dev>: every route, the last
+  requests, the job queue (retry failed jobs with one click) and the inbox.
 - **12 end-to-end tests**, each on its own in-memory database.
 
 ```sh
