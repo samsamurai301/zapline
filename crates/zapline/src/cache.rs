@@ -532,10 +532,13 @@ impl Middleware for ResponseCache {
             return Box::pin(std::future::ready(res));
         }
 
+        // A HEAD response has no body to keep: it may read what a GET
+        // stored, never store.
+        let head = *req.method() == Method::HEAD;
         let this = self.clone();
         Box::pin(async move {
             let mut res = next.run(req).await;
-            if !shareable(&res) {
+            if head || !shareable(&res) {
                 return res;
             }
             let body = match std::mem::take(res.body_mut()) {

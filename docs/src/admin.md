@@ -25,7 +25,11 @@ async fn admins_only(mut req: Request, next: Next) -> Response {
         Err(_) => return Redirect::to("/login").into_response(),
     };
     let admins = std::env::var("ADMIN_EMAILS").unwrap_or_default();
-    if !admins.split(',').any(|e| e.trim().eq_ignore_ascii_case(&user.email)) {
+    // Anyone can sign up with any address: trust it only once its owner
+    // has proved it (a used reset link, a GitHub/Google login).
+    if !admins.split(',').any(|e| e.trim().eq_ignore_ascii_case(&user.email))
+        || !user.email_verified
+    {
         return Error::forbidden().into_response();
     }
     next.run(req).await
@@ -34,7 +38,7 @@ async fn admins_only(mut req: Request, next: Next) -> Response {
 app.admin(|admin| admin.protect(admins_only))
 ```
 
-[`zapline g auth`](auth.md#accounts-in-one-command-zapline-g-auth) generates exactly this: the accounts listed in `ADMIN_EMAILS` get in, others get `403`, and visitors are sent to `/login`. Calling `admin` again replaces the earlier setup, which is how the generated `auth::mount` protects the panel that the template turned on.
+[`zapline g auth`](auth.md#accounts-in-one-command-zapline-g-auth) generates this: the accounts listed in `ADMIN_EMAILS` get in once their owner has proved the address (by using a password reset link, or by logging in with GitHub/Google), others get `403`, and visitors are sent to `/login`. Calling `admin` again replaces the earlier setup, which is how the generated `auth::mount` protects the panel that the template turned on.
 
 Form posts must come from the same site: a request whose `Origin` doesn't match its `Host` gets `403 cross_origin`, on top of the `SameSite=Lax` session cookie.
 

@@ -252,3 +252,23 @@ async fn handlers_take_the_cache_as_an_argument() {
         .await
         .assert_status(500);
 }
+
+#[tokio::test]
+async fn head_requests_never_fill_the_response_cache() {
+    let hits = Hits::default();
+    let client = cached_app(&hits, MINUTE);
+    client
+        .request(Method::HEAD, "/c/page")
+        .send()
+        .await
+        .assert_status(200);
+    let get = client.get("/c/page").send().await;
+    get.assert_header("x-cache", "MISS");
+    assert!(get.text().starts_with("<p>render"), "{}", get.text());
+    // HEAD may still answer from what a GET stored.
+    client
+        .request(Method::HEAD, "/c/page")
+        .send()
+        .await
+        .assert_header("x-cache", "HIT");
+}

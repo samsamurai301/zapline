@@ -440,6 +440,22 @@ fn random_secret() -> [u8; 32] {
     secret
 }
 
+/// Types served inline at [`FILES_PATH`]; everything else downloads.
+const INLINE_TYPES: &[&str] = &[
+    "image/png",
+    "image/jpeg",
+    "image/gif",
+    "image/webp",
+    "image/avif",
+    "application/pdf",
+    "text/plain",
+    "audio/mpeg",
+    "audio/ogg",
+    "audio/wav",
+    "video/mp4",
+    "video/webm",
+];
+
 fn content_type(key: &str) -> &'static str {
     mime_guess::from_path(Path::new(key))
         .first_raw()
@@ -536,10 +552,21 @@ async fn serve_file(req: Request) -> Response {
         Ok(bytes) => {
             let mut res = bytes.into_response();
             let headers = res.headers_mut();
+            let kind = content_type(&key);
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(kind));
+            // Uploads are user content on the app's origin: never let one run
+            // script (HTML, SVG, XML), and download anything not known safe
+            // to show inline.
             headers.insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static(content_type(&key)),
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("default-src 'none'; style-src 'unsafe-inline'; sandbox"),
             );
+            if !INLINE_TYPES.contains(&kind) {
+                headers.insert(
+                    header::CONTENT_DISPOSITION,
+                    HeaderValue::from_static("attachment"),
+                );
+            }
             headers.insert(
                 header::CACHE_CONTROL,
                 HeaderValue::from_static("private, max-age=300"),

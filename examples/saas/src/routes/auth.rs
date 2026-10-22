@@ -142,7 +142,9 @@ pub fn mount(app: App) -> App {
         .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]))
 }
 
-/// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
+/// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel,
+/// once their owner has proved the address with a reset link: anyone can
+/// sign up with any address.
 async fn admins_only(mut req: Request, next: Next) -> Response {
     let user = match CurrentUser::from_request_parts(&mut req).await {
         Ok(CurrentUser(user)) => user,
@@ -154,6 +156,20 @@ async fn admins_only(mut req: Request, next: Next) -> Response {
         .any(|email| email.trim().eq_ignore_ascii_case(&user.email))
     {
         return Error::forbidden().into_response();
+    }
+    let Ok(db) = Db::from_request_parts(&mut req).await else {
+        return Error::forbidden().into_response();
+    };
+    let verified: Option<bool> =
+        sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
+            .bind(user.id)
+            .fetch_optional(&*db)
+            .await
+            .unwrap_or(None);
+    if verified != Some(true) {
+        return Error::forbidden()
+            .with_code("email_unverified")
+            .into_response();
     }
     next.run(req).await
 }
@@ -280,8 +296,9 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
     let hash = password::hash(form.password.as_str()).await?;
     let user = sqlx::query_as::<_, User>(
         // Bumping session_version logs out every session of this account.
-        "UPDATE users SET password_hash = $1, session_version = session_version + 1 \
-         WHERE id = $2 RETURNING id, email",
+        // The link came by email, so the address is the user's.
+        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
+         email_verified = TRUE WHERE id = $2 RETURNING id, email",
     )
     .bind(&hash)
     .bind(user_id)

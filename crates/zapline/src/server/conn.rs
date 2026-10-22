@@ -191,18 +191,115 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
 /// The hyper service for one HTTP/2 connection. hyper runs every stream as
 /// its own task, so the response future is left for that task to poll.
 #[cfg(feature = "http2")]
-pub(crate) struct H2Service(Service);
+pub(crate) struct H2Service(Service, Arc<Activity>);
 
 #[cfg(feature = "http2")]
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for H2Service {
     type Response = crate::Response;
     type Error = std::convert::Infallible;
-    type Future = ResponseFuture;
+    type Future = Tracked;
 
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
-        self.0.app.handle(req.map(ReqBody::Incoming), self.0.conn)
+    fn call(&self, req: http::Request<hyper::body::Incoming>) -> Tracked {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.1.requests.fetch_add(1, Relaxed);
+        self.1.in_flight.fetch_add(1, Relaxed);
+        Tracked(
+            self.0.app.handle(req.map(ReqBody::Incoming), self.0.conn),
+            self.1.clone(),
+        )
     }
 }
+
+/// Closing idle HTTP/2 connections.
+#[cfg(feature = "http2")]
+mod idle {
+    use super::*;
+
+    /// Requests seen on one HTTP/2 connection, for closing it when idle.
+    #[derive(Default)]
+    pub(crate) struct Activity {
+        pub(super) requests: std::sync::atomic::AtomicU64,
+        pub(super) in_flight: std::sync::atomic::AtomicUsize,
+    }
+
+    /// A response future that counts as in flight until it finishes or drops.
+    pub(crate) struct Tracked(pub(super) ResponseFuture, pub(super) Arc<Activity>);
+
+    impl Future for Tracked {
+        type Output = Result<crate::Response, std::convert::Infallible>;
+
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+            Pin::new(&mut self.0).poll(cx)
+        }
+    }
+
+    impl Drop for Tracked {
+        fn drop(&mut self) {
+            self.1
+                .in_flight
+                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    pin_project_lite::pin_project! {
+        /// An HTTP/2 connection that sends GOAWAY once no request has been in
+        /// flight for `idle`: idle clients can't hold sockets (and
+        /// `max_connections` slots) forever. Responses still streaming, such as
+        /// SSE, finish first.
+            pub(crate) struct IdleH2<C> {
+            #[pin]
+            conn: C,
+            #[pin]
+            timer: tokio::time::Sleep,
+            idle: Duration,
+            activity: Arc<Activity>,
+            seen: u64,
+            closing: bool,
+        }
+    }
+
+    impl<C> IdleH2<C> {
+        pub(crate) fn new(conn: C, idle: Duration, activity: Arc<Activity>) -> Self {
+            IdleH2 {
+                conn,
+                timer: tokio::time::sleep(idle),
+                idle,
+                activity,
+                seen: 0,
+                closing: false,
+            }
+        }
+    }
+
+    impl<C: Future + GracefulShutdown> Future for IdleH2<C> {
+        type Output = C::Output;
+
+        fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<C::Output> {
+            use std::sync::atomic::Ordering::Relaxed;
+            let mut this = self.project();
+            while !*this.closing && this.timer.as_mut().poll(cx).is_ready() {
+                let requests = this.activity.requests.load(Relaxed);
+                if requests == *this.seen && this.activity.in_flight.load(Relaxed) == 0 {
+                    *this.closing = true;
+                    this.conn.as_mut().graceful_shutdown();
+                } else {
+                    *this.seen = requests;
+                    let next = tokio::time::Instant::now() + *this.idle;
+                    this.timer.as_mut().reset(next);
+                }
+            }
+            this.conn.poll(cx)
+        }
+    }
+
+    impl<C: GracefulShutdown> GracefulShutdown for IdleH2<C> {
+        fn graceful_shutdown(self: Pin<&mut Self>) {
+            self.project().conn.graceful_shutdown();
+        }
+    }
+}
+#[cfg(feature = "http2")]
+use idle::{Activity, IdleH2, Tracked};
 
 /// Serves one TLS connection from a stream of type `I`.
 #[cfg(feature = "tls")]
@@ -344,7 +441,7 @@ impl Proto {
         #[cfg(feature = "http2")]
         if let Some(h2) = &self.http2 {
             if stream.get_ref().1.alpn_protocol() == Some(b"h2") {
-                return serve_h2(stream, service, h2, slot).await;
+                return serve_h2(stream, service, h2, self.detect_timeout, slot).await;
             }
         }
         Watched::new(self.h1(stream, service), slot, None).await
@@ -370,7 +467,7 @@ impl Proto {
             },
         };
         if is_h2 {
-            serve_h2(io, service, h2, slot).await;
+            serve_h2(io, service, h2, self.detect_timeout, slot).await;
             drop(permit);
         } else {
             // Its own task, so HTTP/1.1 runs exactly the hot-path future.
@@ -384,10 +481,25 @@ type H1<I> = http1::Connection<TokioIo<I>, Service>;
 #[cfg(feature = "ws")]
 type H1<I> = http1::UpgradeableConnection<TokioIo<I>, Service>;
 
+/// Serve HTTP/2, closing the connection after `idle` without requests
+/// (`ServerConfig::header_read_timeout`, as HTTP/1.1 does between requests).
 #[cfg(feature = "http2")]
-async fn serve_h2<I: Io>(io: I, service: Service, h2: &http2::Builder<TokioExecutor>, slot: Slot) {
-    let conn = h2.serve_connection(TokioIo::new(io), H2Service(service));
-    Watched::new(conn, slot, None).await
+async fn serve_h2<I: Io>(
+    io: I,
+    service: Service,
+    h2: &http2::Builder<TokioExecutor>,
+    idle: Option<Duration>,
+    slot: Slot,
+) {
+    let activity = Arc::new(Activity::default());
+    let conn = h2.serve_connection(TokioIo::new(io), H2Service(service, activity.clone()));
+    match idle {
+        Some(idle) => {
+            let conn = IdleH2::new(conn, idle, activity);
+            Watched::new(conn, slot, None).await
+        }
+        None => Watched::new(conn, slot, None).await,
+    }
 }
 
 #[cfg(not(feature = "ws"))]

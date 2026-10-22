@@ -314,7 +314,7 @@ async fn only_admin_emails_get_into_the_admin_panel() {
         .assert_status(303)
         .assert_header("location", "/login");
 
-    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 200)] {
+    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 403)] {
         client
             .post("/api/auth/signup")
             .json(&creds(email, "correct horse"))
@@ -332,4 +332,21 @@ async fn only_admin_emails_get_into_the_admin_panel() {
             .await
             .assert_status(204);
     }
+
+    // Anyone can sign up as owner@: the address counts once its owner uses
+    // a reset link sent to it.
+    client
+        .post("/api/auth/forgot")
+        .json(&json!({ "email": "owner@example.com" }))
+        .send()
+        .await
+        .assert_status(202);
+    let token = reset_token(&client, 0).await;
+    client
+        .post("/api/auth/reset")
+        .json(&json!({ "token": token, "password": "new password" }))
+        .send()
+        .await
+        .assert_status(200);
+    client.get("/admin/todos").send().await.assert_status(200);
 }

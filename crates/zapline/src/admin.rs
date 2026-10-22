@@ -376,10 +376,13 @@ async fn run<DB: AdminBackend>(
     if columns.iter().filter(|c| c.pk).count() != 1 {
         columns.iter_mut().for_each(|c| c.pk = false);
     }
+    // Hidden columns go first so `pk` indexes the columns that remain; a
+    // hidden primary key leaves the table read-only.
+    columns.retain(|c| !c.hidden);
     let t = Table {
         name: table,
-        pk: columns.iter().position(|c| c.pk && !c.hidden),
-        columns: columns.into_iter().filter(|c| !c.hidden).collect(),
+        pk: columns.iter().position(|c| c.pk),
+        columns,
     };
     let editable = !admin.read_only && t.pk.is_some();
 
@@ -518,7 +521,7 @@ async fn list<DB: AdminBackend>(
         .get("offset")
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0)
-        .max(0);
+        .clamp(0, i64::MAX - PAGE_SIZE);
     let sort = params.get("sort").unwrap_or("");
     let (sort_col, desc) = match sort.strip_prefix('-') {
         Some(name) => (name, true),

@@ -154,7 +154,9 @@ const ENV_VARS: [(&str, &str); 7] = [
     ),
     (
         "ADMIN_EMAILS",
-        "# Accounts allowed into the admin panel at /admin, comma-separated.\nADMIN_EMAILS=\n",
+        "# Accounts allowed into the admin panel at /admin, comma-separated. Each\n\
+         # owner proves the address once: \"Forgot your password?\" or GitHub/Google login.\n\
+         ADMIN_EMAILS=\n",
     ),
 ];
 

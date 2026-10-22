@@ -223,14 +223,17 @@ async fn github_login_links_to_the_account_with_that_email() {
         format!("{base}/token"),
         format!("{base}/user"),
     );
-    let client = app(Database::sqlite_memory()).oauth(github).test().with_cookies();
-    client
+    let app = app(Database::sqlite_memory()).oauth(github).test();
+    let client = app.clone().with_cookies();
+    // Someone signed up with Ada's address before she ever came (nothing
+    // checks the address at sign-up) and stays logged in.
+    let squatter = app.with_cookies();
+    squatter
         .post("/api/auth/signup")
         .json(&creds("ada@example.com", "correct horse"))
         .send()
         .await
         .assert_status(201);
-    client.post("/api/auth/logout").send().await.assert_status(204);
 
     // Twice: the first login links the GitHub identity, the second uses the link.
     for _ in 0..2 {
@@ -247,6 +250,16 @@ async fn github_login_links_to_the_account_with_that_email() {
         assert_eq!(me.json::<serde_json::Value>()["email"], "ada@example.com");
         client.post("/api/auth/logout").send().await.assert_status(204);
     }
+
+    // Ada's GitHub login proved the address: the squatter's password and
+    // session no longer work.
+    squatter.get("/api/auth/me").send().await.assert_status(401);
+    squatter
+        .post("/api/auth/login")
+        .json(&creds("ada@example.com", "correct horse"))
+        .send()
+        .await
+        .assert_status(401);
 }
 
 #[tokio::test]
@@ -266,7 +279,7 @@ async fn only_admin_emails_get_into_the_admin_panel() {
     client.get("/admin").send().await.assert_status(401);
     // api@@
 
-    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 200)] {
+    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 403)] {
         client
             .post("/api/auth/signup")
             .json(&creds(email, "correct horse"))
@@ -276,4 +289,16 @@ async fn only_admin_emails_get_into_the_admin_panel() {
         client.get("/admin/users").send().await.assert_status(status);
         client.post("/api/auth/logout").send().await.assert_status(204);
     }
+
+    // Anyone can sign up as owner@: the address counts once its owner uses
+    // a reset link sent to it.
+    client.post("/api/auth/forgot").json(&json!({ "email": "owner@example.com" })).send().await.assert_status(202);
+    let token = reset_token(&client, 0).await;
+    client
+        .post("/api/auth/reset")
+        .json(&json!({ "token": token, "password": "new password" }))
+        .send()
+        .await
+        .assert_status(200);
+    client.get("/admin/users").send().await.assert_status(200);
 }

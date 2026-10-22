@@ -43,6 +43,44 @@ async fn outbox_keeps_mail_and_the_dev_inbox_shows_it() {
 }
 
 #[tokio::test]
+async fn the_dev_inbox_is_for_this_machine_only() {
+    let client = App::new().mailer(Mailer::outbox()).test();
+    client.get(DEV_INBOX_PATH).send().await.assert_status(200);
+    client
+        .get(DEV_INBOX_PATH)
+        .remote_addr("203.0.113.9:4000".parse().unwrap())
+        .send()
+        .await
+        .assert_status(404);
+    client
+        .get(DEV_INBOX_PATH)
+        .header("x-forwarded-for", "203.0.113.9")
+        .send()
+        .await
+        .assert_status(404);
+    // DNS rebinding: a page on evil.example resolved to 127.0.0.1.
+    client
+        .get(DEV_INBOX_PATH)
+        .header("host", "evil.example:3000")
+        .send()
+        .await
+        .assert_status(404);
+    for host in [
+        "localhost:3000",
+        "127.0.0.1:3000",
+        "[::1]:3000",
+        "app.localhost",
+    ] {
+        client
+            .get(DEV_INBOX_PATH)
+            .header("host", host)
+            .send()
+            .await
+            .assert_status(200);
+    }
+}
+
+#[tokio::test]
 async fn smtp_mailers_have_no_dev_inbox() {
     let mailer = Mailer::smtp("smtp://localhost:1").unwrap();
     assert!(!mailer.is_outbox());

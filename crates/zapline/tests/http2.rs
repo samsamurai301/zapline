@@ -273,3 +273,27 @@ fn h2c_over_a_unix_socket() {
     });
     server.join().unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn idle_connections_are_closed() {
+    let mut app = app();
+    app.server_config_mut().header_read_timeout = Some(Duration::from_millis(200));
+    let server = TestServer::spawn(app).await;
+    let tcp = TcpStream::connect(server.addr).await.unwrap();
+    let (mut sender, conn) =
+        hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+            .await
+            .unwrap();
+    let conn = tokio::spawn(conn);
+    // A request longer than the idle time is not idle.
+    assert_eq!(get(&mut sender, "/slow").await.1, "done");
+    assert_eq!(get(&mut sender, "/").await.0, 200);
+    // Then nothing: the server says goodbye.
+    let started = Instant::now();
+    tokio::time::timeout(Duration::from_secs(5), conn)
+        .await
+        .expect("idle HTTP/2 connection stayed open")
+        .unwrap()
+        .ok();
+    assert!(started.elapsed() >= Duration::from_millis(150));
+}

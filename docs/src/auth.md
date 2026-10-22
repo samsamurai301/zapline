@@ -47,7 +47,7 @@ zapline g auth
 | File | What it holds |
 |---|---|
 | `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS` |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
 | `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
 | `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
@@ -55,7 +55,9 @@ It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, ad
 
 **Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
 
-**Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. See [Social login](#social-login-oauth) for the pieces underneath.
+**Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. Sign-up doesn't check the address, so someone could open an account with another person's email ahead of them: when the real owner then logs in with GitHub or Google, that account's password is dropped and its sessions end.
+
+**Admins.** The accounts in `ADMIN_EMAILS` get into `/admin` only after the address is proved: by using a reset link sent to it, or by a GitHub/Google login with it. Until then they get `403 email_unverified`, so signing up first with the boss's address gets an attacker nowhere. See [Social login](#social-login-oauth) for the pieces underneath.
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 

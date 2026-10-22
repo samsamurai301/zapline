@@ -124,6 +124,28 @@ async fn the_app_serves_signed_links_only() {
 }
 
 #[tokio::test]
+async fn uploads_never_run_as_pages_on_the_app_origin() {
+    let storage = Storage::memory();
+    let client = App::new().storage(storage.clone()).test();
+    for key in ["x.html", "x.svg", "x.xml", "x.js"] {
+        storage.put(key, "<script>alert(1)</script>").await.unwrap();
+        let res = client.get(&storage.url(key, HOUR)).send().await;
+        res.assert_status(200)
+            .assert_header("content-disposition", "attachment");
+        let csp = res.headers()["content-security-policy"].to_str().unwrap();
+        assert!(
+            csp.contains("sandbox") && csp.contains("default-src 'none'"),
+            "{csp}"
+        );
+    }
+    // Images and the like still show inline, sandboxed.
+    storage.put("a.png", vec![0x89, b'P']).await.unwrap();
+    let res = client.get(&storage.url("a.png", HOUR)).send().await;
+    assert!(res.headers().get("content-disposition").is_none());
+    assert!(res.headers().contains_key("content-security-policy"));
+}
+
+#[tokio::test]
 async fn a_shared_secret_keeps_links_valid_across_instances() {
     let first = Storage::memory().secret("s3cr3t");
     let second = Storage::memory().secret("s3cr3t");

@@ -104,7 +104,7 @@ impl<T> Paged<T> {
     /// assert_eq!(page.next_offset(), Some(2));
     /// ```
     pub fn next_offset(&self) -> Option<i64> {
-        let next = self.offset + self.limit;
+        let next = self.offset.checked_add(self.limit)?;
         (next < self.total).then_some(next)
     }
 }

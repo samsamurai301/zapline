@@ -15,7 +15,10 @@
 //! to register there is `{APP_URL}/auth/github/callback`.
 //!
 //! The admin panel at `/admin` lets in only the accounts listed in
-//! `ADMIN_EMAILS` (comma-separated), in every build.
+//! `ADMIN_EMAILS` (comma-separated), in every build, once their owner has
+//! proved the address: by a password reset link, or by logging in with
+//! GitHub/Google. Anyone can sign up with any address, so the address alone
+//! proves nothing.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -129,6 +132,19 @@ async fn admins_only(mut req: Request, next: Next) -> Response {
     if !admins.split(',').any(|email| email.trim().eq_ignore_ascii_case(&user.email)) {
         return Error::forbidden().into_response();
     }
+    let Ok(db) = Db::from_request_parts(&mut req).await else {
+        return Error::forbidden().into_response();
+    };
+    let verified: Option<bool> = sqlx::query_scalar("SELECT email_verified FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_optional(&*db)
+        .await
+        .unwrap_or(None);
+    if verified != Some(true) {
+        return Error::forbidden()
+            .with_code("email_unverified")
+            .into_response();
+    }
     next.run(req).await
 }
 
@@ -228,7 +244,10 @@ async fn authenticate(db: &Db, session: &Session, creds: &Credentials) -> Result
 
 /// Logs in the account linked to this GitHub/Google identity. The first
 /// time, links it to the account with the same verified email, or creates
-/// one (without a password: "Forgot your password?" sets one).
+/// one (without a password: "Forgot your password?" sets one). An account
+/// whose owner never proved that email may have been opened by someone else
+/// to wait for the real owner, so linking it drops its password and logs out
+/// its sessions.
 async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<User> {
     let who = &oauth.user;
     let linked = sqlx::query_as::<_, User>(
@@ -252,12 +271,23 @@ async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<
                 .bind(&email)
                 .fetch_optional(&**db)
                 .await?;
+            let unusable = password::hash(&password::new_token()?).await?;
             let user = match existing {
-                Some(user) => user,
+                Some(user) => {
+                    sqlx::query(
+                        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
+                         email_verified = TRUE WHERE id = $2 AND email_verified = FALSE",
+                    )
+                    .bind(&unusable)
+                    .bind(user.id)
+                    .execute(&**db)
+                    .await?;
+                    user
+                }
                 None => {
-                    let unusable = password::hash(&password::new_token()?).await?;
                     sqlx::query_as::<_, User>(
-                        "INSERT INTO users (email, password_hash) VALUES ($1, $2) RETURNING id, email",
+                        "INSERT INTO users (email, password_hash, email_verified) VALUES ($1, $2, TRUE) \
+                         RETURNING id, email",
                     )
                     .bind(&email)
                     .bind(&unusable)
@@ -341,8 +371,9 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
     let hash = password::hash(form.password.as_str()).await?;
     let user = sqlx::query_as::<_, User>(
         // Bumping session_version logs out every session of this account.
-        "UPDATE users SET password_hash = $1, session_version = session_version + 1 \
-         WHERE id = $2 RETURNING id, email",
+        // The link came by email, so the address is the user's.
+        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
+         email_verified = TRUE WHERE id = $2 RETURNING id, email",
     )
     .bind(&hash)
     .bind(user_id)

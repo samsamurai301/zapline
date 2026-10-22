@@ -224,10 +224,16 @@ impl Live {
             .entry(topic.to_owned())
             .or_insert_with(|| broadcast::channel(self.capacity).0)
             .subscribe();
-        let stream = futures_util::stream::unfold(receiver, |mut receiver| async move {
+        let listener = Listener {
+            receiver: Some(receiver),
+            topics: self.topics.clone(),
+            topic: topic.to_owned(),
+        };
+        let stream = futures_util::stream::unfold(listener, |mut listener| async move {
+            let receiver = listener.receiver.as_mut()?;
             loop {
                 match receiver.recv().await {
-                    Ok(update) => return Some((update, receiver)),
+                    Ok(update) => return Some((update, listener)),
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
@@ -266,6 +272,30 @@ impl Live {
             .collect();
         topics.sort();
         topics
+    }
+}
+
+/// One subscriber's receiver. When the last one of a topic goes, the topic
+/// goes too, so clients can't grow the map by naming topics nobody
+/// publishes to.
+struct Listener {
+    receiver: Option<broadcast::Receiver<Update>>,
+    topics: Arc<Mutex<HashMap<String, broadcast::Sender<Update>>>>,
+    topic: String,
+}
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // `subscribe` takes the same lock, so no new receiver can appear
+        // between this check and the removal.
+        let mut topics = self.topics.lock().unwrap_or_else(|e| e.into_inner());
+        drop(self.receiver.take());
+        if topics
+            .get(&self.topic)
+            .is_some_and(|tx| tx.receiver_count() == 0)
+        {
+            topics.remove(&self.topic);
+        }
     }
 }
 
@@ -474,5 +504,27 @@ mod relay {
                 backoff = (backoff * 2).min(Duration::from_secs(30));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Live;
+
+    #[tokio::test]
+    async fn unused_topics_are_forgotten() {
+        let live = Live::new();
+        for i in 0..100 {
+            let sub = live.subscribe(&format!("t{i}"));
+            drop(sub);
+        }
+        let mut kept = live.subscribe("kept");
+        let other = live.subscribe("kept");
+        drop(other);
+        assert_eq!(live.lock().len(), 1);
+        live.publish("kept", "e", "still here");
+        assert_eq!(kept.next().await.unwrap().data, "still here");
+        drop(kept);
+        assert!(live.lock().is_empty());
     }
 }

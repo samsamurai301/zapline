@@ -272,6 +272,34 @@ async fn protected_admin_runs_the_guard_first() {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
+async fn hidden_columns_before_the_key_and_huge_offsets() {
+    let pool = sqlite().await;
+    exec(
+        &pool,
+        "CREATE TABLE tokens (token_hash TEXT NOT NULL, owner_id INTEGER NOT NULL, \
+           id INTEGER PRIMARY KEY);
+         INSERT INTO tokens VALUES ('h1', 1, 10), ('h2', 2, 20);",
+    )
+    .await;
+    let admin = client(pool.clone(), |a| a.hide(["tokens.token_hash"]));
+    admin.get("/admin/tokens").send().await.assert_status(200);
+    let res = post(&admin, "/admin/tokens/20/delete", "").await;
+    assert_eq!(res.status(), 303);
+    let left: Vec<i64> = sqlx::query_scalar("SELECT id FROM tokens")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, [10]);
+
+    admin
+        .get("/admin/tokens?offset=9223372036854775807")
+        .send()
+        .await
+        .assert_status(200);
+}
+
+#[cfg(feature = "sqlite")]
+#[tokio::test]
 async fn the_last_admin_call_wins() {
     let admin = App::new()
         .state(sqlite().await)

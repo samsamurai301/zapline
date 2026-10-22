@@ -54,6 +54,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::dev::{escape, internal, DevPanel};
 use crate::extract::FromRequestParts;
+use crate::response::{IntoResponse, Response};
 use crate::{App, Error, Html, Request, Result, Routes};
 
 /// How many messages the development outbox keeps.
@@ -375,7 +376,14 @@ impl App {
     }
 }
 
-async fn dev_inbox(mail: Mailer) -> Html<String> {
+async fn dev_inbox(req: Request) -> Response {
+    // Like the dev console: only for requests from this machine.
+    if !crate::dev::local(&req) {
+        return http::StatusCode::NOT_FOUND.into_response();
+    }
+    let Some(mail) = req.state::<Mailer>().cloned() else {
+        return http::StatusCode::NOT_FOUND.into_response();
+    };
     let mut page = String::from(
         "<!doctype html><meta charset=utf-8><title>Dev inbox</title>\
          <style>body{font:15px/1.5 system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem}\
@@ -411,7 +419,7 @@ async fn dev_inbox(mail: Mailer) -> Html<String> {
         }
         page.push_str("</article>");
     }
-    Html(page)
+    Html(page).into_response()
 }
 
 /// Turn `http(s)://` URLs in already-escaped text into links, so reset and

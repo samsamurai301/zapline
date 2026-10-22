@@ -223,11 +223,37 @@ pub(crate) fn internal(routes: Routes) -> Routes {
 /// come from [`TestClient`](crate::test::TestClient)).
 /// A request from this machine, not relayed by a proxy on it: the peer is a
 /// loopback address and no forwarding header names another client. (A
-/// reverse proxy on the same host connects from loopback too.)
+/// reverse proxy on the same host connects from loopback too.) The host it
+/// was sent to must be a loopback name too, so a web page can't reach it by
+/// pointing its own domain at 127.0.0.1 (DNS rebinding).
 pub(crate) fn local(req: &Request) -> bool {
     const FORWARDED: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
     req.remote_addr().is_some_and(|a| a.ip().is_loopback())
         && !FORWARDED.iter().any(|h| req.headers().contains_key(*h))
+        && loopback_host(req)
+}
+
+/// Whether `Host` (or the HTTP/2 authority) names this machine. Browsers
+/// always send one; a request without any is not from a web page.
+fn loopback_host(req: &Request) -> bool {
+    let host = req
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| req.uri().authority().map(|a| a.as_str()));
+    let Some(host) = host else {
+        return !req.headers().contains_key(http::header::HOST);
+    };
+    let name = match host.strip_prefix('[') {
+        Some(rest) => rest.split(']').next().unwrap_or(""),
+        None => host.rsplit_once(':').map_or(host, |(name, _)| name),
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    name == "localhost"
+        || name.ends_with(".localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
 }
 
 async fn act(req: Request, panels: Panels) -> Response {

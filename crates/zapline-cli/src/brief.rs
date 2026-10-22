@@ -270,6 +270,11 @@ fn tally(report: &mut TestReport, kind: &str, n: u64) {
 /// `zapline test [filter]`: compile errors if the tests don't build,
 /// otherwise the totals and each failure.
 pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
+    // The filter may come from an MCP client: it names tests, never flags
+    // (`--config` would let it run any command).
+    if filter.is_some_and(|f| f.starts_with('-')) {
+        anyhow::bail!("a test filter can't start with '-'");
+    }
     // Compile first so build errors come back condensed, not as a wall of text.
     let (built, diags) = diagnostics(project, &["test", "--no-run", "--quiet"])?;
     if !built {
@@ -284,11 +289,15 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
     cmd.args(["test", "--quiet", "--no-fail-fast"]);
     match filter {
         // `zapline test users` runs tests/users.rs when there is one.
-        Some(f) if project.root.join("tests").join(format!("{f}.rs")).is_file() => {
+        Some(f)
+            if f.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+                && project.root.join("tests").join(format!("{f}.rs")).is_file() =>
+        {
             cmd.args(["--test", f]);
         }
         Some(f) => {
-            cmd.arg(f);
+            cmd.args(["--", f]);
         }
         None => {}
     }
@@ -335,6 +344,22 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_filters_cannot_be_cargo_flags() {
+        let project = Project {
+            root: std::path::PathBuf::from("/nonexistent"),
+            package_name: "demo".into(),
+            lib_name: None,
+            bins: vec![],
+            default_run: None,
+            edition: "2021".into(),
+            dependencies: Default::default(),
+            dev_dependencies: Default::default(),
+        };
+        let err = test(&project, Some("--config=build.rustc-wrapper='sh'")).unwrap_err();
+        assert!(err.to_string().contains("can't start with '-'"), "{err}");
+    }
 
     #[test]
     fn diagnostics_are_condensed_to_a_line_and_notes() {
