@@ -69,10 +69,23 @@ struct FlakyStore {
 impl SessionStore for FlakyStore {
     async fn load(&self, id: &str) -> Result<Option<SessionRecord>> {
         self.loads.fetch_add(1, Ordering::SeqCst);
-        let fail = self
-            .fail_loads
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-            .is_ok();
+        // Decrement while non-zero (a CAS loop: `fetch_update` is deprecated on
+        // current stable and its replacement `try_update` is newer than the MSRV).
+        let mut left = self.fail_loads.load(Ordering::SeqCst);
+        let fail = loop {
+            if left == 0 {
+                break false;
+            }
+            match self.fail_loads.compare_exchange(
+                left,
+                left - 1,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => break true,
+                Err(current) => left = current,
+            }
+        };
         if fail {
             return Err(Error::service_unavailable("store timeout"));
         }
