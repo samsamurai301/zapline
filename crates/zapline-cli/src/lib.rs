@@ -12,6 +12,7 @@
 pub mod bench;
 pub mod build;
 pub mod cli;
+pub mod db;
 pub mod dev;
 pub mod doctor;
 pub mod generate;
@@ -35,7 +36,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 
-use cli::{Cli, Command, GenerateKind};
+use cli::{Cli, Command, DbCommand, GenerateKind};
 use project::Project;
 
 /// How the binary was started.
@@ -151,6 +152,14 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Openapi(a) => {
             let project = Project::discover(Path::new("."))?;
             openapi::run(&project, a.bin.as_deref(), &a.output)
+        }
+        Command::Db(DbCommand::New { name }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::new(&project.root, &name)
+        }
+        Command::Db(DbCommand::Migrate { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::migrate(&project, bin.as_deref())
         }
         Command::Doctor => doctor::run(),
         Command::Bench(a) => {

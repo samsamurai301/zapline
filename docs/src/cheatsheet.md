@@ -27,6 +27,9 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
+| Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
+| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | CLI | `zapline new`, `dev`, `generate resource <name>`, `routes --json`, `openapi` |

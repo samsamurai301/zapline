@@ -27,6 +27,8 @@ Examples:
   zapline g middleware audit               Add a middleware function
   zapline routes                           Print the route table
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
+  zapline db new create_posts              Add a SQL migration
+  zapline db migrate                       Apply pending migrations
   zapline doctor                           Check your toolchain
   zapline bench http://localhost:8080/     Load test with wrk
 
@@ -105,6 +107,16 @@ Examples:
   zapline openapi
   zapline openapi -o docs/openapi.json")]
     Openapi(OpenapiArgs),
+
+    /// Create and apply SQL migrations
+    #[command(
+        subcommand,
+        after_long_help = "\
+Examples:
+  zapline db new create_posts      Add migrations/<timestamp>_create_posts.sql
+  zapline db migrate               Apply pending migrations using the app's DATABASE_URL"
+    )]
+    Db(DbCommand),
 
     /// Check that the tools zapline relies on are installed
     Doctor,
@@ -243,6 +255,22 @@ pub struct OpenapiArgs {
     /// Binary to run [default: the package's only binary]
     #[arg(long, value_name = "NAME")]
     pub bin: Option<String>,
+}
+
+/// `zapline db` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DbCommand {
+    /// Create an empty migration file in migrations/
+    New {
+        /// What the migration does, e.g. `create_posts`
+        name: String,
+    },
+    /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE_ONLY=1)
+    Migrate {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
+    },
 }
 
 /// Arguments of `zapline bench`.

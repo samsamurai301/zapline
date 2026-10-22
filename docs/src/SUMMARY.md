@@ -27,6 +27,11 @@
 - [Configuration](config.md)
 - [Background tasks & scheduled jobs](tasks.md)
 
+# Full-stack
+
+- [Databases (Postgres, SQLite)](database.md)
+- [Views & htmx](views.md)
+
 # Security
 
 - [Authentication & authorization](auth.md)

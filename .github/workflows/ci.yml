@@ -61,11 +61,30 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies; do
+          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite; do
             echo "::group::$f"
             cargo check -p zapline --no-default-features --features "$f"
             echo "::endgroup::"
           done
+
+  # zapline::db against a real Postgres (SQLite runs in the main test job).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p zapline --features postgres,sqlite --test db --test db_postgres
+        env:
+          ZAPLINE_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   # The documented minimum supported Rust version.
   msrv:

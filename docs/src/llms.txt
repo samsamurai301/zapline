@@ -38,6 +38,11 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Configuration](https://samsamurai301.github.io/zapline/config.html): Load layered settings into your own struct, then hand it to the app:
 - [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopp
 
+## Full-stack
+
+- [Databases (Postgres, SQLite)](https://samsamurai301.github.io/zapline/database.html): `zapline::db` connects your app to Postgres or SQLite through [sqlx](https://docs.rs/sqlx): a connection pool created at startup, SQL migrations applied automat
+- [Views & htmx](https://samsamurai301.github.io/zapline/views.html): `zapline::view` (feature `views`) renders HTML with [MiniJinja](https://docs.rs/minijinja) templates (Jinja2 syntax: `{{ value }}`, `{% for %}`, `{% extends %}`
+
 ## Security
 
 - [Authentication & authorization](https://samsamurai301.github.io/zapline/auth.html): Authenticate a group of routes with JWTs, then declare who may call what, next to the route:

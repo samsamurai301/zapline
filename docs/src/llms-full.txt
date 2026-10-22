@@ -325,6 +325,9 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `ServeDir::new("public")` (`fs` feature) |
+| Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
+| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | CLI | `zapline new`, `dev`, `generate resource <name>`, `routes --json`, `openapi` |
@@ -2351,6 +2354,189 @@ The grace period comes on top of the time the server spends draining connections
 ## Tests
 
 `App::test()` starts jobs and workers together with the other startup hooks, on the first request. Call `client.start().await` to start them eagerly and `client.shutdown().await` to stop them and wait for the drain. Scheduled jobs with long periods never fire inside a short test, so test the job's logic as a plain function and keep the schedule thin.
+
+
+---
+
+<!-- database.md -->
+
+# Databases
+
+`zapline::db` connects your app to Postgres or SQLite through [sqlx](https://docs.rs/sqlx): a connection pool created at startup, SQL migrations applied automatically, a `Db` extractor, a readiness check, and database errors that become the right HTTP status.
+
+```toml
+[dependencies]
+zapline = { version = "0.1", features = ["sqlite"] }   # or "postgres", or both
+sqlx = { version = "0.8", default-features = false, features = ["derive"] }   # for #[derive(FromRow)]
+```
+
+```rust,ignore
+use serde::Serialize;
+use zapline::db::{sqlx, Database, Db};
+use zapline::prelude::*;
+
+#[derive(Serialize, sqlx::FromRow)]
+struct Post { id: i64, title: String }
+
+#[get("/posts/{id}")]
+async fn get_post(db: Db, Path(id): Path<i64>) -> Result<Json<Post>> {
+    let post = sqlx::query_as::<_, Post>("SELECT id, title FROM posts WHERE id = ?")
+        .bind(id)
+        .fetch_one(&*db)   // no row → 404
+        .await?;
+    Ok(Json(post))
+}
+
+fn main() -> std::io::Result<()> {
+    App::new()
+        .database(Database::from_env())   // DATABASE_URL
+        .mount(get_post)
+        .run("0.0.0.0:8080")
+}
+```
+
+## Connecting
+
+| Constructor | Use |
+|---|---|
+| `Database::from_env()` | URL from `DATABASE_URL` at startup; startup fails with a hint if it's missing |
+| `Database::url("sqlite://app.db?mode=rwc")` | A fixed URL |
+| `Database::sqlite(url)` / `Database::postgres(url)` | Pick the backend explicitly (when both features are on) |
+| `Database::sqlite_memory()` | A private in-memory database per app: ideal for tests |
+
+Pool settings: `.max_connections(n)` (default 4 × CPUs, at least 10), `.min_connections(n)`, `.acquire_timeout(d)` (default 5 s; a request that can't get a connection in time gets a 503).
+
+With both features enabled, `Db` and `Database` default to Postgres; use `SqliteDb` (or `Db<sqlx::Sqlite>`) and `Database::sqlite(url)` for SQLite.
+
+## Queries
+
+`Db` dereferences to `sqlx::Pool`, so every sqlx API works: `.fetch_one(&*db)`, `.execute(&*db)`, and `db.begin().await?` for a transaction (commit with `tx.commit().await?`; dropping it rolls back).
+
+`?` on a `sqlx::Error` gives:
+
+| sqlx error | HTTP |
+|---|---|
+| `RowNotFound` | 404 |
+| unique violation | 409, code `unique_violation` |
+| foreign-key violation | 409, code `foreign_key_violation` |
+| not-null / check violation | 422, code `constraint_violation` |
+| pool timeout | 503, code `db_pool_timeout` |
+| anything else | 500 (details logged, not sent) |
+
+## Migrations
+
+Migrations are plain SQL files in `migrations/`, applied in file-name order, each exactly once (sqlx tracks them in `_sqlx_migrations`).
+
+```sh
+zapline db new create_posts     # migrations/20261022062406_create_posts.sql
+zapline db migrate              # apply pending migrations, then exit
+```
+
+The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
+
+> In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+## Health
+
+```rust,ignore
+use zapline::db::DbCheck;
+
+App::new()
+    .database(Database::from_env())
+    .plugin(Health::new().check("database", DbCheck::new()));   // /health/ready pings the database
+```
+
+## Testing
+
+Each `Database::sqlite_memory()` is a fresh, empty database with your migrations applied, so tests run in parallel without stepping on each other:
+
+```rust,ignore
+fn app(db: Database) -> App {
+    App::new().database(db).mount((list_posts, create_post))
+}
+
+fn main() -> std::io::Result<()> {
+    app(Database::from_env()).run("0.0.0.0:8080")
+}
+
+#[tokio::test]
+async fn creates_a_post() {
+    let client = app(Database::sqlite_memory()).test();
+    let res = client.post("/posts").json(&serde_json::json!({"title": "Hi"})).send().await;
+    assert_eq!(res.status(), 201);
+}
+```
+
+If your SQL is portable between SQLite and Postgres you can test against SQLite and run Postgres in production; otherwise point a test at a real Postgres with `Database::postgres(url)`.
+
+
+---
+
+<!-- views.md -->
+
+# Views & htmx
+
+`zapline::view` (feature `views`) renders HTML with [MiniJinja](https://docs.rs/minijinja) templates (Jinja2 syntax: `{{ value }}`, `{% for %}`, `{% extends %}`, `{% block %}`). It is built for [htmx](https://htmx.org): the same template renders a whole page for a normal visit and just one block for an htmx request, so there is no separate "partials" folder to keep in sync.
+
+```rust,ignore
+use zapline::prelude::*;
+use zapline::view::{context, Hx, HxRequest, Views};
+
+#[get("/todos")]
+async fn todos(views: Views, hx: HxRequest, db: Db) -> Result<Html<String>> {
+    let todos = load_todos(&db).await?;
+    views.page_or_block(&hx, "todos.html", "list", context! { todos })
+}
+
+#[post("/todos")]
+async fn add(db: Db, Form(new): Form<NewTodo>) -> Result<Response> {
+    insert_todo(&db, new).await?;
+    Ok(Hx::trigger("todos-changed").with(StatusCode::CREATED))
+}
+
+fn main() -> std::io::Result<()> {
+    App::new().views("templates").mount((todos, add)).run("0.0.0.0:8080")
+}
+```
+
+`templates/todos.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+  <form hx-post="/todos" hx-swap="none">
+    <input name="title" required> <button>Add</button>
+  </form>
+  <ul id="list" hx-get="/todos" hx-trigger="todos-changed from:body">
+    {% block list %}
+      {% for t in todos %}<li>{{ t.title }}</li>{% endfor %}
+    {% endblock %}
+  </ul>
+{% endblock %}
+```
+
+## API
+
+| | |
+|---|---|
+| `App::views("templates")` | Load templates from a directory (relative to the project root) |
+| `App::views_with("templates", \|env\| { .. })` | Same, plus filters, functions and globals on the MiniJinja `Environment` |
+| `views.render(name, ctx)` | The whole template → `Html<String>` |
+| `views.render_block(name, block, ctx)` | Only `{% block block %}` (with the same context) |
+| `views.page_or_block(&hx, name, block, ctx)` | `render_block` for htmx requests, `render` otherwise (boosted links and history restores get the full page) |
+| `HxRequest` | Extractor: `htmx`, `boosted`, `history_restore`, `target`, `trigger` from the `HX-*` headers |
+| `Hx::redirect / refresh / trigger / retarget / push_url` | htmx response headers; `.with(response)` adds them to any response |
+| `context! { a, b => expr }` | Build a template context; any `Serialize` value works too |
+
+Values are HTML-escaped automatically in `.html` templates. Use `{{ value | safe }}` only for HTML you produced yourself.
+
+## Hot reload
+
+In debug builds templates are read from disk on every render: edit a template, refresh the browser, no rebuild. Release builds load each template once. Copy `templates/` next to the binary when you deploy (the generated Dockerfiles do).
+
+## Errors
+
+A template error (missing template, syntax error, unknown filter) is a 500. Under `zapline dev` (which sets `ZAPLINE_DEV=1`) the response carries the full message with file and line; in production it is logged and the client gets a generic message.
 
 
 ---
@@ -5142,9 +5328,10 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
-| `full` | | Every feature above | all | |
-
-<!-- TODO(integration): confirm the http2 and tls rows once the server package lands -->
+| `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
+| `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
+| `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
+| `full` | | Every feature above except the database backends (pick `postgres` and/or `sqlite`) | all | |
 
 `openapi`, `validate`, `jwt` and `cookies` turn on `json` as well, because their error bodies, schemas and session data are JSON.
 

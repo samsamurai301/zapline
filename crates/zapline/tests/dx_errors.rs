@@ -388,3 +388,39 @@ async fn handlers_can_inspect_rejections() {
         r#"invalid_path:{"param":"id"}"#
     );
 }
+
+#[test]
+fn dev_mode_shows_the_real_500_message() {
+    // ZAPLINE_DEV is read once per process, so check it in a child process.
+    if std::env::var_os("ZAPLINE_DEV_CHILD").is_some() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app = zapline::App::new().get("/", || async {
+                Err::<(), _>(zapline::Error::internal("pool exhausted"))
+            });
+            let res = app.test().get("/").send().await;
+            assert_eq!(res.status(), 500);
+            assert!(res.text().contains("pool exhausted"), "{}", res.text());
+        });
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "dev_mode_shows_the_real_500_message",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("ZAPLINE_DEV_CHILD", "1")
+        .env(zapline::ENV_DEV, "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

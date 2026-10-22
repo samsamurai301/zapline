@@ -309,11 +309,15 @@ impl Dev<'_> {
             }
         }
         let shown = exe.strip_prefix(&self.project.root).unwrap_or(exe);
-        match Command::new(exe)
-            .args(&self.opts.app_args)
-            .current_dir(&self.project.root)
-            .spawn()
-        {
+        let mut cmd = Command::new(exe);
+        cmd.args(&self.opts.app_args)
+            .current_dir(&self.project.root);
+        // Dev mode: 500 responses carry the real error instead of a generic
+        // message, so you (or your AI assistant) see what broke.
+        if std::env::var_os("ZAPLINE_DEV").is_none() {
+            cmd.env("ZAPLINE_DEV", "1");
+        }
+        match cmd.spawn() {
             Ok(child) => {
                 ui::status(
                     "Running",

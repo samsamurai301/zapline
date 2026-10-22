@@ -1,0 +1,5 @@
+CREATE TABLE notes (
+    id BIGSERIAL PRIMARY KEY,
+    slug TEXT NOT NULL UNIQUE,
+    body TEXT NOT NULL
+);

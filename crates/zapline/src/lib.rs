@@ -52,11 +52,13 @@
 //! | Building and running an app | [`App`], [`Routes`], [`ServerConfig`] |
 //! | Reading requests | [`extract`]: `Path`, `Query`, `Json`, `Form`, `State`, ...; [`stream::BodyStream`] |
 //! | Writing responses | [`IntoResponse`], [`Html`], [`Redirect`], [`sse`], [`stream::StreamBody`] |
+//! | Server-rendered HTML | [`view`]: templates, htmx fragments |
 //! | Errors | [`Error`] (`{"error", "code", "details"}` JSON), [`App::error_handler`] |
 //! | Middleware | [`middleware`]: CORS, timeouts, rate limiting, request IDs, compression, ... |
 //! | API docs and validation | [`openapi`], [`validate`] |
 //! | Security | [`auth`] (bearer, basic, API keys, JWT, guards, CSRF), [`cookies`], [`session`] |
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
+//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases |
 //! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
@@ -81,6 +83,9 @@
 //! | `compression` | | [`middleware::Compression`]: gzip, brotli, zstd and deflate |
 //! | `jwt` | | JSON Web Tokens: [`auth::Jwt`], [`auth::JwtConfig`], [`auth::Claims`] |
 //! | `cookies` | | [`cookies`], [`session`] and [`auth::Csrf`] |
+//! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
+//! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
+//! | `sqlite` | | [`db`]: SQLite pool, migrations, `Db` extractor (sqlx) |
 //! | `full` | | All of the above |
 //!
 //! Always available: routing, extractors, middleware, [`auth`] (bearer,
@@ -119,6 +124,8 @@ pub mod sse;
 pub mod stream;
 #[cfg(feature = "tls")]
 pub mod tls;
+#[cfg(feature = "views")]
+pub mod view;
 #[cfg(feature = "ws")]
 pub mod ws;
 
@@ -132,6 +139,8 @@ pub mod session;
 // ---- application structure ---------------------------------------------------
 #[cfg(feature = "config")]
 pub mod config;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub mod db;
 pub mod di;
 pub mod tasks;
 
@@ -143,7 +152,7 @@ pub mod telemetry;
 
 pub use app::{App, Plugin, DEFAULT_BODY_LIMIT, ENV_PRINT_ROUTES};
 pub use body::{Body, BoxError, ReqBody};
-pub use error::{Error, ErrorReport, Result};
+pub use error::{Error, ErrorReport, Result, ENV_DEV};
 #[cfg(feature = "form")]
 pub use extract::Form;
 #[cfg(feature = "json")]
