@@ -3,13 +3,13 @@
 #![cfg(all(feature = "sqlite", feature = "json"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use zapline::db::sqlx::{self, Sqlite};
 use zapline::db::Database;
-use zapline::jobs::{Job, JobBackend, JobStats, Jobs};
+use zapline::jobs::{Job, JobBackend, JobQueue, JobStats, Jobs};
 use zapline::prelude::*;
 
 /// Counts runs, shared with the test through app state.
@@ -247,6 +247,436 @@ async fn postgres_workers_share_one_queue() {
     let (ra, rb) = tokio::join!(ja.run_pending(), jb.run_pending());
     assert_eq!(ra.unwrap() + rb.unwrap(), 20);
     assert_eq!(runs.get(), 20);
+}
+
+// ---------------------------------------------------------------------------
+// Unique keys, priorities, named queues, scheduling and discarding
+
+/// The names of the jobs that ran, in order.
+#[derive(Clone, Default)]
+struct Log(Arc<Mutex<Vec<String>>>);
+
+impl Log {
+    fn push(&self, entry: String) {
+        self.0.lock().unwrap().push(entry);
+    }
+
+    fn entries(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Reindex {
+    product: i64,
+}
+
+impl Job for Reindex {
+    const NAME: &'static str = "reindex";
+
+    fn unique_key(&self) -> Option<String> {
+        Some(self.product.to_string())
+    }
+
+    async fn run(self, res: Resources) -> Result<()> {
+        res.require::<Log>()?
+            .push(format!("reindex {}", self.product));
+        Ok(())
+    }
+}
+
+/// Same key space as `Reindex`, different job type.
+#[derive(Serialize, Deserialize)]
+struct Refresh {
+    product: i64,
+}
+
+impl Job for Refresh {
+    const NAME: &'static str = "refresh";
+
+    fn unique_key(&self) -> Option<String> {
+        Some(self.product.to_string())
+    }
+
+    async fn run(self, _res: Resources) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Urgent(String);
+
+impl Job for Urgent {
+    const NAME: &'static str = "urgent";
+    const PRIORITY: i32 = 10;
+
+    async fn run(self, res: Resources) -> Result<()> {
+        res.require::<Log>()?.push(format!("urgent {}", self.0));
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Normal(String);
+
+impl Job for Normal {
+    const NAME: &'static str = "normal";
+
+    async fn run(self, res: Resources) -> Result<()> {
+        res.require::<Log>()?.push(format!("normal {}", self.0));
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Whenever(String);
+
+impl Job for Whenever {
+    const NAME: &'static str = "whenever";
+    const PRIORITY: i32 = -5;
+
+    async fn run(self, res: Resources) -> Result<()> {
+        res.require::<Log>()?.push(format!("whenever {}", self.0));
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct Mail(String);
+
+impl Job for Mail {
+    const NAME: &'static str = "mail";
+    const QUEUE: &'static str = "mail";
+
+    async fn run(self, res: Resources) -> Result<()> {
+        res.require::<Log>()?.push(format!("mail {}", self.0));
+        Ok(())
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+struct BrokenUnique {
+    key: String,
+}
+
+impl Job for BrokenUnique {
+    const NAME: &'static str = "broken_unique";
+    const MAX_ATTEMPTS: u32 = 1;
+
+    fn unique_key(&self) -> Option<String> {
+        Some(self.key.clone())
+    }
+
+    async fn run(self, _res: Resources) -> Result<()> {
+        Err(Error::bad_request("always fails"))
+    }
+}
+
+fn ops_app(log: &Log, configure: impl FnOnce(JobQueue) -> JobQueue) -> App {
+    App::new()
+        .state(log.clone())
+        .state(Runs::default())
+        .database(Database::sqlite_memory())
+        .jobs_in::<Sqlite>(|q| {
+            configure(
+                q.register::<Reindex>()
+                    .register::<Refresh>()
+                    .register::<Urgent>()
+                    .register::<Normal>()
+                    .register::<Whenever>()
+                    .register::<Mail>()
+                    .register::<BrokenUnique>()
+                    .register::<Flaky>()
+                    .poll_interval(Duration::from_millis(20)),
+            )
+        })
+}
+
+async fn wait_for(what: impl Fn() -> bool) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !what() && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_unique_key_is_enqueued_once_while_it_waits() {
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(0)).test();
+    let jobs = jobs_of(&client).await;
+
+    assert!(jobs.enqueue(Reindex { product: 1 }).await.unwrap());
+    assert!(!jobs.enqueue(Reindex { product: 1 }).await.unwrap());
+    assert!(!jobs
+        .enqueue_in(Reindex { product: 1 }, Duration::from_secs(60))
+        .await
+        .unwrap());
+    assert!(jobs.enqueue(Reindex { product: 2 }).await.unwrap());
+    // Keys are per job type.
+    assert!(jobs.enqueue(Refresh { product: 1 }).await.unwrap());
+    assert_eq!(jobs.stats().await.unwrap().queued, 3);
+
+    assert_eq!(jobs.run_pending().await.unwrap(), 3);
+    assert_eq!(log.entries(), ["reindex 1", "reindex 2"]);
+    // Once it ran, the key is free again.
+    assert!(jobs.enqueue(Reindex { product: 1 }).await.unwrap());
+}
+
+#[tokio::test]
+async fn a_failed_unique_job_frees_its_key_and_stays_failed_on_retry() {
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(0)).test();
+    let jobs = jobs_of(&client).await;
+
+    let job = || BrokenUnique { key: "a".into() };
+    assert!(jobs.enqueue(job()).await.unwrap());
+    jobs.run_pending().await.unwrap();
+    assert_eq!(jobs.stats().await.unwrap().failed, 1);
+    // The failed job no longer holds the key.
+    assert!(jobs.enqueue(job()).await.unwrap());
+    // Retrying would make two live jobs with one key: the old one stays failed.
+    assert_eq!(jobs.retry_failed().await.unwrap(), 0);
+    jobs.run_pending().await.unwrap();
+    // Two failed with the same key: only the newest is requeued.
+    assert_eq!(jobs.stats().await.unwrap().failed, 2);
+    assert_eq!(jobs.retry_failed().await.unwrap(), 1);
+    let stats = jobs.stats().await.unwrap();
+    assert_eq!((stats.queued, stats.failed), (1, 1));
+}
+
+#[tokio::test]
+async fn higher_priority_jobs_are_claimed_first() {
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(0)).test();
+    let jobs = jobs_of(&client).await;
+
+    jobs.enqueue(Whenever("a".into())).await.unwrap();
+    jobs.enqueue(Normal("b".into())).await.unwrap();
+    jobs.enqueue(Urgent("c".into())).await.unwrap();
+    jobs.enqueue(Normal("d".into())).await.unwrap();
+    jobs.enqueue(Urgent("e".into())).await.unwrap();
+    assert_eq!(jobs.run_pending().await.unwrap(), 5);
+    assert_eq!(
+        log.entries(),
+        ["urgent c", "urgent e", "normal b", "normal d", "whenever a"]
+    );
+}
+
+#[tokio::test]
+async fn queues_get_their_own_workers() {
+    let log = Log::default();
+    // Only the mail queue is worked by this instance.
+    let client = ops_app(&log, |q| q.queues([("mail", 1)])).test();
+    let jobs = jobs_of(&client).await;
+
+    jobs.enqueue(Normal("waits".into())).await.unwrap();
+    jobs.enqueue(Mail("sent".into())).await.unwrap();
+    wait_for(|| log.entries().contains(&"mail sent".to_string())).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(log.entries(), ["mail sent"]);
+    assert_eq!(
+        jobs.stats().await.unwrap().queued,
+        1,
+        "default is untouched"
+    );
+    client.shutdown().await;
+
+    // Every listed queue is worked, a bare name with `.workers(n)` workers.
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.queues(["default", "mail"]).workers(1)).test();
+    let jobs = jobs_of(&client).await;
+    jobs.enqueue(Normal("one".into())).await.unwrap();
+    jobs.enqueue(Mail("two".into())).await.unwrap();
+    wait_for(|| log.entries().len() == 2).await;
+    let mut ran = log.entries();
+    ran.sort();
+    assert_eq!(ran, ["mail two", "normal one"]);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_named_queues_workers_take_every_queue() {
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(1)).test();
+    let jobs = jobs_of(&client).await;
+    jobs.enqueue(Mail("hi".into())).await.unwrap();
+    wait_for(|| !log.entries().is_empty()).await;
+    assert_eq!(log.entries(), ["mail hi"]);
+    client.shutdown().await;
+}
+
+#[tokio::test]
+async fn enqueue_at_runs_once_the_time_comes() {
+    use std::time::SystemTime;
+
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(0)).test();
+    let jobs = jobs_of(&client).await;
+
+    let soon = SystemTime::now() + Duration::from_millis(150);
+    jobs.enqueue_at(Normal("later".into()), soon).await.unwrap();
+    let past = SystemTime::now() - Duration::from_secs(60);
+    jobs.enqueue_at(Normal("overdue".into()), past)
+        .await
+        .unwrap();
+    assert_eq!(jobs.run_pending().await.unwrap(), 1);
+    assert_eq!(log.entries(), ["normal overdue"]);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(jobs.run_pending().await.unwrap(), 1);
+    assert_eq!(log.entries(), ["normal overdue", "normal later"]);
+}
+
+#[tokio::test]
+async fn failed_jobs_are_listed_and_discarded() {
+    let log = Log::default();
+    let client = ops_app(&log, |q| q.workers(0)).test();
+    let jobs = jobs_of(&client).await;
+
+    jobs.enqueue(BrokenUnique { key: "k".into() })
+        .await
+        .unwrap();
+    jobs.run_pending().await.unwrap();
+    let failed = jobs.failed(10).await.unwrap();
+    assert_eq!(failed.len(), 1);
+    let job = &failed[0];
+    assert_eq!(
+        (job.name.as_str(), job.queue.as_str()),
+        ("broken_unique", "default")
+    );
+    assert_eq!(job.attempts, 1);
+    assert_eq!(job.payload, r#"{"key":"k"}"#);
+    assert!(job.last_error.as_deref().unwrap().contains("always fails"));
+
+    assert!(jobs.discard(job.id).await.unwrap());
+    assert!(!jobs.discard(job.id).await.unwrap(), "already gone");
+    assert!(jobs.failed(10).await.unwrap().is_empty());
+    assert_eq!(jobs.stats().await.unwrap(), JobStats::default());
+
+    // A queued job can be discarded (cancelled) too.
+    jobs.enqueue_in(Normal("never".into()), Duration::from_secs(60))
+        .await
+        .unwrap();
+    let pool: sqlx::Pool<Sqlite> = client.resources().await.require().unwrap();
+    let id: i64 = sqlx::query_scalar("SELECT id FROM zapline_jobs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(jobs.discard(id).await.unwrap());
+    assert_eq!(jobs.stats().await.unwrap().queued, 0);
+}
+
+/// The table as zapline created it before queues, priorities and unique keys.
+const OLD_SCHEMA: [&str; 3] = [
+    "CREATE TABLE zapline_jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, \
+     payload TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'queued', attempts BIGINT NOT NULL DEFAULT 0, \
+     max_attempts BIGINT NOT NULL, run_at BIGINT NOT NULL, locked_until BIGINT NOT NULL DEFAULT 0, \
+     last_error TEXT, created_at BIGINT NOT NULL)",
+    "CREATE INDEX zapline_jobs_due ON zapline_jobs (status, run_at)",
+    "INSERT INTO zapline_jobs (name, payload, max_attempts, run_at, created_at) \
+     VALUES ('normal', '\"from before\"', 5, 0, 0)",
+];
+
+#[tokio::test]
+async fn an_old_jobs_table_is_upgraded_in_place() {
+    let log = Log::default();
+    let client = App::new()
+        .state(log.clone())
+        .database(Database::sqlite_memory())
+        // Runs before the jobs' startup hook: the table an older zapline left.
+        .on_startup(|res: Resources| async move {
+            let pool: sqlx::Pool<Sqlite> = res.require()?;
+            for sql in OLD_SCHEMA {
+                sqlx::query(sql).execute(&pool).await?;
+            }
+            Ok(())
+        })
+        .jobs_in::<Sqlite>(|q| q.register::<Normal>().register::<Reindex>().workers(0))
+        .test();
+    let jobs = jobs_of(&client).await;
+    let pool: sqlx::Pool<Sqlite> = client.resources().await.require().unwrap();
+
+    let columns: Vec<String> =
+        sqlx::query_scalar("SELECT name FROM pragma_table_info('zapline_jobs')")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for column in ["queue", "priority", "unique_key"] {
+        assert!(columns.iter().any(|c| c == column), "{column}: {columns:?}");
+    }
+    let (queue, priority): (String, i64) =
+        sqlx::query_as("SELECT queue, priority FROM zapline_jobs")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((queue.as_str(), priority), ("default", 0));
+
+    // The old row runs, and the new features work on the upgraded table.
+    assert!(jobs.enqueue(Reindex { product: 9 }).await.unwrap());
+    assert!(!jobs.enqueue(Reindex { product: 9 }).await.unwrap());
+    assert_eq!(jobs.run_pending().await.unwrap(), 2);
+    assert_eq!(log.entries(), ["normal from before", "reindex 9"]);
+}
+
+/// Unique keys, priorities and the upgrade on Postgres, in a database of
+/// its own.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_unique_priority_and_upgrade() {
+    use zapline::db::sqlx::{PgPool, Postgres};
+
+    let Ok(base) = std::env::var("ZAPLINE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = PgPool::connect(&base).await.unwrap();
+    let name = format!(
+        "zl_jobs_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    sqlx::query(&format!("CREATE DATABASE {name}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let (prefix, _) = base.split('?').next().unwrap().rsplit_once('/').unwrap();
+    let url = format!("{prefix}/{name}");
+    {
+        let pool = PgPool::connect(&url).await.unwrap();
+        for sql in OLD_SCHEMA {
+            let sql = sql.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "BIGSERIAL PRIMARY KEY");
+            sqlx::query(&sql).execute(&pool).await.unwrap();
+        }
+        pool.close().await;
+    }
+
+    let log = Log::default();
+    let client = App::new()
+        .state(log.clone())
+        .database(Database::postgres(url).migrate(false))
+        .jobs_in::<Postgres>(|q| {
+            q.register::<Normal>()
+                .register::<Urgent>()
+                .register::<Reindex>()
+                .workers(0)
+        })
+        .test();
+    let jobs: Jobs<Postgres> = client.resources().await.require().unwrap();
+    assert!(jobs.enqueue(Reindex { product: 1 }).await.unwrap());
+    assert!(!jobs.enqueue(Reindex { product: 1 }).await.unwrap());
+    jobs.enqueue(Urgent("first".into())).await.unwrap();
+    assert_eq!(jobs.run_pending().await.unwrap(), 3);
+    assert_eq!(
+        log.entries(),
+        ["urgent first", "normal from before", "reindex 1"]
+    );
+    client.shutdown().await;
+    drop(client);
+    sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
+        .execute(&admin)
+        .await
+        .unwrap();
 }
 
 // `JobBackend` is public so apps can name it in generic helpers.
