@@ -109,7 +109,7 @@ async fn get_@@singular@@(
 }
 
 /// Create @@a_human@@.
-#[post("@@path@@")]
+#[post("@@path@@", status = 201)]
 async fn create_@@singular@@(
     State(store): State<@@pascal@@Store>,
     Valid(Json(new)): Valid<Json<New@@pascal@@>>,
@@ -129,7 +129,7 @@ async fn replace_@@singular@@(
 }
 
 /// Delete @@a_human@@.
-#[delete("@@path@@/{id}")]
+#[delete("@@path@@/{id}", status = 204)]
 async fn delete_@@singular@@(
     State(store): State<@@pascal@@Store>,
     Path(id): Path<u64>,

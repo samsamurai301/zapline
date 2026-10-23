@@ -131,6 +131,15 @@ fn full_project_builds_and_passes_its_tests() {
 }
 
 #[test]
+#[ignore = "slow: compiles zapline with sqlite, views and live"]
+fn fullstack_project_survives_its_fuzz_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = generate(tmp.path(), "scaffold-fullstack", "fullstack");
+    let out = expect_cargo_ok(&project, &["test", "--test", "fuzz", "--", "--nocapture"]);
+    assert!(out.contains("no failures"), "{out}");
+}
+
+#[test]
 #[ignore = "slow: compiles zapline; needs the openapi and validate modules"]
 fn generated_resources_handlers_and_middleware_compile_and_pass() {
     let tmp = tempfile::tempdir().unwrap();
@@ -236,4 +245,10 @@ fn routes_and_openapi_work_on_a_real_project() {
     assert_eq!(spec["info"]["title"], "scaffold-real");
     assert!(spec["paths"]["/users"]["post"].is_object(), "{spec}");
     assert!(spec["paths"]["/users/{id}"]["delete"].is_object(), "{spec}");
+
+    let out = zapline_in(&["fuzz", "--cases", "20", "--seed", "3"]);
+    expect_success(&out);
+    let log = stdout(&out);
+    assert!(log.contains("zapline fuzz: "), "{log}");
+    assert!(log.contains("seed 3: no failures"), "{log}");
 }

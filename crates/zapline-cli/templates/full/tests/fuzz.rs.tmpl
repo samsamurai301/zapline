@@ -1,0 +1,27 @@
+//! Every route, fuzzed from its OpenAPI schemas: boundary values (empty and
+//! huge strings, unicode, 0, -1, the limits of each integer type), invalid
+//! input (missing fields, wrong types, malformed JSON) and random requests.
+//!
+//! Fails on panics, 5xx responses, statuses the API docs don't declare and
+//! JSON bodies that don't match their schema, printing a minimal request
+//! that reproduces each failure. `zapline fuzz` runs this file;
+//! `zapline fuzz --cases 1000 --seed 7` explores further.
+
+use @@crate_name@@::app;
+use @@crate_name@@::config::Settings;
+use zapline::test::FuzzConfig;
+
+#[tokio::test]
+async fn every_route_survives_fuzzing() {
+    let settings = Settings::load().expect("config/default.toml loads");
+    let report = app(&settings)
+        .test()
+        .fuzz()
+        // `.bearer(token)` for routes behind auth, `.skip("POST /webhooks")`
+        // for routes with side effects, `.cases(n)` for a deeper run.
+        .config(FuzzConfig::new())
+        .await;
+    // The summary `zapline fuzz` shows; `assert_clean` panics with the failures.
+    println!("{report}");
+    report.assert_clean();
+}

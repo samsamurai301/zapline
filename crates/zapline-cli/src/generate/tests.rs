@@ -48,9 +48,9 @@ fn resource_creates_files_and_registers_the_module() {
         "pub struct BlogPostStore(",
         "#[get(\"/blog-posts\")]",
         "#[get(\"/blog-posts/{id}\")]",
-        "#[post(\"/blog-posts\")]",
+        "#[post(\"/blog-posts\", status = 201)]",
         "#[put(\"/blog-posts/{id}\")]",
-        "#[delete(\"/blog-posts/{id}\")]",
+        "#[delete(\"/blog-posts/{id}\", status = 204)]",
         "async fn list_blog_posts(",
         "async fn get_blog_post(",
         "async fn create_blog_post(",
@@ -313,8 +313,12 @@ fn handler_methods_shape_the_response() {
         let root = scaffold(tmp.path(), Template::Api);
         handler(&root, "thing", method, Some("/things"), false).unwrap();
         let src = read(&root, "src/routes/thing.rs");
+        let route_status = match status {
+            "200" => String::new(),
+            code => format!(", status = {code}"),
+        };
         assert!(
-            src.contains(&format!("#[{}(\"/things\")]", method.lower())),
+            src.contains(&format!("#[{}(\"/things\"{route_status})]", method.lower())),
             "{src}"
         );
         assert!(

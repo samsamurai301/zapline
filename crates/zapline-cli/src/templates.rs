@@ -46,6 +46,7 @@ const MINIMAL: &[TemplateFile] = &[
     file!("src/main.rs", "common/main.rs.tmpl"),
     file!("src/lib.rs", "minimal/src/lib.rs.tmpl"),
     file!("tests/api.rs", "minimal/tests/api.rs.tmpl"),
+    file!("tests/fuzz.rs", "common/fuzz.rs.tmpl"),
 ];
 
 const API: &[TemplateFile] = &[
@@ -65,6 +66,7 @@ const API: &[TemplateFile] = &[
     file!("src/routes/users.rs", "api/src/routes/users.rs.tmpl"),
     file!("tests/health.rs", "api/tests/health.rs.tmpl"),
     file!("tests/users.rs", "api/tests/users.rs.tmpl"),
+    file!("tests/fuzz.rs", "common/fuzz.rs.tmpl"),
 ];
 
 const FULL: &[TemplateFile] = &[
@@ -91,6 +93,7 @@ const FULL: &[TemplateFile] = &[
     file!("src/routes/users.rs", "full/src/routes/users.rs.tmpl"),
     file!("tests/ops.rs", "full/tests/ops.rs.tmpl"),
     file!("tests/users.rs", "full/tests/users.rs.tmpl"),
+    file!("tests/fuzz.rs", "full/tests/fuzz.rs.tmpl"),
 ];
 
 const FULLSTACK: &[TemplateFile] = &[
@@ -117,6 +120,7 @@ const FULLSTACK: &[TemplateFile] = &[
     ),
     file!("static/app.css", "fullstack/static/app.css.tmpl"),
     file!("tests/todos.rs", "fullstack/tests/todos.rs.tmpl"),
+    file!("tests/fuzz.rs", "fullstack/tests/fuzz.rs.tmpl"),
 ];
 
 impl Template {

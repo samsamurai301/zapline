@@ -31,7 +31,7 @@ async fn get_user(repo: Dep<dyn UserRepository>, Path(id): Path<u64>) -> Result<
 }
 
 /// Create a user. Responds 409 if the email is already registered.
-#[post("/users")]
+#[post("/users", status = 201)]
 async fn create_user(
     repo: Dep<dyn UserRepository>,
     tasks: BackgroundTasks,
@@ -58,7 +58,7 @@ async fn replace_user(
 }
 
 /// Delete a user.
-#[delete("/users/{id}")]
+#[delete("/users/{id}", status = 204)]
 async fn delete_user(repo: Dep<dyn UserRepository>, Path(id): Path<u64>) -> Result<StatusCode> {
     repo.delete(id).await?;
     Ok(StatusCode::NO_CONTENT)

@@ -18,6 +18,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
+| `zapline fuzz [--seed N] [--cases N]` | Run `tests/fuzz.rs`, which [fuzzes every route](testing.md#fuzz-every-route) from its OpenAPI schemas, and print the report: each panic, 5xx, timeout, undeclared status or response that breaks its schema, with a minimal reproducing request |
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json]` | Export the OpenAPI document |

@@ -16,7 +16,7 @@ struct NewUser {
     email: String,
 }
 
-#[post("/users")]
+#[post("/users", status = 201)]
 async fn create_user(Valid(Json(user)): Valid<Json<NewUser>>) -> StatusCode {
     println!("creating {} <{}>", user.name, user.email);
     StatusCode::CREATED
