@@ -34,6 +34,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 ## Building APIs
 
 - [OpenAPI & interactive docs](https://samsamurai301.github.io/zapline/openapi.html): Add one line, and your API documents itself: an OpenAPI 3.1 spec at `/openapi.json` plus Swagger UI at `/docs`.
+- [Typed frontends (TypeScript & no-build JS)](https://samsamurai301.github.io/zapline/frontend.html): Your Rust handlers are the API contract. zapline turns the [OpenAPI document](openapi.md) it already generates into a typed client, and keeps that client curren
 - [Validation](https://samsamurai301.github.io/zapline/validation.html): Wrap an extractor in `Valid` and derive `Validate` on the type. Bad input never reaches your handler.
 - [Dependency injection](https://samsamurai301.github.io/zapline/di.html): Register a service once with `App::provide`, receive it in any handler with `Dep<T>`:
 - [Configuration](https://samsamurai301.github.io/zapline/config.html): Load layered settings into your own struct, then hand it to the app:

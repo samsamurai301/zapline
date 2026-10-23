@@ -28,6 +28,7 @@ Run cargo @("clippy", "--workspace", "--exclude", "bench-servers", "--all-featur
 
 Step "tests (all features)"
 Run cargo @("test", "-p", "zapline", "--all-features")
+Run cargo @("test", "-p", "zapline-codegen")
 Run cargo @("test", "-p", "zapline-cli")
 
 if ($Mode -eq "quick") { exit 0 }

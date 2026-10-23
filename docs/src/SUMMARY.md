@@ -23,6 +23,7 @@
 # Building APIs
 
 - [OpenAPI & interactive docs](openapi.md)
+- [Typed frontends (TypeScript & no-build JS)](frontend.md)
 - [Validation](validation.md)
 - [Dependency injection](di.md)
 - [Configuration](config.md)

@@ -21,7 +21,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json]` | Export the OpenAPI document |
-| `zapline client [-o client.ts]` | Generate a typed TypeScript client for the JSON API ([below](#typescript-client-zapline-client)). `zapline dev --client <file>` keeps it up to date |
+| `zapline client [-o FILE]` | Generate a typed TypeScript (`.ts`) or JavaScript (`.js`) client for the JSON API ([below](#typed-clients-zapline-client)). `zapline dev` keeps it up to date |
 | `zapline doctor` | Check rustc and cargo versions, git, docker and wrk |
 | `zapline bench <url> [-c 256 -d 10s -t N]` | Load-test with wrk |
 
@@ -56,29 +56,28 @@ Both commands run your app with an environment variable. The app prints or write
 
 So the commands are safe to run without databases or other services, for example in CI to check a committed `openapi.json`.
 
-## TypeScript client: `zapline client`
+## Typed clients: `zapline client`
 
 `zapline client -o web/src/api.ts` turns the app's OpenAPI document into one TypeScript file with no dependencies (it uses `fetch`, so it runs in browsers, Node 18+, Deno and Bun):
 
 - an `interface` per schema, with the doc comments of your Rust types;
-- `createClient({ baseUrl?, headers?, fetch? })`, returning one method per operation, named after its `operationId` (the handler name, prefixed with its module when two modules share a name: `usersList`, `postsList`). Path parameters come first, then the body, then a `query` object;
-- `ApiError` for non-2xx responses, with `status`, and zapline's `code` and `details`.
+- `createClient({ baseUrl?, headers?, fetch?, credentials?, csrf? })` and a ready same-origin `api`, with one method per operation, named after its `operationId` (the handler name, prefixed with its module when two modules share a name: `usersList`, `postsList`). Path parameters come first, then the body, then a `query` object, then per-call options (`{ signal, headers }`);
+- `ApiError` for non-2xx responses, with `status`, and zapline's `code` and `details`; a `ValidationError` for 422s, whose `fields` are typed by the request body.
 
 ```ts
-import { createClient, ApiError } from "./api";
+import { api, ApiError, isValidationError } from "./api";
 
-const api = createClient({ headers: () => ({ authorization: `Bearer ${token}` }) });
-const user = await api.createUser({ name: "Ada", email: "ada@example.com" });
 try {
-  await api.getUser(999);
+  await api.createUser({ name: "", email: "ada@example.com" });
 } catch (e) {
-  if (e instanceof ApiError && e.status === 404) { /* ... */ }
+  if (isValidationError(e, "createUser")) e.fields.name;   // FieldError[] | undefined
+  else if (e instanceof ApiError && e.status === 409) { /* ... */ }
 }
 ```
 
-Routes that answer with HTML (htmx pages and fragments) are left out. The file passes `tsc --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess` and is only rewritten when it changes.
+A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same client as an ES module with JSDoc types. Routes that answer with HTML (htmx pages and fragments) are left out. Files pass `tsc --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess` and are only rewritten when they change.
 
-With `zapline dev --client web/src/api.ts`, the client is regenerated after every successful build, before the app restarts. Change a Rust struct, save, and your frontend's type checker sees the change: end-to-end types without a shared schema language.
+`zapline dev` regenerates clients after every successful build, before the app restarts: `frontend/src/api.ts` when the project has a `frontend/` directory, the `ts`/`js` files of a `[client]` table in `zapline.toml`, or `--client <file>`. Change a Rust struct, save, and your frontend's type checker sees the change: end-to-end types without a shared schema language. See [Typed frontends](frontend.md) for the whole workflow, including `/_zapline/api.js` for pages without a build step.
 
 ## AI assistants: `zapline mcp`
 
