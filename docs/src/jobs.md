@@ -73,11 +73,70 @@ let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
-In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them, plus per-job counts when metrics are on and every cron job with its next enqueue.
 
 The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
+
+## Cron jobs
+
+`queue.cron(expr, job)` enqueues `job` every time a [cron expression](cron.md) matches, and registers the job type if you haven't:
+
+```rust
+use zapline::db::Database;
+use zapline::jobs::Job;
+use zapline::prelude::*;
+
+#[model]
+struct SendDigest {
+    period: String,
+}
+
+impl Job for SendDigest {
+    const NAME: &'static str = "send_digest";
+
+    async fn run(self, _res: Resources) -> Result<()> {
+        // build and send the digest for self.period
+        Ok(())
+    }
+}
+
+fn app() -> App {
+    App::new()
+        .database(Database::from_env())
+        .jobs(|queue| {
+            queue
+                .cron("0 8 * * MON-FRI", SendDigest { period: "daily".into() })
+                .cron("CRON_TZ=+01:00 0 8 * * MON", SendDigest { period: "weekly".into() })
+        })
+}
+```
+
+Unlike [`App::schedule`](tasks.md#scheduled-jobs), which runs in every instance, a cron job is enqueued **once per tick for the whole cluster**, however many instances share the database:
+
+- Each tick is a row in `zapline_cron` (key: the job name and the expression; value: the next tick). At the tick, instances race to move it forward in a transaction; only the one that moves it inserts the job, in the same transaction.
+- The job is then an ordinary job: any worker runs it, with retries and backoff.
+- Only instances with workers enqueue (`.workers(0)` web instances don't).
+- If every instance was down at a tick, the job is enqueued once when the first instance comes back, then the schedule resumes. Missed ticks don't pile up.
+- The job's fields are serialized once, at startup: every tick enqueues the same payload. Schedule the same job type with different payloads on different expressions, as above. Scheduling one type twice on the same expression panics at startup, and so does an invalid expression.
+- Changing a job's expression starts a new row; the old one is ignored.
+
+## Metrics
+
+Install the [`Metrics`](observability.md#metrics) plugin (`.plugin(Metrics::new())`, in any order with `.jobs(..)`) and the queue exports these series on `GET /metrics`, labelled by job name. Without the plugin nothing is recorded:
+
+| Series | Type | Counts |
+|---|---|---|
+| `jobs_enqueued_total{job}` | counter | jobs added, by `enqueue`, `enqueue_in` or a cron tick |
+| `jobs_started_total{job}` | counter | runs started (one per attempt) |
+| `jobs_succeeded_total{job}` | counter | runs that succeeded |
+| `jobs_failed_total{job}` | counter | runs that failed: returned `Err`, panicked or timed out |
+| `jobs_retried_total{job}` | counter | failed runs that were scheduled again |
+| `jobs_dead_total{job}` | counter | jobs that ran out of attempts (status `failed`) |
+| `jobs_duration_seconds{job}` | histogram (5 ms to 15 min) | how long runs took |
+
+Useful alerts: `increase(jobs_dead_total[1h]) > 0`, and a failure ratio of `rate(jobs_failed_total[5m]) / rate(jobs_started_total[5m])`. Counters are per instance, so `sum by (job)` across instances. The queue depth is in the table: `jobs.stats()` or `SELECT status, COUNT(*) FROM zapline_jobs GROUP BY status`.
 
 ## Testing jobs
 

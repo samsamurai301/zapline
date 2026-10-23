@@ -26,7 +26,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Group middleware / auth | `Routes::wrap(mw)`, `.require_roles(["admin"])`, `.wrap(Authenticate::jwt())` |
 | Config | `Config::load()?` reads `config/default.toml`, `config/{profile}.toml`, `APP__*` env and `.env` |
 | Startup / shutdown | `App::on_startup(\|res\| async move { res.insert(pool); Ok(()) })` (then `State<Pool>`), `App::on_shutdown(..)` |
-| Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
+| Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)`, `Schedule::cron("0 9 * * MON-FRI")`; once per cluster: `.jobs(\|q\| q.cron("@daily", MyJob {}))` |
 | Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | One binary + deploy | `zapline::embed!("templates")` wherever a dir goes (disk in debug); `zapline ship user@host` ([Deployment](deployment.md#one-binary-one-command)) |

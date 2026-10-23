@@ -15,7 +15,8 @@
 //! It lists every route (with its summary and tags when the `openapi`
 //! feature is on) and the last requests with their status and latency, and
 //! the features that know about it add their own panels: [jobs](crate::jobs)
-//! show their queue and can retry failed jobs, an
+//! show their queue, metrics and cron jobs and can retry failed jobs,
+//! [scheduled tasks](crate::App::schedule) show their next and last runs, an
 //! [outbox mailer](crate::mail) links its inbox.
 //!
 //! The console exists only in debug builds and only answers requests from

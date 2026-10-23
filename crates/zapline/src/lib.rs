@@ -58,8 +58,8 @@
 //! | Middleware | [`middleware`]: CORS, timeouts, rate limiting, request IDs, compression, ... |
 //! | API docs and validation | [`openapi`], [`validate`] |
 //! | Security | [`auth`] (bearer, basic, API keys, JWT, social login, guards, CSRF), [`cookies`], [`session`] |
-//! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
-//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs; [`admin`]: an admin panel for every table |
+//! | App structure | [`di`] (dependency injection), [`config`], [`tasks`] (with [`cron`] schedules), [`lifecycle`], [`Plugin`] |
+//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background and cron jobs; [`admin`]: an admin panel for every table |
 //! | Email | [`mail`]: SMTP, dev inbox, test outbox |
 //! | Translations | [`i18n`]: messages per language, `Locale` extractor, plurals, `t()` in templates |
 //! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
@@ -98,6 +98,7 @@
 //! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
 //! | `redis` | | [`redis`]: Redis client; shared cache, live updates, rate limits and sessions |
 //! | `otlp` | | OpenTelemetry traces over OTLP/HTTP from [`telemetry`] |
+//! | `tz` | | IANA time zones (`CRON_TZ=Europe/Paris`) in [`cron`] schedules |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
 //! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
 //! | `s3` | | S3-compatible storage for [`storage`] |
@@ -106,7 +107,7 @@
 //! | `full` | | All of the above |
 //!
 //! Always available: routing, extractors, middleware, [`auth`] (bearer,
-//! basic, API keys, guards), [`di`], [`tasks`], [`sse`], [`stream`],
+//! basic, API keys, guards), [`di`], [`tasks`], [`cron`], [`sse`], [`stream`],
 //! [`health`], [`metrics`] and the [`test`](mod@test) client.
 
 // ---- core -----------------------------------------------------------------
@@ -166,6 +167,7 @@ pub mod admin;
 pub mod cache;
 #[cfg(feature = "config")]
 pub mod config;
+pub mod cron;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;

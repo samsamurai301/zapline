@@ -57,7 +57,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | API docs | OpenAPI 3.1 generated from signatures and doc comments; Swagger UI, Scalar and Redoc; security schemes from auth policies; export with `zapline openapi` |
 | Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` rules (`#[model]` derives them), returning `422` with `[{field, code, message}]` |
 | App structure | `Dep<T>` DI with trait objects and async factories, `Config::load()` (TOML layers + env + `.env` + profiles), `on_startup`/`on_shutdown`, plugins |
-| Background work | `BackgroundTasks` after the response, `App::schedule(Schedule::every(..))`, long-running workers with shutdown tokens |
+| Background work | `BackgroundTasks` after the response, `App::schedule(Schedule::every(..))` and `Schedule::cron("0 9 * * MON-FRI")` (time zones, DST-safe), cron jobs that run once per cluster, job metrics, long-running workers with shutdown tokens |
 | Security | Bearer, Basic and API-key extractors; JWT (HS/RS/ES); social login (GitHub, Google, any OAuth 2 provider, PKCE); `Authenticate` + `CurrentUser`; `.require_roles/.require_scopes` guards; cookies; sessions; CSRF |
 | Middleware | CORS, compression (br/zstd/gzip), rate limiting (per IP/key/route), request IDs, security headers, timeouts, catch-panic, load shedding, path normalization |
 | Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed, content-hashed URLs cached forever), multipart uploads |
@@ -216,7 +216,6 @@ zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830
 
 - [ ] WebSockets over HTTP/2 (RFC 8441), WebTransport
 - [ ] Pluggable distributed stores for rate limiting and sessions (Redis)
-- [ ] Full cron expressions for scheduled jobs
 - [ ] OpenTelemetry OTLP exporter
 - [ ] TechEmpower Framework Benchmarks submission (with DB tests)
 - [ ] Database integration guides (sqlx, SeaORM, Diesel)

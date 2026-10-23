@@ -487,7 +487,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Group middleware / auth | `Routes::wrap(mw)`, `.require_roles(["admin"])`, `.wrap(Authenticate::jwt())` |
 | Config | `Config::load()?` reads `config/default.toml`, `config/{profile}.toml`, `APP__*` env and `.env` |
 | Startup / shutdown | `App::on_startup(\|res\| async move { res.insert(pool); Ok(()) })` (then `State<Pool>`), `App::on_shutdown(..)` |
-| Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
+| Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)`, `Schedule::cron("0 9 * * MON-FRI")`; once per cluster: `.jobs(\|q\| q.cron("@daily", MyJob {}))` |
 | Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | One binary + deploy | `zapline::embed!("templates")` wherever a dir goes (disk in debug); `zapline ship user@host` ([Deployment](deployment.md#one-binary-one-command)) |
@@ -2001,7 +2001,8 @@ Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `
 | Recent requests | The last 50 requests: status (4xx and 5xx highlighted), method, path with query, and how long the app took. |
 | Recording | Whether requests are being recorded, the latest recorded ones, and buttons to start or stop recording, **Save as snapshot test** and clear. See [below](#recording-requests-as-tests). |
 | Routes | Every route with its summary and tags (from doc comments and `#[get(.., tag = "..")]`). Parameterless `GET` routes are links. |
-| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. |
+| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. With the [metrics plugin](observability.md#metrics), per-job enqueued, succeeded, failed, retried and dead counts and the average run time; with [cron jobs](jobs.md#cron-jobs), each one's schedule and next enqueue. |
+| Scheduled tasks | When the app has [`App::schedule`](tasks.md#scheduled-jobs) jobs: each one's name, schedule (`every 5m`, `cron 0 3 * * *`), next run, run and failure counts, and how the last run went. |
 | Mail | When the [mailer](mail.md) is the dev outbox: how many emails were kept, with a link to the inbox at `/_dev/mail`. |
 
 ## Safe to leave in
@@ -3333,7 +3334,7 @@ invalid config profile "pro d": use ASCII letters, digits, `-` and `_`
 
 # Background tasks & scheduled jobs
 
-Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopped cleanly on shutdown.
+Queue work from a handler with `BackgroundTasks`, run periodic or [cron](cron.md) jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopped cleanly on shutdown.
 
 ```rust
 use zapline::prelude::*;
@@ -3421,6 +3422,12 @@ fn app() -> App {
             },
         )
         .schedule(
+            Schedule::cron("0 9 * * MON-FRI").name("standup-digest"),   // 09:00 UTC on weekdays
+            |_res: Resources| async move {
+                println!("sending the digest");
+            },
+        )
+        .schedule(
             Schedule::daily_at(3, 30).name("nightly-report"),   // 03:30 UTC
             |_res: Resources| async move {
                 println!("building the nightly report");
@@ -3432,24 +3439,34 @@ fn app() -> App {
 | Schedule | Meaning |
 |---|---|
 | `Schedule::every(period)` | Every `period`, starting immediately at startup. It is fixed-rate: a run that overruns skips the missed ticks instead of bunching them up. Panics if `period` is zero. |
-| `Schedule::daily_at(hour, minute)` | Once a day at that time in **UTC**. Panics on an invalid time. |
+| `Schedule::cron(expr)` | Whenever the [cron expression](cron.md) matches: 5 or 6 fields, ranges, steps, names, `L`/`W`/`#`, `@hourly`... in UTC, or in the zone given by a `CRON_TZ=` prefix. It follows the wall clock; a run that overruns skips the matches it missed. Panics on an invalid expression (pass a `Cron` you parsed to handle the error). |
+| `Schedule::daily_at(hour, minute)` | Once a day at that time in **UTC**: the same as `Schedule::cron("{minute} {hour} * * *")`. Panics on an invalid time. |
 
 Refine a schedule with modifiers:
 
 | Modifier | Effect |
 |---|---|
-| `.delay_start(duration)` | Waits this long after startup before the first run (for `daily_at`, the first run is the next occurrence after the delay) |
+| `.delay_start(duration)` | Waits this long after startup before the first run (for `cron` and `daily_at`, the first run is the next occurrence after the delay) |
 | `.allow_overlap()` | Starts a new run even if the previous one is still running. By default runs never overlap. |
 | `.limit(runs)` | Stops after `runs` runs |
-| `.name(text)` | A name for log messages. Without one, jobs are called `job #1`, `job #2`, ... |
+| `.name(text)` | A name for log messages, metrics and the dev console. Without one, jobs are called `job #1`, `job #2`, ... |
 
 Things to know:
 
 - A job starts from a startup hook registered at that point in the builder chain, so it can use every provider registered before it.
 - Errors and panics are logged, and the schedule continues.
 - Jobs and workers run on the app's small "system" runtime (two threads, the one that runs startup hooks), not on the per-core request runtimes. A busy job can't stall a request's core, but it shares those two threads with every other job, so move blocking or CPU-heavy work to `tokio::task::spawn_blocking`.
-- Each running instance of your app runs its own schedule. With several replicas, a job runs once per replica. Take a lock (a database advisory lock, for example) inside jobs that must run only once.
-- Cron expressions are not supported yet. `daily_at` and `every` cover the common cases.
+- Each running instance of your app runs its own schedule. With several replicas, a job runs once per replica. For work that must run once per tick across the cluster, use a [cron job](jobs.md#cron-jobs) instead: `.jobs(|q| q.cron("0 3 * * *", NightlyReport {}))`.
+- `schedule.next_after(time)` and `schedule.delay_until_next(time)` tell you when a schedule fires next, without running it.
+
+With the [`Metrics`](observability.md#metrics) plugin installed, every run is counted and timed, labelled by the schedule's name (`task`). Without the plugin nothing is recorded.
+
+| Series | Type | Labels |
+|---|---|---|
+| `scheduled_task_runs_total` | counter | `task`, `outcome` (`ok`, `error`, `panic`) |
+| `scheduled_task_duration_seconds` | histogram (5 ms to 15 min) | `task` |
+
+In debug builds the [dev console](dev-console.md) lists every schedule with its next run, run and failure counts, and how the last run went.
 
 ## Long-running workers
 
@@ -3546,6 +3563,165 @@ The grace period comes on top of the time the server spends draining connections
 ## Tests
 
 `App::test()` starts jobs and workers together with the other startup hooks, on the first request. Call `client.start().await` to start them eagerly and `client.shutdown().await` to stop them and wait for the drain. Scheduled jobs with long periods never fire inside a short test, so test the job's logic as a plain function and keep the schedule thin.
+
+
+---
+
+<!-- cron.md -->
+
+# Cron schedules
+
+Cron expressions say *when* something runs. zapline uses them in two places:
+
+| | Runs | Use it for |
+|---|---|---|
+| `App::schedule(Schedule::cron(expr), job)` ([tasks](tasks.md#scheduled-jobs)) | in every instance of the app, in memory | refreshing a local cache, per-instance housekeeping |
+| `.jobs(\|q\| q.cron(expr, job))` ([durable jobs](jobs.md#cron-jobs)) | **once per tick for the whole cluster**, stored and retried | reports, billing runs, emails, anything that must happen exactly once per tick |
+
+```rust
+use zapline::db::Database;
+use zapline::jobs::Job;
+use zapline::prelude::*;
+use zapline::tasks::Schedule;
+
+#[model]
+struct InvoiceRun {}
+
+impl Job for InvoiceRun {
+    const NAME: &'static str = "invoice_run";
+    async fn run(self, _res: Resources) -> Result<()> { Ok(()) }
+}
+
+fn app() -> App {
+    App::new()
+        .database(Database::from_env())
+        // Each instance: every 5 minutes during office hours, UTC.
+        .schedule(Schedule::cron("*/5 8-18 * * MON-FRI").name("warm-cache"), |_res: Resources| async move {
+            // ...
+        })
+        // The cluster: 02:00 Paris time on the 1st, enqueued once.
+        .jobs(|q| q.cron("CRON_TZ=Europe/Paris 0 2 1 * *", InvoiceRun {}))
+}
+```
+
+`zapline::cron` is always compiled in. Only IANA time zone names (`Europe/Paris`) need the `tz` feature.
+
+## Syntax
+
+Five fields, or six with **seconds first**:
+
+```text
+┌───────────── second (0-59)          only in the 6-field form
+│ ┌─────────── minute (0-59)
+│ │ ┌───────── hour (0-23)
+│ │ │ ┌─────── day of month (1-31)
+│ │ │ │ ┌───── month (1-12 or JAN-DEC)
+│ │ │ │ │ ┌─── day of week (0-7 or SUN-SAT; 0 and 7 are Sunday)
+│ │ │ │ │ │
+0 30 9 * * MON-FRI      09:30:00 on weekdays
+  30 9 * * MON-FRI      the same, 5 fields
+```
+
+Each field is a comma-separated list of:
+
+| Item | Meaning | Example |
+|---|---|---|
+| `*` | every value | `* * * * *` every minute |
+| `n` | one value | `0 12 * * *` at noon |
+| `a-b` | a range, which may wrap around | `0 22-2 * * *` 22:00 to 02:00; `FRI-MON` |
+| `*/n` | every n-th value | `*/15 * * * *` every 15 minutes |
+| `a-b/n` | every n-th value in a range | `0 9-17/2 * * *` 09:00, 11:00, ... 17:00 |
+| `a/n` | every n-th value from `a` | `5/20 * * * *` minutes 5, 25, 45 |
+| names | months and weekdays, any case | `0 0 1 JAN,jul *` |
+
+Extensions in the day fields (from Quartz):
+
+| Item | Field | Meaning |
+|---|---|---|
+| `?` | either day field | same as `*` |
+| `L` | day of month | the last day of the month (28th to 31st) |
+| `L-n` | day of month | n days before the last day: `L-2` |
+| `nW` | day of month | the weekday nearest the n-th, inside the month: `15W` |
+| `LW` | day of month | the last weekday of the month |
+| `d#n` | day of week | the n-th such weekday of the month: `FRI#2`, `1#1` |
+| `dL` | day of week | the last such weekday of the month: `5L`, `SUNL` |
+
+When **both** day fields are restricted (neither starts with `*` or `?`), a day matches if **either** matches, as in classic cron: `0 0 1 * MON` runs on the 1st *and* every Monday. If one of them starts with `*` or `?`, both must match: `0 0 */2 * MON` runs on Mondays that fall on an odd date.
+
+Macros:
+
+| Macro | Same as |
+|---|---|
+| `@yearly`, `@annually` | `0 0 1 1 *` |
+| `@monthly` | `0 0 1 * *` |
+| `@weekly` | `0 0 * * 0` |
+| `@daily`, `@midnight` | `0 0 * * *` |
+| `@hourly` | `0 * * * *` |
+
+Expressions are checked when the app is built: a typo panics with the reason (``invalid cron expression `0 25 * * *`: hour `25` is out of range 0-23``), and so does an expression that can never match, such as `0 0 30 2 *`. To handle errors yourself, for example for a schedule read from configuration, parse it first:
+
+```rust
+use zapline::cron::Cron;
+use zapline::tasks::Schedule;
+
+fn schedule_from_config(expr: &str) -> Result<Schedule, zapline::cron::CronError> {
+    let cron: Cron = expr.parse()?;
+    Ok(Schedule::cron(cron))
+}
+```
+
+## Time zones
+
+An expression runs in **UTC** unless it starts with `CRON_TZ=<zone>` (or `TZ=<zone>`):
+
+| Zone | Example | Needs |
+|---|---|---|
+| UTC | `CRON_TZ=UTC`, `Z`, `GMT` | nothing |
+| A fixed offset | `CRON_TZ=+05:30`, `-0800`, `UTC+2` | nothing |
+| An IANA zone | `CRON_TZ=America/New_York` | the `tz` feature |
+
+```toml
+zapline = { version = "0.1", features = ["tz"] }
+```
+
+With `tz`, zone rules come from the system's time zone database (`/usr/share/zoneinfo` on Linux and macOS; bundled on Windows), through the [`jiff`](https://docs.rs/jiff) crate. Without it, an IANA name is an error that says to enable the feature. You can also set the zone in code with `Cron::with_timezone(Tz::parse("Europe/Paris")?)`.
+
+Fields are matched against the **local** time: `CRON_TZ=+05:30 0 1 * * MON` runs at 01:00 on Mondays in that zone, which is Sunday 19:30 UTC.
+
+### Daylight-saving time
+
+Wall clocks skip an hour in spring and repeat one in autumn. zapline handles both without surprises:
+
+- **Clocks go forward** (02:00 jumps to 03:00): a time that doesn't exist that day, such as `30 2 * * *`, runs once, at the jump (03:00 local). A schedule with several times in the missing hour also runs just once there.
+- **Clocks go back** (02:00 returns to 01:00): a time that happens twice, such as `30 1 * * *`, runs once, the first time. A schedule whose hour field covers every hour, such as `*/15 * * * *`, keeps its rhythm through both passes, so it never pauses for an hour.
+
+UTC and fixed offsets have no daylight-saving changes, which is why they are the default.
+
+## Inspecting a schedule
+
+`Cron` computes fire times without running anything, which is handy in tests and admin pages:
+
+```rust
+use std::time::{Duration, UNIX_EPOCH};
+use zapline::cron::Cron;
+
+let cron = Cron::parse("0 0 L * *")?;                // midnight on the last day of each month
+let jan_1_2024 = UNIX_EPOCH + Duration::from_secs(1_704_067_200);
+let next: Vec<_> = cron.upcoming(jan_1_2024).take(2).collect();
+assert_eq!(next[0], UNIX_EPOCH + Duration::from_secs(1_706_659_200)); // 2024-01-31
+assert_eq!(next[1], UNIX_EPOCH + Duration::from_secs(1_709_164_800)); // 2024-02-29
+```
+
+| Method | Returns |
+|---|---|
+| `Cron::parse(expr)` / `expr.parse::<Cron>()` | the parsed expression or a `CronError` |
+| `cron.next_after(t)` | the first fire time strictly after `t` (whole seconds) |
+| `cron.upcoming(t)` | every fire time after `t`, as an iterator |
+| `cron.with_timezone(tz)` / `cron.timezone()` | change or read the zone |
+| `cron.to_string()` | the expression, with `CRON_TZ=` when the zone isn't UTC |
+| `Schedule::next_after(t)` | the same for a task schedule |
+
+In debug builds the [dev console](dev-console.md) lists every scheduled task with its next run, and every cron job with its next enqueue.
 
 
 ---
@@ -3967,11 +4143,70 @@ let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
-In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them, plus per-job counts when metrics are on and every cron job with its next enqueue.
 
 The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
+
+## Cron jobs
+
+`queue.cron(expr, job)` enqueues `job` every time a [cron expression](cron.md) matches, and registers the job type if you haven't:
+
+```rust
+use zapline::db::Database;
+use zapline::jobs::Job;
+use zapline::prelude::*;
+
+#[model]
+struct SendDigest {
+    period: String,
+}
+
+impl Job for SendDigest {
+    const NAME: &'static str = "send_digest";
+
+    async fn run(self, _res: Resources) -> Result<()> {
+        // build and send the digest for self.period
+        Ok(())
+    }
+}
+
+fn app() -> App {
+    App::new()
+        .database(Database::from_env())
+        .jobs(|queue| {
+            queue
+                .cron("0 8 * * MON-FRI", SendDigest { period: "daily".into() })
+                .cron("CRON_TZ=+01:00 0 8 * * MON", SendDigest { period: "weekly".into() })
+        })
+}
+```
+
+Unlike [`App::schedule`](tasks.md#scheduled-jobs), which runs in every instance, a cron job is enqueued **once per tick for the whole cluster**, however many instances share the database:
+
+- Each tick is a row in `zapline_cron` (key: the job name and the expression; value: the next tick). At the tick, instances race to move it forward in a transaction; only the one that moves it inserts the job, in the same transaction.
+- The job is then an ordinary job: any worker runs it, with retries and backoff.
+- Only instances with workers enqueue (`.workers(0)` web instances don't).
+- If every instance was down at a tick, the job is enqueued once when the first instance comes back, then the schedule resumes. Missed ticks don't pile up.
+- The job's fields are serialized once, at startup: every tick enqueues the same payload. Schedule the same job type with different payloads on different expressions, as above. Scheduling one type twice on the same expression panics at startup, and so does an invalid expression.
+- Changing a job's expression starts a new row; the old one is ignored.
+
+## Metrics
+
+Install the [`Metrics`](observability.md#metrics) plugin (`.plugin(Metrics::new())`, in any order with `.jobs(..)`) and the queue exports these series on `GET /metrics`, labelled by job name. Without the plugin nothing is recorded:
+
+| Series | Type | Counts |
+|---|---|---|
+| `jobs_enqueued_total{job}` | counter | jobs added, by `enqueue`, `enqueue_in` or a cron tick |
+| `jobs_started_total{job}` | counter | runs started (one per attempt) |
+| `jobs_succeeded_total{job}` | counter | runs that succeeded |
+| `jobs_failed_total{job}` | counter | runs that failed: returned `Err`, panicked or timed out |
+| `jobs_retried_total{job}` | counter | failed runs that were scheduled again |
+| `jobs_dead_total{job}` | counter | jobs that ran out of attempts (status `failed`) |
+| `jobs_duration_seconds{job}` | histogram (5 ms to 15 min) | how long runs took |
+
+Useful alerts: `increase(jobs_dead_total[1h]) > 0`, and a failure ratio of `rate(jobs_failed_total[5m]) / rate(jobs_started_total[5m])`. Counters are per instance, so `sum by (job)` across instances. The queue depth is in the table: `jobs.stats()` or `SELECT status, COUNT(*) FROM zapline_jobs GROUP BY status`.
 
 ## Testing jobs
 
@@ -7005,6 +7240,8 @@ process_resident_memory_bytes 7487488
 | `http_requests_in_flight` | gauge | |
 | `process_start_time_seconds` | gauge | |
 | `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds` | | Linux only. Read from `/proc` at scrape time, so they cost nothing between scrapes. |
+| `jobs_enqueued_total`, `jobs_started_total`, `jobs_succeeded_total`, `jobs_failed_total`, `jobs_retried_total`, `jobs_dead_total`, `jobs_duration_seconds` | counters, histogram | `job`. Only when the app has [durable jobs](jobs.md#metrics). |
+| `scheduled_task_runs_total`, `scheduled_task_duration_seconds` | counter, histogram | `task` (and `outcome`). Only when the app has [scheduled tasks](tasks.md#scheduled-jobs). |
 
 `route` is always the route **template** (`/users/{id}`), never the raw path, so cardinality is bounded by your route table. Requests that match no route are counted with `route="unmatched"`, and non-standard methods are reported as `_OTHER`.
 
@@ -7773,6 +8010,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `otlp` | `full` | OpenTelemetry trace export over OTLP/HTTP: `Telemetry::otlp`, or just `OTEL_EXPORTER_OTLP_ENDPOINT` ([Observability](observability.md#traces-to-opentelemetry-otlp)) | `tracing`, `json` | `hyper-rustls` (hyper client, rustls) |
+| `tz` | `full` | IANA time zones (`CRON_TZ=Europe/Paris`) in [cron schedules](cron.md#time-zones). UTC and fixed offsets work without it. | | `jiff` (system tz database; bundled on Windows) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |

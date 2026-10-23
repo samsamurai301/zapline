@@ -40,6 +40,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `otlp` | `full` | OpenTelemetry trace export over OTLP/HTTP: `Telemetry::otlp`, or just `OTEL_EXPORTER_OTLP_ENDPOINT` ([Observability](observability.md#traces-to-opentelemetry-otlp)) | `tracing`, `json` | `hyper-rustls` (hyper client, rustls) |
+| `tz` | `full` | IANA time zones (`CRON_TZ=Europe/Paris`) in [cron schedules](cron.md#time-zones). UTC and fixed offsets work without it. | | `jiff` (system tz database; bundled on Windows) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
 | `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |

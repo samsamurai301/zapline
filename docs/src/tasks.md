@@ -1,6 +1,6 @@
 # Background tasks & scheduled jobs
 
-Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopped cleanly on shutdown.
+Queue work from a handler with `BackgroundTasks`, run periodic or [cron](cron.md) jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopped cleanly on shutdown.
 
 ```rust
 use zapline::prelude::*;
@@ -88,6 +88,12 @@ fn app() -> App {
             },
         )
         .schedule(
+            Schedule::cron("0 9 * * MON-FRI").name("standup-digest"),   // 09:00 UTC on weekdays
+            |_res: Resources| async move {
+                println!("sending the digest");
+            },
+        )
+        .schedule(
             Schedule::daily_at(3, 30).name("nightly-report"),   // 03:30 UTC
             |_res: Resources| async move {
                 println!("building the nightly report");
@@ -99,24 +105,34 @@ fn app() -> App {
 | Schedule | Meaning |
 |---|---|
 | `Schedule::every(period)` | Every `period`, starting immediately at startup. It is fixed-rate: a run that overruns skips the missed ticks instead of bunching them up. Panics if `period` is zero. |
-| `Schedule::daily_at(hour, minute)` | Once a day at that time in **UTC**. Panics on an invalid time. |
+| `Schedule::cron(expr)` | Whenever the [cron expression](cron.md) matches: 5 or 6 fields, ranges, steps, names, `L`/`W`/`#`, `@hourly`... in UTC, or in the zone given by a `CRON_TZ=` prefix. It follows the wall clock; a run that overruns skips the matches it missed. Panics on an invalid expression (pass a `Cron` you parsed to handle the error). |
+| `Schedule::daily_at(hour, minute)` | Once a day at that time in **UTC**: the same as `Schedule::cron("{minute} {hour} * * *")`. Panics on an invalid time. |
 
 Refine a schedule with modifiers:
 
 | Modifier | Effect |
 |---|---|
-| `.delay_start(duration)` | Waits this long after startup before the first run (for `daily_at`, the first run is the next occurrence after the delay) |
+| `.delay_start(duration)` | Waits this long after startup before the first run (for `cron` and `daily_at`, the first run is the next occurrence after the delay) |
 | `.allow_overlap()` | Starts a new run even if the previous one is still running. By default runs never overlap. |
 | `.limit(runs)` | Stops after `runs` runs |
-| `.name(text)` | A name for log messages. Without one, jobs are called `job #1`, `job #2`, ... |
+| `.name(text)` | A name for log messages, metrics and the dev console. Without one, jobs are called `job #1`, `job #2`, ... |
 
 Things to know:
 
 - A job starts from a startup hook registered at that point in the builder chain, so it can use every provider registered before it.
 - Errors and panics are logged, and the schedule continues.
 - Jobs and workers run on the app's small "system" runtime (two threads, the one that runs startup hooks), not on the per-core request runtimes. A busy job can't stall a request's core, but it shares those two threads with every other job, so move blocking or CPU-heavy work to `tokio::task::spawn_blocking`.
-- Each running instance of your app runs its own schedule. With several replicas, a job runs once per replica. Take a lock (a database advisory lock, for example) inside jobs that must run only once.
-- Cron expressions are not supported yet. `daily_at` and `every` cover the common cases.
+- Each running instance of your app runs its own schedule. With several replicas, a job runs once per replica. For work that must run once per tick across the cluster, use a [cron job](jobs.md#cron-jobs) instead: `.jobs(|q| q.cron("0 3 * * *", NightlyReport {}))`.
+- `schedule.next_after(time)` and `schedule.delay_until_next(time)` tell you when a schedule fires next, without running it.
+
+With the [`Metrics`](observability.md#metrics) plugin installed, every run is counted and timed, labelled by the schedule's name (`task`). Without the plugin nothing is recorded.
+
+| Series | Type | Labels |
+|---|---|---|
+| `scheduled_task_runs_total` | counter | `task`, `outcome` (`ok`, `error`, `panic`) |
+| `scheduled_task_duration_seconds` | histogram (5 ms to 15 min) | `task` |
+
+In debug builds the [dev console](dev-console.md) lists every schedule with its next run, run and failure counts, and how the last run went.
 
 ## Long-running workers
 

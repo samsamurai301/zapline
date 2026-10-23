@@ -39,7 +39,8 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Validation](https://samsamurai301.github.io/zapline/validation.html): Wrap an extractor in `Valid` and derive `Validate` on the type. Bad input never reaches your handler.
 - [Dependency injection](https://samsamurai301.github.io/zapline/di.html): Register a service once with `App::provide`, receive it in any handler with `Dep<T>`:
 - [Configuration](https://samsamurai301.github.io/zapline/config.html): Load layered settings into your own struct, then hand it to the app:
-- [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopp
+- [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic or [cron](cron.md) jobs with `App::schedule`, and run long-lived workers with `App::background`. 
+- [Cron schedules](https://samsamurai301.github.io/zapline/cron.html): Cron expressions say *when* something runs. zapline uses them in two places:
 - [Caching](https://samsamurai301.github.io/zapline/caching.html): `zapline::cache` (feature `cache`, included in `full`) has three tools. Pick by what you want to skip:
 
 ## Full-stack

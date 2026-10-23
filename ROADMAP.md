@@ -9,7 +9,7 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Core: routing, extractors, errors, middleware, lifecycle, plugins, test client | done |
 | Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits | done |
 | OpenAPI 3.1 and docs UIs, validation | done |
-| DI, layered config, background tasks and scheduled jobs | done |
+| DI, layered config, background tasks, cron schedules, durable and cluster-wide cron jobs, job metrics | done |
 | Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed) | done |
 | Middleware suite: CORS, compression, rate limit, request IDs, security headers, timeouts, catch-panic, load shedding, path normalization | done |
 | Realtime and content: WebSockets, SSE, streaming, static files, multipart | done |
@@ -33,7 +33,6 @@ Run `./scripts/check.sh` to verify everything locally.
 1. **Release:** push to the private repository `samsamurai301/zapline` (run `publish-to-github.ps1` or `.sh`) and watch the first CI run on Linux, macOS and Windows. When going public, publish `zapline-macros`, `zapline-codegen`, `zapline` and `zapline-cli` to crates.io (in that order) and the guide with GitHub Pages.
 2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. Prepare a TechEmpower Framework Benchmarks submission (needs the database tests: single query, multiple queries, fortunes, updates).
 3. **Distributed stores:** pluggable rate-limit and session stores (Redis).
-4. **Scheduling:** full cron expressions, with job metrics.
-5. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
-6. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.
-7. **Database guides:** sqlx, SeaORM and Diesel examples with DI and health checks, and transactional patterns.
+4. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
+5. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.
+6. **Database guides:** sqlx, SeaORM and Diesel examples with DI and health checks, and transactional patterns.
