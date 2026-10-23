@@ -50,9 +50,12 @@ session, so production needs `SESSION_SECRET` (see `.env.example`).
 ```sh
 zapline g resource author name                       # table, JSON API, pages, tests
 zapline g resource post title body:text due:date author:references
-zapline g migration add_due_date_to_todos 'due_date:date?'   # ALTER TABLE from the name
-zapline db new backfill_todos        # an empty migration in migrations/
+zapline g migration add_due_date_to_todos 'due_date:date?'   # .up.sql + .down.sql from the name
+zapline db new backfill_todos        # an empty migration pair in migrations/
 zapline db migrate                   # apply migrations without starting the server
+zapline db status                    # what is applied, what is pending
+zapline db rollback                  # undo the last migration (its .down.sql)
+zapline db reset                     # rebuild the schema and seed it (development)
 zapline routes                       # the route table
 ```
 

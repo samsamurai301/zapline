@@ -128,6 +128,44 @@ mod jobs {
         let stats = jobs.stats().await.unwrap();
         assert_eq!((stats.queued, stats.failed), (1, 0));
     }
+
+    #[tokio::test]
+    async fn discards_a_failed_job_from_its_row() {
+        let client = App::new()
+            .database(Database::sqlite_memory())
+            .jobs_in::<Sqlite>(|q| q.register::<Broken>().workers(0))
+            .dev_console()
+            .test();
+        let jobs: Jobs<Sqlite> = client.resources().await.require().unwrap();
+        jobs.enqueue(Broken).await.unwrap();
+        jobs.enqueue(Broken).await.unwrap();
+        jobs.run_pending().await.unwrap();
+        let failed = jobs.failed(10).await.unwrap();
+        let id = failed[0].id;
+
+        client
+            .get("/_dev")
+            .send()
+            .await
+            .assert_contains("<th>Queue")
+            .assert_contains(&format!(
+                r#"<form method=post action="/_dev/jobs-sqlite?discard={id}"><button>Discard</button></form>"#
+            ));
+        client
+            .post(&format!("/_dev/jobs-sqlite?discard={id}"))
+            .send()
+            .await
+            .assert_status(303);
+        let left = jobs.failed(10).await.unwrap();
+        assert_eq!(left.len(), 1);
+        assert_ne!(left[0].id, id, "only that row is gone");
+
+        client
+            .post("/_dev/jobs-sqlite?discard=oops")
+            .send()
+            .await
+            .assert_status(400);
+    }
 }
 
 #[cfg(feature = "mail")]

@@ -659,7 +659,7 @@ fn sql_resource_writes_pages_timestamps_and_enables_chrono() {
     .unwrap();
     let created = names(&report.created);
     assert!(
-        created.iter().any(|p| p.ends_with("_create_events.sql")),
+        created.iter().any(|p| p.ends_with("_create_events.up.sql")),
         "{created:?}"
     );
     for rel in [
@@ -678,7 +678,7 @@ fn sql_resource_writes_pages_timestamps_and_enables_chrono() {
         manifest.contains("\"chrono\"") && manifest.contains("\"uuid\""),
         "{manifest}"
     );
-    let sql = migration_text(&root, "_create_events.sql");
+    let sql = migration_text(&root, "_create_events.up.sql");
     assert!(sql.contains("day TEXT NOT NULL"), "{sql}");
     assert!(sql.contains("token BLOB NOT NULL"), "{sql}");
     assert!(
@@ -748,7 +748,7 @@ fn references_use_the_parent_label_and_note_a_missing_parent() {
                 .unwrap()
                 .file_name()
                 .to_string_lossy()
-                .ends_with("_create_posts.sql")
+                .ends_with("_create_posts.up.sql")
         })
         .count();
     assert_eq!(count, 1);
@@ -783,9 +783,10 @@ fn migration_adds_columns_to_an_existing_table() {
         ],
     )
     .unwrap();
-    assert_eq!(report.created.len(), 1);
-    assert!(display(&report.created[0]).ends_with("_add_published_at_to_posts.sql"));
-    let sql = migration_text(&root, "_add_published_at_to_posts.sql");
+    assert_eq!(report.created.len(), 2);
+    assert!(display(&report.created[0]).ends_with("_add_published_at_to_posts.up.sql"));
+    assert!(display(&report.created[1]).ends_with("_add_published_at_to_posts.down.sql"));
+    let sql = migration_text(&root, "_add_published_at_to_posts.up.sql");
     assert_eq!(
         sql,
         "-- Created by `zapline generate migration add_published_at_to_posts`.\n\
@@ -793,6 +794,15 @@ fn migration_adds_columns_to_an_existing_table() {
          ALTER TABLE posts ADD COLUMN views BIGINT NOT NULL DEFAULT 0;\n\
          ALTER TABLE posts ADD COLUMN category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL;\n\
          CREATE INDEX posts_category_id_idx ON posts (category_id);\n"
+    );
+    // The down file undoes it, last column first.
+    assert_eq!(
+        migration_text(&root, "_add_published_at_to_posts.down.sql"),
+        "-- Reverts add_published_at_to_posts.\n\
+         DROP INDEX posts_category_id_idx;\n\
+         ALTER TABLE posts DROP COLUMN category_id;\n\
+         ALTER TABLE posts DROP COLUMN views;\n\
+         ALTER TABLE posts DROP COLUMN published_at;\n"
     );
     // The model doesn't change by itself: the note says what to add.
     let note = report
@@ -808,7 +818,7 @@ fn migration_adds_columns_to_an_existing_table() {
 
     // The column can come from the name alone.
     migration(&root, "add_subtitle_to_posts", &[]).unwrap();
-    assert!(migration_text(&root, "_add_subtitle_to_posts.sql")
+    assert!(migration_text(&root, "_add_subtitle_to_posts.up.sql")
         .contains("ALTER TABLE posts ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';"));
 
     // A required date has no value for existing rows.
@@ -835,7 +845,7 @@ fn migration_creates_and_drops() {
         &["name".into(), "color:string?".into()],
     )
     .unwrap();
-    let sql = migration_text(&root, "_create_tags.sql");
+    let sql = migration_text(&root, "_create_tags.up.sql");
     assert!(
         sql.starts_with(
             "-- Created by `zapline generate migration create_tags`.\nCREATE TABLE tags (\n    \
@@ -844,18 +854,23 @@ fn migration_creates_and_drops() {
         "{sql}"
     );
     assert!(sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+    assert!(migration_text(&root, "_create_tags.down.sql").ends_with("DROP TABLE tags;\n"));
     assert!(report.modified.is_empty());
 
     migration(&root, "remove_color_from_tags", &[]).unwrap();
-    assert!(migration_text(&root, "_remove_color_from_tags.sql")
+    assert!(migration_text(&root, "_remove_color_from_tags.up.sql")
         .ends_with("ALTER TABLE tags DROP COLUMN color;\n"));
+    // Rolling back brings the column back, empty.
+    assert!(migration_text(&root, "_remove_color_from_tags.down.sql")
+        .ends_with("ALTER TABLE tags ADD COLUMN color TEXT NOT NULL DEFAULT '';\n"));
 
     // Any other name: a table if there are fields, an empty file if not.
     migration(&root, "audit_log", &["event".into(), "at:datetime".into()]).unwrap();
-    assert!(migration_text(&root, "_audit_log.sql").contains("CREATE TABLE audit_log ("));
+    assert!(migration_text(&root, "_audit_log.up.sql").contains("CREATE TABLE audit_log ("));
     assert!(read(&root, "Cargo.toml").contains("\"chrono\""));
     migration(&root, "backfill_slugs", &[]).unwrap();
-    assert!(migration_text(&root, "_backfill_slugs.sql").ends_with("-- Write your SQL here.\n"));
+    assert!(migration_text(&root, "_backfill_slugs.up.sql").ends_with("-- Write your SQL here.\n"));
+    assert!(migration_text(&root, "_backfill_slugs.down.sql").contains("Reverts backfill_slugs"));
 }
 
 #[test]
@@ -870,7 +885,7 @@ fn migration_follows_the_project_dialect() {
         &["day:date".into(), "at:datetime".into(), "token:uuid".into()],
     )
     .unwrap();
-    let sql = migration_text(&root, "_create_events.sql");
+    let sql = migration_text(&root, "_create_events.up.sql");
     for col in [
         "id BIGSERIAL PRIMARY KEY",
         "day DATE NOT NULL",

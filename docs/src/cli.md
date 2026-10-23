@@ -7,8 +7,11 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline new <name>.rs` / `zapline run <file.rs>` | A [one-file app](one-file.md): a whole app in a single `.rs` file with no `Cargo.toml`. `dev`, `test`, `check` and `routes` take the file too |
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, database sessions with flash messages, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration with `created_at`/`updated_at`, a sqlx JSON API (list, get, create, `PUT`, `PATCH`, delete), htmx index, show and edit pages (when `templates/base.html` exists; rejected posts come back with a message per field, saves set a flash message) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `uuid`, `references`; `?` for optional ([details](#database-backed-resources)). |
-| `zapline g migration <name> [field:type ...]` | A migration from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table ([details](#migrations-from-the-command-line)) |
-| `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline g migration <name> [field:type ...]` | A reversible migration (`.up.sql` + `.down.sql`) from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table ([details](#migrations-from-the-command-line)) |
+| `zapline db new <name> [--reversible\|--one-way]` / `zapline db migrate` | Create a SQL migration (an `.up.sql` + `.down.sql` pair) / apply pending ones ([Databases](database.md#migrations)) |
+| `zapline db status` | Every migration: version, name, when it was applied, whether its file changed since, and whether it has a down file |
+| `zapline db rollback [--steps N]` / `zapline db redo` | Revert the last N migrations with their `.down.sql` files / revert the last one and apply it again |
+| `zapline db reset` | Revert every migration, apply them all and insert the seed data. Development only: `rollback`, `redo` and `reset` refuse `--release` and `APP_ENV=production` unless `--force` ([guard rails](database.md#guard-rails)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
@@ -140,7 +143,7 @@ A reference also gets a `?author_id=` filter on the list, `GET /api/authors/{id}
 
 ## Migrations from the command line
 
-`zapline g migration` writes the SQL for the project's dialect from the migration's name, with the same field syntax:
+`zapline g migration` writes the SQL for the project's dialect from the migration's name, with the same field syntax. Each migration is a reversible pair: the `.up.sql` file and a `.down.sql` file that undoes it (`DROP COLUMN`, `ADD COLUMN`, `DROP TABLE`), which [`zapline db rollback`](database.md#status-rollback-redo-reset) runs:
 
 ```sh
 zapline g migration add_published_at_to_posts published_at:datetime?
@@ -151,11 +154,13 @@ zapline g migration create_tags name slug              # id, fields, created_at,
 ```
 
 ```sql
--- migrations/20261023101500_add_published_at_to_posts.sql
+-- migrations/20261023101500_add_published_at_to_posts.up.sql
 ALTER TABLE posts ADD COLUMN published_at TIMESTAMPTZ;
+-- migrations/20261023101500_add_published_at_to_posts.down.sql
+ALTER TABLE posts DROP COLUMN published_at;
 ```
 
-A required column added to a table that has rows needs a value for them: text gets `DEFAULT ''`, numbers `DEFAULT 0`, booleans `FALSE`. Dates, UUIDs and references have no sensible default, so add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. Any other name with fields creates that table; without fields you get an empty migration (like `zapline db new`). The generator doesn't edit your Rust code: when `src/routes/<table>.rs` exists it prints the fields to add to the model and its queries.
+A required column added to a table that has rows needs a value for them: text gets `DEFAULT ''`, numbers `DEFAULT 0`, booleans `FALSE`. Dates, UUIDs and references have no sensible default, so add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. Any other name with fields creates that table; without fields you get an empty pair (like `zapline db new`). Rolling back a `remove_` migration brings the columns back empty: optional, or with their defaults. The generator doesn't edit your Rust code: when `src/routes/<table>.rs` exists it prints the fields to add to the model and its queries.
 
 ## How `routes` and `openapi` work
 
@@ -198,8 +203,10 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
 | `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_job`, `generate_mailer` | The files created and edited |
-| `db_new_migration` | Creates a migration, with its SQL if given |
-| `db_migrate` | Applies pending migrations |
+| `db_new_migration` | Creates a migration, with its up (`sql`) and down (`down_sql`) SQL if given |
+| `db_migrate` | Applies pending migrations and names them |
+| `db_status` | The `zapline db status` table |
+| `db_rollback`, `db_redo`, `db_reset` | Revert migrations. They refuse to run without `confirm=true`, so the assistant asks you first |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
@@ -207,7 +214,7 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 | `explain_error` | A [diagnostic code](errors.md#diagnostic-codes)'s cause and fix |
 | `last_results` | The latest `test`, `check` and `zapline fuzz` results with their age, without running anything again |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included. Any answer that mentions a diagnostic code (`ZL0004` in a startup error, a panic in a test) ends with that code's fix.
+When the app does not compile, `routes`, `openapi` and the `db_*` tools answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included. Any answer that mentions a diagnostic code (`ZL0004` in a startup error, a panic in a test) ends with that code's fix.
 
 ### Live tools: debugging the running app
 

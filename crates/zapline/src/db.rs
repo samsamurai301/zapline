@@ -48,12 +48,19 @@
 //!
 //! # Migrations
 //!
-//! Plain SQL files in `migrations/`, named `<version>_<description>.sql`
-//! (`zapline db new <name>` creates one). They run in order at startup,
-//! each at most once; turn that off with [`Database::migrate`]`(false)`, or
-//! point elsewhere with [`Database::migrations`]. `zapline db migrate` applies
-//! them without starting the server: it runs the app with
-//! [`ENV_MIGRATE_ONLY`] set.
+//! Plain SQL files in `migrations/`: a reversible pair
+//! `<version>_<description>.up.sql` + `.down.sql` (what `zapline db new
+//! <name>` creates), or a one-way `<version>_<description>.sql`. They run in
+//! order at startup, each at most once; turn that off with
+//! [`Database::migrate`]`(false)`, or point elsewhere with
+//! [`Database::migrations`].
+//!
+//! The CLI runs the app with [`ENV_MIGRATE`] set to apply, inspect or
+//! revert them without starting the server: `zapline db migrate`, `status`,
+//! `rollback`, `redo` and `reset` (see [`MigrateCommand`]). [`Migrations`]
+//! does the same on a pool, for tests and scripts. A release build refuses
+//! the commands that revert migrations unless [`ENV_ALLOW_DESTRUCTIVE`] is
+//! `1`.
 //!
 //! `Database::migrations(zapline::embed!("migrations"))` compiles them into
 //! the binary (see [`embed`](mod@crate::embed)), so the server needs no
@@ -73,8 +80,13 @@ use sqlx::{Connection, Pool};
 
 mod factory;
 mod list;
+mod migrate;
 pub use factory::{Factory, Record};
 pub use list::{AsPool, ListBackend, ListParams, Listing, Paged, Value};
+pub use migrate::{
+    MigrateBackend, MigrateCommand, MigrationInfo, MigrationState, Migrations,
+    ENV_ALLOW_DESTRUCTIVE, ENV_MIGRATE,
+};
 
 use crate::embed::Dir;
 use crate::extract::FromRequestParts;
@@ -91,7 +103,8 @@ pub type DefaultDb = sqlx::Postgres;
 pub type DefaultDb = sqlx::Sqlite;
 
 /// When this environment variable is set, the app applies its migrations
-/// during startup and exits instead of serving. Used by `zapline db migrate`.
+/// during startup and exits instead of serving: the same as
+/// [`ENV_MIGRATE`]`=up`, kept for older CLIs.
 pub const ENV_MIGRATE_ONLY: &str = "ZAPLINE_MIGRATE_ONLY";
 
 /// When this environment variable is set, the app applies its migrations,
@@ -202,10 +215,7 @@ impl<DB: sqlx::Database> Database<DB> {
         }
     }
 
-    async fn connect(self) -> crate::Result<Pool<DB>>
-    where
-        DB::Connection: sqlx::migrate::Migrate,
-    {
+    async fn connect(&self) -> crate::Result<Pool<DB>> {
         let url = self.resolve_url()?;
         check_scheme(&url, DB::NAME)?;
         let max = self.max_connections.unwrap_or_else(|| {
@@ -223,9 +233,6 @@ impl<DB: sqlx::Database> Database<DB> {
                 Error::internal(format!("cannot connect to the database: {e}"))
                     .diagnosed("ZL0041", None)
             })?;
-        if self.migrate {
-            run_migrations(&pool, &self.migrations).await?;
-        }
         Ok(pool)
     }
 }
@@ -292,38 +299,11 @@ impl Database<sqlx::Postgres> {
     }
 }
 
-async fn run_migrations<DB: sqlx::Database>(pool: &Pool<DB>, dir: &Dir) -> crate::Result<()>
-where
-    DB::Connection: sqlx::migrate::Migrate,
-{
-    if !dir.exists() {
-        return Ok(());
-    }
-    let cannot_read = |e: sqlx::migrate::MigrateError| {
-        Error::internal(format!(
-            "cannot read migrations in {}: {e}",
-            dir.path().display()
-        ))
-        .diagnosed("ZL0042", None)
-    };
-    let migrator = if dir.is_embedded() {
-        sqlx::migrate::Migrator::new(Embedded(dir.clone())).await
-    } else {
-        sqlx::migrate::Migrator::new(dir.path().to_path_buf()).await
-    }
-    .map_err(cannot_read)?;
-    migrator
-        .run(pool)
-        .await
-        .map_err(|e| Error::internal(format!("migration failed: {e}")).diagnosed("ZL0043", None))?;
-    Ok(())
-}
-
 /// Migrations compiled into the binary, resolved the way sqlx resolves a
 /// directory: top-level `<version>_<description>.sql` files (`.up.sql` /
 /// `.down.sql` for reversible ones), sorted by version.
 #[derive(Debug)]
-struct Embedded(Dir);
+pub(crate) struct Embedded(pub(crate) Dir);
 
 impl sqlx::migrate::MigrationSource<'static> for Embedded {
     fn resolve(
@@ -377,18 +357,37 @@ impl App {
     /// the pool available to handlers as [`Db`] (and as `State<Pool<DB>>`).
     ///
     /// Startup fails if the database can't be reached or a migration fails.
+    /// With [`ENV_MIGRATE`] set, the app runs that migration command
+    /// (`status`, `up`, `down:<n>`, `redo`, `reset`) and exits instead.
     pub fn database<DB>(self, database: Database<DB>) -> Self
     where
-        DB: sqlx::Database,
+        DB: MigrateBackend,
         DB::Connection: sqlx::migrate::Migrate,
     {
         self.on_startup(move |res: Resources| async move {
+            let command = MigrateCommand::from_env()?;
+            let seeding = std::env::var_os(ENV_SEED).is_some();
             let pool = database.connect().await?;
-            if std::env::var_os(ENV_MIGRATE_ONLY).is_some() {
-                println!("migrations are up to date");
-                std::process::exit(0);
+            match command {
+                None if database.migrate => {
+                    Migrations::open(database.migrations.clone())
+                        .await?
+                        .up(&pool)
+                        .await?;
+                }
+                None => {}
+                Some(command) => {
+                    migrate::run_command(command, &pool, database.migrations.clone()).await?;
+                    // `zapline db reset` seeds the fresh schema when the app has seed data.
+                    let seed_next = seeding
+                        && matches!(command, MigrateCommand::Reset | MigrateCommand::Up)
+                        && res.contains::<HasSeed>();
+                    if !seed_next {
+                        std::process::exit(0);
+                    }
+                }
             }
-            if std::env::var_os(ENV_SEED).is_some() && !res.contains::<HasSeed>() {
+            if seeding && !res.contains::<HasSeed>() {
                 return Err(Error::internal(
                     "no seed data: add `.seed(|db| async move { .. })` after `.database(..)`",
                 )

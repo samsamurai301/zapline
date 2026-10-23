@@ -1,0 +1,8 @@
+-- Applied once at startup (or by `zapline db migrate`); the .down.sql file
+-- next to it undoes it (`zapline db rollback`).
+-- Add more with `zapline db new <name>` or `zapline g migration <name>`.
+CREATE TABLE todos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    title TEXT NOT NULL,
+    done BOOLEAN NOT NULL DEFAULT FALSE
+);

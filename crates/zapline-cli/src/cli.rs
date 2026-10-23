@@ -199,13 +199,20 @@ Examples:
   zapline dev --client web/src/api.ts      Regenerate after every rebuild")]
     Client(ClientArgs),
 
-    /// Create and apply SQL migrations
+    /// Create, apply, inspect and roll back SQL migrations
     #[command(
         subcommand,
         after_long_help = "\
+Every command but `new` runs the app with ZAPLINE_MIGRATE=<command>, so it uses the app's
+own DATABASE_URL and exits instead of serving.
+
 Examples:
-  zapline db new create_posts      Add migrations/<timestamp>_create_posts.sql
-  zapline db migrate               Apply pending migrations using the app's DATABASE_URL"
+  zapline db new create_posts      Add migrations/<timestamp>_create_posts.up.sql + .down.sql
+  zapline db migrate               Apply pending migrations
+  zapline db status                What is applied, what is pending, what was edited
+  zapline db rollback --steps 2    Revert the last two migrations
+  zapline db redo                  Revert the last migration and apply it again
+  zapline db reset                 Rebuild the schema and seed it (development only)"
     )]
     Db(DbCommand),
 
@@ -300,10 +307,11 @@ Examples:
     /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
     #[command(after_long_help = "\
 Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
-new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
-db_migrate, check, test, routes, openapi, explain_error; and, against the running dev app,
-recent_requests, recent_errors, call_route and last_results. Start it from the project
-directory.
+new_project, generate_resource, generate_handler, generate_middleware, generate_migration,
+db_new_migration, db_migrate, db_status, db_rollback, db_redo, db_reset (the last three
+need confirm=true), check, test, routes, openapi, explain_error; and, against the running
+dev app, recent_requests, recent_errors, call_route and last_results. Start it from the
+project directory.
 
 Setup:
   Claude Code   claude mcp add zapline -- zapline mcp
@@ -420,15 +428,16 @@ Examples:
         memory: bool,
     },
 
-    /// A SQL migration: add or remove columns, or create a table
+    /// A SQL migration with its down file: add or remove columns, or create a table
     #[command(after_long_help = "\
-Writes migrations/<timestamp>_<name>.sql for the project's database (SQLite or Postgres).
-The name decides what it does:
-  add_<cols>_to_<table>        ALTER TABLE <table> ADD COLUMN for each field
-  remove_<cols>_from_<table>   ALTER TABLE <table> DROP COLUMN for each field
+Writes migrations/<timestamp>_<name>.up.sql and .down.sql for the project's database
+(SQLite or Postgres). The name decides what they do (up / down):
+  add_<cols>_to_<table>        ALTER TABLE <table> ADD COLUMN / DROP COLUMN for each field
+  remove_<cols>_from_<table>   ALTER TABLE <table> DROP COLUMN / ADD COLUMN for each field
   create_<table>               CREATE TABLE with id, the fields, created_at and updated_at
+                               / DROP TABLE
 Without fields, the column comes from the name (`add_email_to_users` adds `email` text).
-Any other name with fields creates that table; without fields you get an empty file.
+Any other name with fields creates that table; without fields you get an empty pair.
 Field types are the ones `generate resource` takes. A required column added to an existing
 table gets a default ('' or 0); dates, uuids and references must be optional (`?`) there.
 
@@ -686,16 +695,68 @@ pub struct ClientArgs {
 /// `zapline db` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum DbCommand {
-    /// Create an empty migration file in migrations/
+    /// Create an empty migration in migrations/: an .up.sql + .down.sql pair
+    #[command(after_long_help = "\
+Writes migrations/<timestamp>_<name>.up.sql and .down.sql, so `zapline db rollback` can
+undo it. In a project whose migrations are all one-way .sql files (made before pairs were
+the default) it writes a one-way file, unless you pass --reversible.
+
+Examples:
+  zapline db new create_posts
+  zapline db new add_email_to_users --one-way")]
     New {
         /// What the migration does, e.g. `create_posts`
         name: String,
+        /// Write an .up.sql + .down.sql pair (the default for new projects)
+        #[arg(long, conflicts_with = "one_way")]
+        reversible: bool,
+        /// Write a single one-way .sql file
+        #[arg(long)]
+        one_way: bool,
     },
-    /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE_ONLY=1)
+    /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE=up)
     Migrate {
         /// Binary to run [default: the package's only binary]
         #[arg(long, value_name = "NAME")]
         bin: Option<String>,
+    },
+    /// Show every migration: version, name, when it was applied, and edited files
+    Status {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
+    },
+    /// Revert the last applied migration(s) with their .down.sql files
+    #[command(after_long_help = "\
+Refused against a release build (--release) or when APP_ENV/ZAPLINE_ENV is production,
+unless --force is given. Nothing runs unless every migration to revert has a down file.
+
+Examples:
+  zapline db rollback
+  zapline db rollback --steps 3")]
+    Rollback {
+        /// How many migrations to revert, newest first
+        #[arg(long, value_name = "N", default_value_t = 1)]
+        steps: u32,
+        #[allow(missing_docs)]
+        #[command(flatten)]
+        target: DestructiveArgs,
+    },
+    /// Revert the last migration and apply it again (while writing it)
+    Redo {
+        #[allow(missing_docs)]
+        #[command(flatten)]
+        target: DestructiveArgs,
+    },
+    /// Revert every migration, apply them all again and insert the seed data
+    #[command(after_long_help = "\
+For development: rebuilds the schema from migrations/ (every applied migration needs a
+down file), then runs `App::seed` if the app has one. Refused against a release build or
+the production profile unless --force is given.")]
+    Reset {
+        #[allow(missing_docs)]
+        #[command(flatten)]
+        target: DestructiveArgs,
     },
     /// Insert the app's seed data: migrate, then run `App::seed` once (ZAPLINE_SEED=1)
     Seed {
@@ -703,6 +764,22 @@ pub enum DbCommand {
         #[arg(long, value_name = "NAME")]
         bin: Option<String>,
     },
+}
+
+/// Options of the `zapline db` commands that revert migrations.
+#[derive(Debug, Args)]
+pub struct DestructiveArgs {
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+
+    /// Build and run the release profile (needs --force)
+    #[arg(long)]
+    pub release: bool,
+
+    /// Run even against a release build or the production profile
+    #[arg(long)]
+    pub force: bool,
 }
 
 /// Arguments of `zapline bench`.

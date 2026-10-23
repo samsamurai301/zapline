@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::{bail, Result};
 
+use crate::db::MigrationFiles;
 use crate::naming::{is_keyword, snake_case, ResourceNames};
 use crate::render::OutputFile;
 
@@ -416,8 +417,8 @@ pub struct Plan<'a> {
     pub flash: bool,
     /// Crate name for the test's imports, when a test can be generated.
     pub test_crate: Option<&'a str>,
-    /// Migration file name (`<timestamp>_create_<plural>.sql`).
-    pub migration_name: String,
+    /// Migration file names (`<timestamp>_create_<plural>.up.sql` + `.down.sql`).
+    pub migration: MigrationFiles,
 }
 
 impl Plan<'_> {
@@ -432,19 +433,26 @@ impl Plan<'_> {
     }
 }
 
-/// The migration, the module, the templates and the test.
+/// The migration (and its down file), the module, the templates and the test.
 pub fn files(plan: &Plan<'_>) -> Vec<OutputFile> {
     let n = plan.names;
-    let mut out = vec![
-        OutputFile {
-            path: PathBuf::from(format!("migrations/{}", plan.migration_name)),
-            contents: migration(plan),
-        },
-        OutputFile {
-            path: PathBuf::from(format!("src/routes/{}.rs", n.plural)),
-            contents: module(plan),
-        },
-    ];
+    let mut out = vec![OutputFile {
+        path: PathBuf::from(format!("migrations/{}", plan.migration.up)),
+        contents: migration(plan),
+    }];
+    if let Some(down) = &plan.migration.down {
+        out.push(OutputFile {
+            path: PathBuf::from(format!("migrations/{down}")),
+            contents: format!(
+                "-- Reverts {}: run by `zapline db rollback`.\nDROP TABLE {};\n",
+                plan.migration.up, n.plural
+            ),
+        });
+    }
+    out.push(OutputFile {
+        path: PathBuf::from(format!("src/routes/{}.rs", n.plural)),
+        contents: module(plan),
+    });
     if plan.html {
         for (name, contents) in [
             ("index", index_template(plan)),
@@ -1581,6 +1589,27 @@ fn table_columns(sql: &str, table: &str) -> Vec<(String, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Style;
+
+    #[test]
+    fn a_one_way_project_gets_no_down_file() {
+        let names = names();
+        let fields = parse_fields(&[]).unwrap();
+        let mut plan = plan(&names, &fields, false);
+        plan.test_crate = None;
+        plan.migration = MigrationFiles::new("1_create_blog_posts", Style::OneWay);
+        let paths: Vec<String> = files(&plan)
+            .iter()
+            .map(|f| f.path.to_string_lossy().replace('\\', "/"))
+            .collect();
+        assert_eq!(
+            paths,
+            [
+                "migrations/1_create_blog_posts.sql",
+                "src/routes/blog_posts.rs"
+            ]
+        );
+    }
 
     fn names() -> ResourceNames {
         ResourceNames::parse("blog-post", None).unwrap()
@@ -1594,7 +1623,7 @@ mod tests {
             html,
             flash: html,
             test_crate: Some("demo"),
-            migration_name: "1_create_blog_posts.sql".into(),
+            migration: MigrationFiles::new("1_create_blog_posts", Style::Reversible),
         }
     }
 
@@ -1736,14 +1765,16 @@ mod tests {
         let names = names();
         let fields = parse_fields(&[]).unwrap();
         let plan = plan(&names, &fields, true);
-        let paths: Vec<String> = files(&plan)
+        let all = files(&plan);
+        let paths: Vec<String> = all
             .iter()
             .map(|f| f.path.to_string_lossy().replace('\\', "/"))
             .collect();
         assert_eq!(
             paths,
             [
-                "migrations/1_create_blog_posts.sql",
+                "migrations/1_create_blog_posts.up.sql",
+                "migrations/1_create_blog_posts.down.sql",
                 "src/routes/blog_posts.rs",
                 "templates/blog_posts/index.html",
                 "templates/blog_posts/_row.html",
@@ -1752,6 +1783,7 @@ mod tests {
                 "tests/blog_posts.rs"
             ]
         );
+        assert!(all[1].contents.contains("DROP TABLE blog_posts;"));
         let module = module(&plan);
         assert!(module.contains("#[get(\"/api/blog-posts\""));
         assert!(module.contains("#[get(\"/blog-posts\", tag = \"pages\")]"));
@@ -1772,7 +1804,8 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "migrations/1_create_blog_posts.sql",
+                "migrations/1_create_blog_posts.up.sql",
+                "migrations/1_create_blog_posts.down.sql",
                 "src/routes/blog_posts.rs",
                 "tests/blog_posts.rs"
             ]

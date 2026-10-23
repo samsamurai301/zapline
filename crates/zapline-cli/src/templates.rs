@@ -111,8 +111,12 @@ const FULLSTACK: &[TemplateFile] = &[
     file!("src/routes/mod.rs", "fullstack/src/routes/mod.rs.tmpl"),
     file!("src/routes/todos.rs", "fullstack/src/routes/todos.rs.tmpl"),
     file!(
-        "migrations/20260101000000_create_todos.sql",
-        "fullstack/migrations/20260101000000_create_todos.sql.tmpl"
+        "migrations/20260101000000_create_todos.up.sql",
+        "fullstack/migrations/20260101000000_create_todos.up.sql.tmpl"
+    ),
+    file!(
+        "migrations/20260101000000_create_todos.down.sql",
+        "fullstack/migrations/20260101000000_create_todos.down.sql.tmpl"
     ),
     file!("templates/base.html", "fullstack/templates/base.html.tmpl"),
     file!(

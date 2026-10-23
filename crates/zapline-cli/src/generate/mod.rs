@@ -441,13 +441,10 @@ fn sql_resource(
         flash: auth::has_sessions(&lib) || project.root.join("src/routes/auth.rs").is_file(),
         test_crate: testable.then_some(krate.as_str()),
         // Regenerating (--force) rewrites the existing migration instead of adding a second one.
-        migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))
-        {
-            Some(name) => name,
-            None => {
-                crate::db::new_migration_name(&project.root, &format!("create_{}", names.plural))?
-            }
-        },
+        migration: crate::db::MigrationFiles::plan(
+            &project.root,
+            &format!("create_{}", names.plural),
+        )?,
     };
     let files = db_resource::files(&plan);
 
@@ -598,48 +595,100 @@ fn migration_kind(slug: &str, has_fields: bool) -> MigrationKind {
     }
 }
 
-/// The SQL of a migration; `fields` are already parsed.
+/// `ALTER TABLE <table> ADD COLUMN` for each field. A required column gets
+/// a default so rows already there stay valid; one with no sensible default
+/// is an error, or, when `lenient` (re-adding a removed column on the way
+/// down), comes back optional.
+fn add_columns_sql(
+    table: &str,
+    fields: &[db_resource::Field],
+    dialect: db_resource::Dialect,
+    lenient: bool,
+) -> Result<String> {
+    use db_resource::FieldType;
+    let mut sql = String::new();
+    for f in fields {
+        let mut column = f.column_sql(dialect);
+        let default = match (f.optional, f.ty) {
+            (true, _) | (false, FieldType::Bool) => "",
+            // Existing rows need a value for a required column.
+            (false, FieldType::String | FieldType::Text) => " DEFAULT ''",
+            (false, FieldType::Int | FieldType::Float) => " DEFAULT 0",
+            (false, _) if lenient => {
+                column = column.replace(" NOT NULL", "");
+                ""
+            }
+            (false, _) => bail!(
+                "`{}` can't be added as a required column: rows that already exist have no value for it\n\
+                 hint: add it as optional (`{}:{}?`), fill it in, then make it required in a later migration",
+                f.name,
+                f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
+                type_name(f.ty)
+            ),
+        };
+        sql.push_str(&format!(
+            "ALTER TABLE {table} ADD COLUMN {column}{default};\n"
+        ));
+        if f.parent.is_some() {
+            sql.push_str(&db_resource::index_sql(table, &f.name));
+        }
+    }
+    Ok(sql)
+}
+
+/// `ALTER TABLE <table> DROP COLUMN` for each field, last first (and the
+/// index of a `references` column before the column).
+fn drop_columns_sql(table: &str, fields: &[db_resource::Field]) -> String {
+    let mut sql = String::new();
+    for f in fields.iter().rev() {
+        if f.parent.is_some() {
+            sql.push_str(&format!("DROP INDEX {table}_{}_idx;\n", f.name));
+        }
+        sql.push_str(&format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name));
+    }
+    sql
+}
+
+/// The up and down SQL of a migration; `fields` are already parsed.
 fn migration_sql(
     kind: &MigrationKind,
     fields: &[db_resource::Field],
     dialect: db_resource::Dialect,
-) -> Result<String> {
-    use db_resource::FieldType;
+    name: &str,
+) -> Result<(String, String)> {
     Ok(match kind {
-        MigrationKind::AddColumns { table, .. } => {
-            let mut sql = String::new();
+        MigrationKind::AddColumns { table, .. } => (
+            add_columns_sql(table, fields, dialect, false)?,
+            drop_columns_sql(table, fields),
+        ),
+        MigrationKind::RemoveColumns { table, .. } => {
+            // Drop the index along with a removed `references` column.
+            let mut up = String::new();
             for f in fields {
-                let default = match (f.optional, f.ty) {
-                    (true, _) | (false, FieldType::Bool) => "",
-                    // Existing rows need a value for a required column.
-                    (false, FieldType::String | FieldType::Text) => " DEFAULT ''",
-                    (false, FieldType::Int | FieldType::Float) => " DEFAULT 0",
-                    (false, _) => bail!(
-                        "`{}` can't be added as a required column: rows that already exist have no value for it\n\
-                         hint: add it as optional (`{}:{}?`), fill it in, then make it required in a later migration",
-                        f.name,
-                        f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
-                        type_name(f.ty)
-                    ),
-                };
-                sql.push_str(&format!(
-                    "ALTER TABLE {table} ADD COLUMN {}{default};\n",
-                    f.column_sql(dialect)
-                ));
                 if f.parent.is_some() {
-                    sql.push_str(&db_resource::index_sql(table, &f.name));
+                    up.push_str(&format!("DROP INDEX IF EXISTS {table}_{}_idx;\n", f.name));
                 }
+                up.push_str(&format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name));
             }
-            sql
+            (
+                up,
+                format!(
+                    "-- The columns come back empty (with their defaults).\n{}",
+                    add_columns_sql(table, fields, dialect, true)?
+                ),
+            )
         }
-        MigrationKind::RemoveColumns { table, .. } => fields
-            .iter()
-            .map(|f| format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name))
-            .collect(),
-        MigrationKind::CreateTable { table } => {
-            db_resource::create_table_sql(table, fields, dialect)
+        MigrationKind::CreateTable { table } => (
+            db_resource::create_table_sql(table, fields, dialect),
+            format!("DROP TABLE {table};\n"),
+        ),
+        MigrationKind::Blank => {
+            let (_, down) = crate::db::blank_sql(name, crate::db::Style::Reversible);
+            (
+                String::from("-- Write your SQL here.\n"),
+                down.unwrap_or_default(),
+            )
         }
-        MigrationKind::Blank => String::from("-- Write your SQL here.\n"),
     })
 }
 
@@ -690,7 +739,7 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
             resolve_parent(&project, parent, &mut report);
         }
     }
-    let sql = migration_sql(&kind, &parsed, dialect)?;
+    let (up, down) = migration_sql(&kind, &parsed, dialect, &slug)?;
 
     match &kind {
         MigrationKind::AddColumns { table, .. } | MigrationKind::RemoveColumns { table, .. } => {
@@ -732,21 +781,25 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
         }
     }
 
-    let file = crate::db::new_migration_name(&project.root, &slug)?;
-    let rel = PathBuf::from(crate::db::MIGRATIONS_DIR).join(&file);
-    let contents = format!("-- Created by `zapline generate migration {slug}`.\n{sql}");
-    write_files(
-        &project.root,
-        &[OutputFile {
-            path: rel.clone(),
-            contents,
-        }],
-        false,
-    )?;
-    report.created.push(rel);
-    report
-        .notes
-        .push("the migration runs when the app starts (or run `zapline db migrate`)".to_string());
+    let header = format!("-- Created by `zapline generate migration {slug}`.\n");
+    let down = match kind {
+        MigrationKind::Blank => down,
+        _ => format!("-- Reverts {slug}.\n{down}"),
+    };
+    let written =
+        crate::db::create_migration(&project.root, &slug, &format!("{header}{up}"), Some(&down))?;
+    for path in written {
+        report.created.push(
+            path.strip_prefix(&project.root)
+                .unwrap_or(&path)
+                .to_path_buf(),
+        );
+    }
+    report.notes.push(
+        "the migration runs when the app starts (or run `zapline db migrate`); \
+         `zapline db rollback` runs its .down.sql file"
+            .to_string(),
+    );
     Ok(report)
 }
 
@@ -771,16 +824,6 @@ pub fn resource(dir: &Path, name: &str, plural: Option<&str>, force: bool) -> Re
         report.notes.push(note);
     }
     Ok(report)
-}
-
-/// The file name of an existing migration ending in `suffix`.
-fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
-    let dir = project.root.join(crate::db::MIGRATIONS_DIR);
-    fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .find(|n| n.ends_with(suffix))
 }
 
 /// The crate name tests import: the library name, or the package name as a fallback.

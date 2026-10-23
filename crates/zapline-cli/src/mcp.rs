@@ -149,7 +149,7 @@ fn tool_list() -> Value {
         },
         {
             "name": "generate_migration",
-            "description": "Write a SQL migration for the project's database. add_<cols>_to_<table> adds columns (ALTER TABLE ADD COLUMN), remove_<cols>_from_<table> drops them, create_<table> creates a table with id, the fields and timestamps. Without fields the column comes from the name.",
+            "description": "Write a reversible SQL migration (.up.sql + .down.sql) for the project's database. add_<cols>_to_<table> adds columns (ALTER TABLE ADD COLUMN / DROP COLUMN), remove_<cols>_from_<table> drops them, create_<table> creates a table with id, the fields and timestamps (down: DROP TABLE). Without fields the column comes from the name; other names get an empty pair.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
                 "name": { "type": "string", "description": "e.g. add_published_at_to_posts" },
                 "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type as for generate_resource, e.g. [\"published_at:datetime?\"]" }
@@ -198,16 +198,51 @@ fn tool_list() -> Value {
         },
         {
             "name": "db_new_migration",
-            "description": "Create migrations/<timestamp>_<name>.sql, optionally with its SQL.",
+            "description": "Create a migration with your SQL: migrations/<timestamp>_<name>.up.sql + .down.sql (one-way <name>.sql in projects that only have one-way migrations, unless down_sql is given).",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
                 "name": { "type": "string", "description": "e.g. add_email_to_users" },
-                "sql": { "type": "string" }
+                "sql": { "type": "string", "description": "The up SQL" },
+                "down_sql": { "type": "string", "description": "SQL that undoes it" }
             }}
         },
         {
             "name": "db_migrate",
             "description": "Apply pending migrations using the app's DATABASE_URL.",
             "inputSchema": { "type": "object", "properties": { "bin": bin }}
+        },
+        {
+            "name": "db_status",
+            "description": "Every migration: version, name, applied_at, state (applied, pending, CHANGED since applied, missing file) and whether it has a down file.",
+            "inputSchema": { "type": "object", "properties": { "bin": bin }},
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "db_rollback",
+            "description": "Revert the last applied migration(s) with their .down.sql files. Destructive: needs confirm=true. Refused in the production profile.",
+            "inputSchema": { "type": "object", "required": ["confirm"], "properties": {
+                "steps": { "type": "integer", "minimum": 1, "description": "How many, newest first; default 1" },
+                "confirm": { "type": "boolean", "description": "Must be true" },
+                "bin": bin
+            }},
+            "annotations": { "destructiveHint": true }
+        },
+        {
+            "name": "db_redo",
+            "description": "Revert the last migration and apply it again (while iterating on it). Destructive: needs confirm=true.",
+            "inputSchema": { "type": "object", "required": ["confirm"], "properties": {
+                "confirm": { "type": "boolean", "description": "Must be true" },
+                "bin": bin
+            }},
+            "annotations": { "destructiveHint": true }
+        },
+        {
+            "name": "db_reset",
+            "description": "Development only: revert every migration, apply them all again and insert the seed data. Deletes all data: needs confirm=true.",
+            "inputSchema": { "type": "object", "required": ["confirm"], "properties": {
+                "confirm": { "type": "boolean", "description": "Must be true" },
+                "bin": bin
+            }},
+            "annotations": { "destructiveHint": true }
         },
         {
             "name": "db_seed",
@@ -410,22 +445,60 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             )?))
         }
         "db_new_migration" => {
-            let project = Project::discover(here)?;
             let name = s("name").context("`name` is required")?;
-            let sql = match s("sql") {
-                Some(sql) => format!("{}\n", sql.trim_end()),
-                None => format!("-- {name}\n"),
+            let project = Project::discover(here)?;
+            let style = if s("down_sql").is_some() {
+                db::Style::Reversible
+            } else {
+                db::Style::detect(&project.root.join(db::MIGRATIONS_DIR))
             };
-            let path = db::create_migration(&project.root, name, &sql)?;
-            Ok(format!(
-                "created {}",
-                path.strip_prefix(&project.root).unwrap_or(&path).display()
-            ))
+            let (blank_up, blank_down) = db::blank_sql(name, style);
+            let up = s("sql").map_or(blank_up, |sql| format!("{}\n", sql.trim_end()));
+            let down = s("down_sql")
+                .map(|sql| format!("{}\n", sql.trim_end()))
+                .or(blank_down);
+            let paths = db::create_migration(&project.root, name, &up, down.as_deref())?;
+            let shown: Vec<String> = paths
+                .iter()
+                .map(|p| {
+                    format!(
+                        "created {}",
+                        p.strip_prefix(&project.root).unwrap_or(p).display()
+                    )
+                })
+                .collect();
+            Ok(shown.join("\n"))
         }
         "db_migrate" => {
             let project = Project::discover(here)?;
-            with_build_errors(&project, || db::migrate(&project, s("bin")))?;
-            Ok("migrated: the database is up to date".to_string())
+            with_build_errors(&project, || db::migrate(&project, s("bin")))
+        }
+        "db_status" => {
+            let project = Project::discover(here)?;
+            let rows = with_build_errors(&project, || db::status(&project, s("bin")))?;
+            Ok(db::render_status(&rows, false))
+        }
+        "db_rollback" | "db_redo" | "db_reset" => {
+            if args.get("confirm").and_then(Value::as_bool) != Some(true) {
+                bail!(
+                    "`{name}` reverts migrations and can delete data: call it again with \
+                     confirm=true once the user has agreed"
+                );
+            }
+            let project = Project::discover(here)?;
+            let target = db::Target {
+                bin: s("bin"),
+                ..db::Target::default()
+            };
+            with_build_errors(&project, || match name {
+                "db_rollback" => {
+                    let steps = args.get("steps").and_then(Value::as_u64).unwrap_or(1);
+                    let steps = u32::try_from(steps).context("`steps` is too large")?;
+                    db::rollback(&project, steps, target)
+                }
+                "db_redo" => db::redo(&project, target),
+                _ => db::reset(&project, target),
+            })
         }
         "db_seed" => {
             let project = Project::discover(here)?;
@@ -816,6 +889,32 @@ mod tests {
         }
         let r = request("tools/call", json!({ "name": "nope", "arguments": {} }));
         assert_eq!(r["result"]["isError"], true);
+    }
+
+    #[test]
+    fn destructive_db_tools_need_confirm_before_doing_anything() {
+        let r = request("tools/list", json!({}));
+        let tools = r["result"]["tools"].as_array().unwrap();
+        for name in ["db_rollback", "db_redo", "db_reset"] {
+            let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+            assert_eq!(
+                tool["inputSchema"]["required"],
+                json!(["confirm"]),
+                "{name}"
+            );
+            assert_eq!(tool["annotations"]["destructiveHint"], true, "{name}");
+            // Refused before the project is even looked at (no cargo runs).
+            for args in [
+                json!({}),
+                json!({ "confirm": false }),
+                json!({ "confirm": "yes" }),
+            ] {
+                let err = run_tool(name, &args).unwrap_err().to_string();
+                assert!(err.contains("confirm=true"), "{name}: {err}");
+            }
+        }
+        assert!(tools.iter().any(|t| t["name"] == "db_status"));
+        assert!(tools.iter().any(|t| t["name"] == "generate_migration"));
     }
 
     #[test]

@@ -494,7 +494,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
-| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| Migrations | `zapline db new create_posts` (up + down SQL), applied at startup or by `db migrate`; `db status/rollback/redo/reset` |
 | Test data / seeds | `Factory::new("posts").set("title", "Hi").create(&pool).await?` fills the other required columns (and parent rows) from the schema; `.create_many(&pool, 10)`; record `.int("id")`, `.json()`, `.parse::<Post>()`; `App::seed(\|db\| async move { .. })` + `zapline db seed` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
@@ -511,7 +511,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | Fuzz every route | `app().test().fuzz().await.assert_clean()` or `zapline fuzz` |
 | Tests from traffic | `zapline dev --record`, use the app, `zapline snap signup`; replayed by `app().test().replay_snapshots("tests/snapshots")` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text due:date author:references` (migration with timestamps, JSON API with `PATCH`, index/show/edit pages, tests), `g migration add_x_to_posts x:int`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g mailer <name>` (templated email + test), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `fuzz`, `client` (typed TS/JS client; `dev` keeps `frontend/src/api.ts` current), `snap <name>`, `check`, `test`, `explain ZL0002`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text due:date author:references` (migration with timestamps, JSON API with `PATCH`, index/show/edit pages, tests), `g migration add_x_to_posts x:int` (`.up.sql` + `.down.sql`), `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g mailer <name>` (templated email + test), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate/status/rollback/redo/reset`, `routes --json`, `openapi`, `fuzz`, `client` (typed TS/JS client; `dev` keeps `frontend/src/api.ts` current), `snap <name>`, `check`, `test`, `explain ZL0002`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 | Form errors + flash | `ValidForm(form): ValidForm<T>`; `Err(invalid) => return views.render_invalid("new.html", context!{}, invalid)` (422 with `{{ errors.x }}`, `{{ old.x }}`); `flash: Flash`, `flash.success("Saved"); Ok(flash.redirect("/posts"))`, `{% for m in flash %}` in templates ([Views](views.md#forms-errors-next-to-each-field)) |
 
@@ -529,8 +529,11 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline new <name>.rs` / `zapline run <file.rs>` | A [one-file app](one-file.md): a whole app in a single `.rs` file with no `Cargo.toml`. `dev`, `test`, `check` and `routes` take the file too |
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, database sessions with flash messages, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration with `created_at`/`updated_at`, a sqlx JSON API (list, get, create, `PUT`, `PATCH`, delete), htmx index, show and edit pages (when `templates/base.html` exists; rejected posts come back with a message per field, saves set a flash message) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `uuid`, `references`; `?` for optional ([details](#database-backed-resources)). |
-| `zapline g migration <name> [field:type ...]` | A migration from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table ([details](#migrations-from-the-command-line)) |
-| `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline g migration <name> [field:type ...]` | A reversible migration (`.up.sql` + `.down.sql`) from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table ([details](#migrations-from-the-command-line)) |
+| `zapline db new <name> [--reversible\|--one-way]` / `zapline db migrate` | Create a SQL migration (an `.up.sql` + `.down.sql` pair) / apply pending ones ([Databases](database.md#migrations)) |
+| `zapline db status` | Every migration: version, name, when it was applied, whether its file changed since, and whether it has a down file |
+| `zapline db rollback [--steps N]` / `zapline db redo` | Revert the last N migrations with their `.down.sql` files / revert the last one and apply it again |
+| `zapline db reset` | Revert every migration, apply them all and insert the seed data. Development only: `rollback`, `redo` and `reset` refuse `--release` and `APP_ENV=production` unless `--force` ([guard rails](database.md#guard-rails)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
@@ -662,7 +665,7 @@ A reference also gets a `?author_id=` filter on the list, `GET /api/authors/{id}
 
 ## Migrations from the command line
 
-`zapline g migration` writes the SQL for the project's dialect from the migration's name, with the same field syntax:
+`zapline g migration` writes the SQL for the project's dialect from the migration's name, with the same field syntax. Each migration is a reversible pair: the `.up.sql` file and a `.down.sql` file that undoes it (`DROP COLUMN`, `ADD COLUMN`, `DROP TABLE`), which [`zapline db rollback`](database.md#status-rollback-redo-reset) runs:
 
 ```sh
 zapline g migration add_published_at_to_posts published_at:datetime?
@@ -673,11 +676,13 @@ zapline g migration create_tags name slug              # id, fields, created_at,
 ```
 
 ```sql
--- migrations/20261023101500_add_published_at_to_posts.sql
+-- migrations/20261023101500_add_published_at_to_posts.up.sql
 ALTER TABLE posts ADD COLUMN published_at TIMESTAMPTZ;
+-- migrations/20261023101500_add_published_at_to_posts.down.sql
+ALTER TABLE posts DROP COLUMN published_at;
 ```
 
-A required column added to a table that has rows needs a value for them: text gets `DEFAULT ''`, numbers `DEFAULT 0`, booleans `FALSE`. Dates, UUIDs and references have no sensible default, so add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. Any other name with fields creates that table; without fields you get an empty migration (like `zapline db new`). The generator doesn't edit your Rust code: when `src/routes/<table>.rs` exists it prints the fields to add to the model and its queries.
+A required column added to a table that has rows needs a value for them: text gets `DEFAULT ''`, numbers `DEFAULT 0`, booleans `FALSE`. Dates, UUIDs and references have no sensible default, so add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. Any other name with fields creates that table; without fields you get an empty pair (like `zapline db new`). Rolling back a `remove_` migration brings the columns back empty: optional, or with their defaults. The generator doesn't edit your Rust code: when `src/routes/<table>.rs` exists it prints the fields to add to the model and its queries.
 
 ## How `routes` and `openapi` work
 
@@ -720,8 +725,10 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
 | `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_job`, `generate_mailer` | The files created and edited |
-| `db_new_migration` | Creates a migration, with its SQL if given |
-| `db_migrate` | Applies pending migrations |
+| `db_new_migration` | Creates a migration, with its up (`sql`) and down (`down_sql`) SQL if given |
+| `db_migrate` | Applies pending migrations and names them |
+| `db_status` | The `zapline db status` table |
+| `db_rollback`, `db_redo`, `db_reset` | Revert migrations. They refuse to run without `confirm=true`, so the assistant asks you first |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
@@ -729,7 +736,7 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 | `explain_error` | A [diagnostic code](errors.md#diagnostic-codes)'s cause and fix |
 | `last_results` | The latest `test`, `check` and `zapline fuzz` results with their age, without running anything again |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included. Any answer that mentions a diagnostic code (`ZL0004` in a startup error, a panic in a test) ends with that code's fix.
+When the app does not compile, `routes`, `openapi` and the `db_*` tools answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included. Any answer that mentions a diagnostic code (`ZL0004` in a startup error, a panic in a test) ends with that code's fix.
 
 ### Live tools: debugging the running app
 
@@ -4034,23 +4041,75 @@ For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition 
 
 ## Migrations
 
-Migrations are plain SQL files in `migrations/`, applied in file-name order, each exactly once (sqlx tracks them in `_sqlx_migrations`).
+Migrations are plain SQL files in `migrations/`, applied in version order, each exactly once (sqlx tracks them in `_sqlx_migrations`). Each one is a pair: `<version>_<name>.up.sql` does the change and `<version>_<name>.down.sql` undoes it.
 
 ```sh
-zapline db new create_posts     # migrations/20261022062406_create_posts.sql
+zapline db new create_posts     # migrations/20261022062406_create_posts.up.sql + .down.sql
 zapline db migrate              # apply pending migrations, then exit
 ```
 
-`zapline g migration` writes the SQL too, from the name and `field:type` arguments ([CLI](cli.md#migrations-from-the-command-line)):
-
-```sh
-zapline g migration add_published_at_to_posts published_at:datetime?   # ALTER TABLE posts ADD COLUMN ...
-zapline g migration create_tags name slug                             # CREATE TABLE tags (...)
-```
-
-The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `.migrations(zapline::embed!("migrations"))` compiles them into the binary, with the same checksums as the files ([One binary](deployment.md#one-binary-one-command)). `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
+The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `.migrations(zapline::embed!("migrations"))` compiles them into the binary, with the same checksums as the files ([One binary](deployment.md#one-binary-one-command)). `zapline db migrate` runs your app with `ZAPLINE_MIGRATE=up`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+### Writing them for you
+
+`zapline g migration` writes both halves from the name and `field:type` arguments ([CLI](cli.md#migrations-from-the-command-line)):
+
+```sh
+zapline g migration create_tags name slug                             # CREATE TABLE / DROP TABLE
+zapline g migration add_published_at_to_posts published_at:datetime?   # ADD COLUMN / DROP COLUMN
+zapline g migration remove_legacy_from_posts legacy:bool               # DROP COLUMN / ADD COLUMN
+zapline g migration backfill_slugs                                     # an empty pair to fill in
+```
+
+A required column added to an existing table gets a default (`''`, `0`, `FALSE`) so the rows already there stay valid; dates, UUIDs and references have to be optional there. `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
+
+### Status, rollback, redo, reset
+
+```sh
+zapline db status               # every migration, applied or not, and edited files
+zapline db rollback             # revert the last migration with its .down.sql
+zapline db rollback --steps 3   # ... or the last three, newest first
+zapline db redo                 # revert the last one and apply it again
+zapline db reset                # revert everything, migrate, run the seed (development)
+```
+
+```text
+VERSION         NAME                APPLIED AT           STATE                  DOWN
+20260101000000  create todos        2026-10-23 08:54:03  applied                yes
+20261022062406  add email to users  2026-10-23 08:54:03  CHANGED since applied  yes
+20261023090000  create comments     -                    pending                yes
+
+2 applied, 1 pending
+```
+
+`CHANGED since applied` means the file was edited after it ran: the app refuses to start until it matches again (edit a migration that already shipped by adding a new one instead). Nothing is reverted unless every migration involved has a down file; a one-way migration from an older project (`<version>_<name>.sql`) becomes reversible when you add `<version>_<name>.down.sql` next to it. `zapline db new` keeps writing one-way files in a project whose migrations are all one-way, unless you pass `--reversible`.
+
+Every command but `new` runs your app with `ZAPLINE_MIGRATE=status|up|down:<n>|redo|reset` (plus `ZAPLINE_SEED=1` for `reset`), so it uses exactly the URL and settings the app uses; the app does the work and exits instead of serving. The same commands are there in code, for tests and one-off tools:
+
+```rust,ignore
+use zapline::db::{Migrations, MigrationState};
+
+let migrations = Migrations::open("migrations").await?;
+migrations.up(&pool).await?;
+let pending = migrations
+    .status(&pool)
+    .await?
+    .iter()
+    .filter(|m| m.state == MigrationState::Pending)
+    .count();
+migrations.down(&pool, 1).await?;
+```
+
+#### Guard rails
+
+Rolling back drops tables, so production is protected twice:
+
+- `zapline db rollback`, `redo` and `reset` refuse `--release` (a release build) and `APP_ENV`/`ZAPLINE_ENV=production` unless you add `--force`.
+- The app itself, built in release mode, refuses `ZAPLINE_MIGRATE=down:<n>`, `redo` and `reset` unless `ZAPLINE_ALLOW_DESTRUCTIVE=1` is set (`--force` sets it).
+
+The MCP tools `db_rollback`, `db_redo` and `db_reset` need `confirm=true`, so an assistant has to ask first.
 
 ## Dates, times and UUIDs
 
@@ -4633,8 +4692,47 @@ Requirements: the `postgres` or `sqlite` feature, and `json` (on by default). `z
 |---|---|
 | `jobs.enqueue(job).await?` | as soon as a worker is free |
 | `jobs.enqueue_in(job, Duration::from_secs(3600)).await?` | after the delay |
+| `jobs.enqueue_at(job, SystemTime).await?` | at that time (right away if it has passed) |
 
 `Jobs` is an extractor, and also available from `Resources` (`res.require::<Jobs>()?`), so a job can enqueue follow-up jobs. Enqueueing a type that isn't registered in `.jobs(..)` is an error that names the missing `.register::<T>()`.
+
+All three return `Ok(true)` when the job was stored, and `Ok(false)` when it was a duplicate (below).
+
+## Unique jobs, priorities and queues
+
+Three optional items on `Job` shape how a type is queued:
+
+```rust
+impl Job for ReindexProduct {
+    const NAME: &'static str = "reindex_product";
+    const QUEUE: &'static str = "search";   // default "default"
+    const PRIORITY: i32 = -1;               // default 0; higher runs first
+
+    // At most one queued or running job per product.
+    fn unique_key(&self) -> Option<String> {
+        Some(self.product_id.to_string())
+    }
+
+    async fn run(self, res: Resources) -> Result<()> { /* ... */ Ok(()) }
+}
+```
+
+- **`unique_key`**: while a job of this type with the same key is queued or running, enqueueing another stores nothing and returns `Ok(false)`, so ten edits in a row reindex once. A partial unique index on `(name, unique_key)` enforces it, across instances too. Once the job has finished (or failed for good), the key is free. `enqueue` reports duplicates itself instead of a separate `enqueue_unique`, because uniqueness is a property of the job type: every caller gets it, whether or not it checks the result.
+- **`PRIORITY`**: due jobs are claimed highest priority first, then oldest first. A password-reset email (`10`) overtakes a backlog of newsletters (`-5`).
+- **`QUEUE`**: by default an instance's workers take jobs from every queue its registered types use. `.queues(..)` gives each queue its own workers instead, so a flood in one can't hold up another:
+
+```rust
+App::new()
+    .database(Database::from_env())
+    .jobs(|queue| {
+        queue
+            .register::<SendWelcome>()
+            .register::<ReindexProduct>()
+            .queues([("default", 4), ("search", 1)])   // or .queues(["default", "search"]) with .workers(n) each
+    })
+```
+
+An instance only works the queues it lists, so a dedicated search worker is the same app started with `.queues([("search", 8)])`.
 
 ## Workers, retries and failures
 
@@ -4643,6 +4741,7 @@ Requirements: the `postgres` or `sqlite` feature, and `json` (on by default). `z
 | Setting | Default | |
 |---|---|---|
 | `.workers(n)` | 4 | Jobs run at once in this instance. `0` runs none: useful in tests, or for web instances when a separate instance runs the jobs. |
+| `.queues([..])` | every queue in use, shared | Dedicated workers per queue: `("mail", 2)`, or a bare name for `.workers(n)` workers. |
 | `.poll_interval(d)` | 1 s | How often idle workers look for due jobs. Jobs enqueued by the same instance wake a worker at once. |
 | `.timeout(d)` | 5 min | A run that takes longer fails (and is retried). |
 
@@ -4650,12 +4749,17 @@ A failed run is retried after 5 s, 20 s, 80 s, 5 min, 21 min (capped at 1 h) unt
 
 ```rust
 let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
+for job in jobs.failed(20).await? {   // newest first: id, name, queue, attempts, last_error, payload
+    if job.name == "obsolete_job" {
+        jobs.discard(job.id).await?;  // delete it (also cancels a queued job)
+    }
+}
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
-In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them, plus per-job counts when metrics are on and every cron job with its next enqueue.
+`retry_failed` leaves a failed job alone when a newer job holds its unique key. In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them all and a **Discard** button on each failed job, plus per-job counts when metrics are on and every cron job with its next enqueue.
 
-The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
+The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`. A table created by an older zapline gets the `queue`, `priority` and `unique_key` columns added at startup; existing rows land in the `default` queue at priority 0.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
 

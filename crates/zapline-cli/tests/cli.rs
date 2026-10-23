@@ -607,15 +607,17 @@ fn generate_migration_writes_sql_from_its_name() {
         &["g", "migration", "add_due_to_todos", "due:date?"],
     ));
     assert!(log.contains("Created migrations/"), "{log}");
-    assert!(log.contains("_add_due_to_todos.sql"), "{log}");
-    let file = fs::read_dir(root.join("migrations"))
-        .unwrap()
-        .map(|e| e.unwrap().path())
-        .find(|p| p.to_string_lossy().ends_with("_add_due_to_todos.sql"))
-        .unwrap();
-    assert!(fs::read_to_string(file)
-        .unwrap()
-        .contains("ALTER TABLE todos ADD COLUMN due TEXT;"));
+    assert!(log.contains("_add_due_to_todos.up.sql"), "{log}");
+    let file = |suffix: &str| {
+        let path = fs::read_dir(root.join("migrations"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .find(|p| p.to_string_lossy().ends_with(suffix))
+            .unwrap();
+        fs::read_to_string(path).unwrap()
+    };
+    assert!(file("_add_due_to_todos.up.sql").contains("ALTER TABLE todos ADD COLUMN due TEXT;"));
+    assert!(file("_add_due_to_todos.down.sql").contains("ALTER TABLE todos DROP COLUMN due;"));
     assert!(fs::read_to_string(root.join("Cargo.toml"))
         .unwrap()
         .contains("\"chrono\""));

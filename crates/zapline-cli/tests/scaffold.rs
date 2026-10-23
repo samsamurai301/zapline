@@ -231,7 +231,8 @@ fn sql_resources_with_references_compile_and_pass() {
             "starts_at:datetime?",
         ],
     ));
-    assert!(log.contains("_add_rating_to_authors.sql"), "{log}");
+    assert!(log.contains("_add_rating_to_authors.up.sql"), "{log}");
+    assert!(log.contains("_add_rating_to_authors.down.sql"), "{log}");
     let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
     assert!(manifest.contains("\"chrono\""), "{manifest}");
 
@@ -358,4 +359,73 @@ fn one_file_starter_builds_and_passes_its_tests() {
     }
     let (ok, lints) = zapline_cmd(&["check", "--clippy", "hello.rs"]);
     assert!(ok && lints.contains("no errors, no warnings"), "{lints}");
+}
+
+#[test]
+#[ignore = "slow: compiles zapline with SQLite"]
+fn fullstack_migrations_roll_back_redo_and_reset() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = generate(tmp.path(), "scaffold-db", "fullstack");
+    let db = tmp.path().join("app.db");
+    let zapline_in = |args: &[&str]| {
+        zapline()
+            .args(args)
+            .current_dir(&project)
+            .env("CARGO_TARGET_DIR", target_dir())
+            .env(
+                "DATABASE_URL",
+                format!("sqlite://{}?mode=rwc", db.display()),
+            )
+            .env("NO_COLOR", "1")
+            .env_remove("APP_ENV")
+            .env_remove("ZAPLINE_ENV")
+            .output()
+            .unwrap()
+    };
+
+    let out = zapline_in(&["db", "status"]);
+    expect_success(&out);
+    assert!(stdout(&out).contains("create todos"), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("0 applied, 1 pending"),
+        "{}",
+        stdout(&out)
+    );
+
+    let log = expect_success(&zapline_in(&[
+        "g",
+        "migration",
+        "add_notes_to_todos",
+        "notes:text?",
+    ]));
+    assert!(log.contains("_add_notes_to_todos.down.sql"), "{log}");
+
+    let log = expect_success(&zapline_in(&["db", "migrate"]));
+    assert!(log.contains("applied 2 migration(s)"), "{log}");
+    let out = zapline_in(&["db", "status"]);
+    assert!(
+        stdout(&out).contains("2 applied, 0 pending"),
+        "{}",
+        stdout(&out)
+    );
+
+    let log = expect_success(&zapline_in(&["db", "rollback"]));
+    assert!(log.contains("add notes to todos"), "{log}");
+    let log = expect_success(&zapline_in(&["db", "redo"]));
+    assert!(log.contains("create todos"), "{log}");
+    let log = expect_success(&zapline_in(&["db", "reset"]));
+    assert!(
+        log.contains("rebuilt from its migrations and seeded"),
+        "{log}"
+    );
+    let out = zapline_in(&["db", "status"]);
+    assert!(
+        stdout(&out).contains("2 applied, 0 pending"),
+        "{}",
+        stdout(&out)
+    );
+
+    // A release build is refused without --force, before anything is built.
+    let log = expect_failure(&zapline_in(&["db", "reset", "--release"]));
+    assert!(log.contains("--force"), "{log}");
 }

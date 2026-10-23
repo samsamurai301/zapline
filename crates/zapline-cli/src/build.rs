@@ -344,14 +344,29 @@ pub fn run_app(
     envs: &[(&str, &OsStr)],
     timeout: Duration,
 ) -> Result<Captured> {
+    run_app_in(project, bin, envs, timeout, false)
+}
+
+/// [`run_app`] with a choice of profile: `release` builds and runs
+/// `cargo run --release`.
+pub fn run_app_in(
+    project: &Project,
+    bin: Option<&str>,
+    envs: &[(&str, &OsStr)],
+    timeout: Duration,
+    release: bool,
+) -> Result<Captured> {
     let bin = resolve_bin(project, bin)?;
-    match build(project, &bin, false)? {
+    match build(project, &bin, release)? {
         BuildOutcome::Built(_) => {}
         BuildOutcome::Failed(_) => bail!("build failed"),
     }
     let mut cmd = cargo();
     cmd.args(["run", "--quiet", "--bin", &bin])
         .current_dir(&project.root);
+    if release {
+        cmd.arg("--release");
+    }
     for (k, v) in envs {
         cmd.env(k, v);
     }
