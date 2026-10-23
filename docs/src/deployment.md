@@ -43,8 +43,9 @@ Everything that takes a directory takes a `Dir`: `App::views`, `App::assets`,
   hashes are computed at compile time, so startup reads nothing.
   Migrations have the same checksums as the files, so a database migrated
   from disk accepts the embedded copy.
-- **Debug builds** read the real directory while it exists, so editing a
-  template or a stylesheet still needs only a browser refresh.
+- **Debug builds** (and `zapline dev --release`) read the real directory
+  while it exists, so editing a template or a stylesheet still reloads
+  without a rebuild.
   `Dir::in_memory()` uses the compiled copy in debug too (for tests).
 
 Cargo rebuilds when an embedded file changes, but it doesn't watch for files

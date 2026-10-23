@@ -31,8 +31,9 @@
 //! # Debug and release
 //!
 //! Release builds read only the embedded copy: the files on disk are not
-//! needed (or looked at) on the server. Debug builds read the directory on
-//! disk while it exists, so editing a template or a stylesheet still shows
+//! needed (or looked at) on the server. Debug builds (and any build under
+//! `zapline dev`, which sets `ZAPLINE_DEV=1`) read the directory on disk
+//! while it exists, so editing a template or a stylesheet still shows
 //! up on the next request without a rebuild; a debug binary copied to a
 //! machine without the sources falls back to the embedded copy.
 //! [`Dir::in_memory`] forces the embedded copy, for a test that wants to

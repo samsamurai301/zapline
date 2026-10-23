@@ -136,3 +136,16 @@ fn translations_are_read_again_when_a_file_changes() {
         assert_eq!(hello("de").await, "de Hallo");
     });
 }
+
+/// `embed!` directories read their sources under `zapline dev`, even in a
+/// release build (`zapline dev --release`), so edits still reload; an
+/// explicit `in_memory()` keeps the compiled copy.
+#[cfg(feature = "macros")]
+#[test]
+fn embedded_dirs_read_the_sources_under_zapline_dev() {
+    dev_env();
+    let dir = zapline::embed!("tests/fixtures/embed/templates");
+    assert!(!dir.is_embedded());
+    assert!(dir.read("base.html").is_ok());
+    assert!(dir.in_memory().is_embedded());
+}
