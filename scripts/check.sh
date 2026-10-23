@@ -24,10 +24,12 @@ cargo test -p zapline-cli
 [[ "${1:-}" == "quick" ]] && exit 0
 
 step "feature matrix"
-cargo check -p zapline --no-default-features
+# Each feature alone, tests included: test files guard themselves with
+# `#![cfg(feature = ...)]` for the features they use.
+cargo clippy -q -p zapline --no-default-features --all-targets -- -D warnings
 for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
   echo "  - $f"
-  cargo check -q -p zapline --no-default-features --features "$f"
+  cargo clippy -q -p zapline --no-default-features --features "$f" --all-targets -- -D warnings
 done
 cargo check -p zapline
 

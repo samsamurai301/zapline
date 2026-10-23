@@ -61,20 +61,23 @@ jobs:
       - name: build examples
         run: cargo build -p zapline-examples --examples
 
-  # Every Cargo feature must compile on its own.
+  # Every Cargo feature must compile on its own, tests included (test files
+  # guard themselves with `#![cfg(feature = ...)]`).
   features:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check -p zapline --no-default-features
+      - run: cargo clippy -p zapline --no-default-features --all-targets -- -D warnings
       - name: each feature alone
         shell: bash
         run: |
           for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
             echo "::group::$f"
-            cargo check -p zapline --no-default-features --features "$f"
+            cargo clippy -p zapline --no-default-features --features "$f" --all-targets -- -D warnings
             echo "::endgroup::"
           done
 
