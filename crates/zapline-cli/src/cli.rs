@@ -21,6 +21,9 @@ Examples:
   zapline new hello --template minimal     Create a tiny single-route project
   zapline new shop --template full         Add config layers, DI, metrics, tracing, hardened middleware
   zapline new todo --template fullstack    HTML + htmx + SQLite + JSON API, zero setup
+  zapline new hello.rs                     A whole app in one file, no Cargo.toml
+  zapline run hello.rs                     Build (cached) and run a one-file app
+  zapline dev hello.rs                     Live reload for a one-file app
   zapline dev                              Rebuild and restart on every change
   zapline dev -- --port 9000               Pass arguments to your app
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
@@ -72,9 +75,33 @@ Templates:
 Examples:
   zapline new my-app --template fullstack
   zapline new my-api
+  zapline new hello.rs                     One-file app: a single .rs file, no Cargo.toml
   zapline new my-api --template full --path ~/code
   zapline new hello --template minimal --no-git")]
     New(NewArgs),
+
+    /// Run a one-file app: a single .rs file, no Cargo.toml
+    #[command(after_long_help = "\
+Dependencies beyond zapline, serde, serde_json and tokio go in a `cargo` block in the
+file's leading `//!` comment, in Cargo.toml syntax:
+
+  //! ```cargo
+  //! [dependencies]
+  //! uuid = { version = \"1\", features = [\"v4\"] }
+  //! ```
+
+The file becomes a hidden project in the cache directory ($XDG_CACHE_HOME/zapline or
+~/.cache/zapline), and all scripts share one target directory, so dependencies compile
+once. An unchanged script starts without running cargo. The app runs in the current
+directory and exits with its own exit code; everything after the file goes to the app.
+With `#!/usr/bin/env -S zapline run` as its first line, the file runs as `./app.rs`.
+
+Examples:
+  zapline run app.rs
+  zapline run app.rs -- --port 9000
+  zapline run --release app.rs
+  zapline run --print-manifest app.rs      Path of the hidden Cargo.toml, for editors")]
+    Run(RunArgs),
 
     /// Generate code in the current project
     #[command(visible_alias = "g")]
@@ -87,8 +114,12 @@ temp files), rebuilds after the changes settle, and restarts the binary. The old
 gets SIGTERM and is killed after 5 seconds if it does not exit. If a build fails, the
 previous version keeps running.
 
+Given a one-file app (see `zapline run --help`), watches just that file and runs the
+app in the current directory.
+
 Examples:
   zapline dev
+  zapline dev app.rs
   zapline dev --bin server
   zapline dev --client web/src/api.ts   Also keep a typed TypeScript client up to date
   zapline dev -- --port 9000")]
@@ -100,6 +131,7 @@ Runs the app with ZAPLINE_PRINT_ROUTES=1; `App::run` prints its routes and exits
 
 Examples:
   zapline routes
+  zapline routes app.rs                  A one-file app
   zapline routes --json | jq '.[].path'")]
     Routes(RoutesArgs),
 
@@ -144,8 +176,12 @@ and quick terminal reads. Exits non-zero when the build fails.
 
 Examples:
   zapline check
+  zapline check app.rs                   A one-file app
   zapline check --clippy")]
     Check {
+        /// A one-file app to check instead of the project
+        #[arg(value_name = "FILE.rs")]
+        file: Option<PathBuf>,
         /// Run clippy instead of `cargo check`
         #[arg(long)]
         clippy: bool,
@@ -159,9 +195,15 @@ message, then one summary line. Exits non-zero when anything fails.
 
 Examples:
   zapline test
-  zapline test users::")]
+  zapline test users::
+  zapline test app.rs                    The #[cfg(test)] tests of a one-file app
+  zapline test app.rs notes")]
     Test {
+        /// A one-file app (a path ending in .rs), then the filter; or just the filter
+        #[arg(value_name = "FILE.rs|FILTER")]
+        first: Option<String>,
         /// Only run tests whose name contains this
+        #[arg(value_name = "FILTER")]
         filter: Option<String>,
     },
 
@@ -202,12 +244,13 @@ Examples:
 /// Arguments of `zapline new`.
 #[derive(Debug, Args)]
 pub struct NewArgs {
-    /// Project name, also used as the crate name and directory name
+    /// Project name, also used as the crate name and directory name; a name ending in
+    /// `.rs` creates a one-file app instead
     pub name: String,
 
-    /// Project layout
-    #[arg(short, long, value_enum, default_value = "api")]
-    pub template: Template,
+    /// Project layout [default: api]
+    #[arg(short, long, value_enum)]
+    pub template: Option<Template>,
 
     /// Parent directory in which to create the project
     #[arg(long, value_name = "DIR", default_value = ".")]
@@ -356,9 +399,51 @@ Examples:
     },
 }
 
+/// Arguments of `zapline run`.
+#[derive(Debug, Args)]
+pub struct RunArgs {
+    /// Build in release mode
+    #[arg(long)]
+    pub release: bool,
+
+    /// Only write the hidden project and print the path of its Cargo.toml
+    #[arg(long)]
+    pub print_manifest: bool,
+
+    /// The one-file app, then the arguments passed to it (`--` before them is optional)
+    #[arg(
+        value_name = "FILE.rs [APP_ARGS]",
+        required = true,
+        num_args = 1..,
+        trailing_var_arg = true,
+        allow_hyphen_values = true
+    )]
+    pub command: Vec<String>,
+}
+
+impl RunArgs {
+    /// The one-file app.
+    pub fn file(&self) -> PathBuf {
+        PathBuf::from(self.command.first().map_or("", String::as_str))
+    }
+
+    /// The arguments for the app: everything after the file, minus a leading `--`.
+    pub fn app_args(&self) -> Vec<String> {
+        let rest = self.command.get(1..).unwrap_or_default();
+        match rest.split_first() {
+            Some((dashes, after)) if dashes == "--" => after.to_vec(),
+            _ => rest.to_vec(),
+        }
+    }
+}
+
 /// Arguments of `zapline dev`.
 #[derive(Debug, Args)]
 pub struct DevArgs {
+    /// A one-file app to run instead of the project
+    #[arg(value_name = "FILE.rs", conflicts_with = "bin")]
+    pub file: Option<PathBuf>,
+
     /// Binary to run [default: the package's only binary]
     #[arg(long, value_name = "NAME")]
     pub bin: Option<String>,
@@ -383,6 +468,10 @@ pub struct DevArgs {
 /// Arguments of `zapline routes`.
 #[derive(Debug, Args)]
 pub struct RoutesArgs {
+    /// A one-file app instead of the project
+    #[arg(value_name = "FILE.rs", conflicts_with = "bin")]
+    pub file: Option<PathBuf>,
+
     /// Binary to run [default: the package's only binary]
     #[arg(long, value_name = "NAME")]
     pub bin: Option<String>,
@@ -481,7 +570,7 @@ mod tests {
             panic!()
         };
         assert_eq!(a.name, "my-app");
-        assert_eq!(a.template, Template::Api);
+        assert_eq!(a.template, None);
         assert_eq!(a.path, PathBuf::from("."));
         assert!(!a.no_git);
         assert!(a.zapline_path.is_none());
@@ -504,7 +593,7 @@ mod tests {
         else {
             panic!()
         };
-        assert_eq!(a.template, Template::Full);
+        assert_eq!(a.template, Some(Template::Full));
         assert_eq!(a.path, PathBuf::from("/tmp"));
         assert_eq!(a.zapline_path, Some(PathBuf::from("/z")));
         assert!(a.no_git);
@@ -552,6 +641,64 @@ mod tests {
         assert_eq!(d.bin.as_deref(), Some("server"));
         assert_eq!(d.app_args, ["--port", "9000"]);
         assert_eq!(d.debounce_ms, 300);
+    }
+
+    #[test]
+    fn run_passes_everything_after_the_file_to_the_app() {
+        for args in [
+            &["run", "app.rs", "--port", "9000"][..],
+            &["run", "app.rs", "--", "--port", "9000"][..],
+        ] {
+            let Command::Run(r) = parse(args).command else {
+                panic!()
+            };
+            assert_eq!(r.file(), PathBuf::from("app.rs"));
+            assert_eq!(r.app_args(), ["--port", "9000"], "{args:?}");
+            assert!(!r.release);
+        }
+        let Command::Run(r) = parse(&["run", "--release", "--print-manifest", "a.rs"]).command
+        else {
+            panic!()
+        };
+        assert!(r.release && r.print_manifest && r.app_args().is_empty());
+        assert_eq!(r.file(), PathBuf::from("a.rs"));
+        // Options after the file belong to the app.
+        let Command::Run(r) = parse(&["run", "a.rs", "--release"]).command else {
+            panic!()
+        };
+        assert!(!r.release);
+        assert_eq!(r.app_args(), ["--release"]);
+        // A later `--` is the app's.
+        let Command::Run(r) = parse(&["run", "a.rs", "x", "--", "y"]).command else {
+            panic!()
+        };
+        assert_eq!(r.app_args(), ["x", "--", "y"]);
+        assert!(Cli::try_parse_from(["zapline", "run"]).is_err());
+    }
+
+    #[test]
+    fn dev_routes_check_and_test_take_a_one_file_app() {
+        let Command::Dev(d) = parse(&["dev", "app.rs", "--", "--port", "1"]).command else {
+            panic!()
+        };
+        assert_eq!(d.file, Some(PathBuf::from("app.rs")));
+        assert_eq!(d.app_args, ["--port", "1"]);
+        assert!(Cli::try_parse_from(["zapline", "dev", "app.rs", "--bin", "x"]).is_err());
+        let Command::Routes(r) = parse(&["routes", "app.rs", "--json"]).command else {
+            panic!()
+        };
+        assert_eq!(r.file, Some(PathBuf::from("app.rs")));
+        let Command::Check { file, clippy } = parse(&["check", "app.rs"]).command else {
+            panic!()
+        };
+        assert_eq!((file, clippy), (Some(PathBuf::from("app.rs")), false));
+        let Command::Test { first, filter } = parse(&["test", "app.rs", "notes"]).command else {
+            panic!()
+        };
+        assert_eq!(
+            (first.as_deref(), filter.as_deref()),
+            (Some("app.rs"), Some("notes"))
+        );
     }
 
     #[test]

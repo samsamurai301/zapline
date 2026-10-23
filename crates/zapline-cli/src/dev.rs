@@ -12,6 +12,10 @@
 //!
 //! A project with `styles/app.css` (Tailwind) also gets `tailwindcss --watch`
 //! running alongside, rebuilding `static/app.css` as templates change.
+//!
+//! A one-file app (`zapline dev app.rs`, see [`crate::script`]) works the same
+//! way with the file itself as the only watched path: each save regenerates
+//! its hidden project (so header changes take effect) and rebuilds.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -26,6 +30,7 @@ use notify::{EventKind, RecursiveMode, Watcher};
 
 use crate::build::{self, BuildOutcome};
 use crate::project::Project;
+use crate::script::Script;
 use crate::ui;
 
 /// Directories watched recursively (when they exist).
@@ -260,6 +265,10 @@ fn install_signal_handlers() -> Result<Arc<AtomicBool>> {
 
 struct Dev<'a> {
     project: &'a Project,
+    /// Set for a one-file app: the file whose hidden project `project` is.
+    script: Option<&'a Script>,
+    /// The app's working directory.
+    run_dir: PathBuf,
     opts: &'a DevOptions,
     bin: String,
     app: Option<Child>,
@@ -276,8 +285,20 @@ impl Dev<'_> {
 
     /// Builds; on success replaces the running app with the new binary.
     fn rebuild_and_restart(&mut self, rx: &mpsc::Receiver<notify::Result<notify::Event>>) {
-        ui::status("Building", &self.bin);
-        let outcome = match build::build(self.project, &self.bin, self.opts.release) {
+        let outcome = match self.script {
+            Some(script) => {
+                ui::status("Building", &script.shown);
+                // Re-read the header first: a new dependency needs a new manifest.
+                script
+                    .materialize()
+                    .and_then(|m| script.build(&m, self.opts.release))
+            }
+            None => {
+                ui::status("Building", &self.bin);
+                build::build(self.project, &self.bin, self.opts.release)
+            }
+        };
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 ui::status_error("Failed", format!("{e:#}"));
@@ -329,8 +350,7 @@ impl Dev<'_> {
         }
         let shown = exe.strip_prefix(&self.project.root).unwrap_or(exe);
         let mut cmd = Command::new(exe);
-        cmd.args(&self.opts.app_args)
-            .current_dir(&self.project.root);
+        cmd.args(&self.opts.app_args).current_dir(&self.run_dir);
         // Dev mode: 500 responses carry the real error instead of a generic
         // message, so you (or your AI assistant) see what broke.
         if std::env::var_os("ZAPLINE_DEV").is_none() {
@@ -379,7 +399,11 @@ impl Dev<'_> {
                     if is_change(&event.kind) {
                         let now = Instant::now();
                         for path in event.paths {
-                            if is_relevant(&self.project.root, &path) {
+                            let relevant = match self.script {
+                                Some(script) => path == script.path,
+                                None => is_relevant(&self.project.root, &path),
+                            };
+                            if relevant {
                                 self.debounce.push(now, path);
                             }
                         }
@@ -446,6 +470,8 @@ pub fn run(project: &Project, opts: &DevOptions) -> Result<()> {
 
     let mut dev = Dev {
         project,
+        script: None,
+        run_dir: project.root.clone(),
         opts,
         bin,
         app: None,
@@ -465,23 +491,69 @@ pub fn run(project: &Project, opts: &DevOptions) -> Result<()> {
             Err(e) => ui::status_warn("Tailwind", format!("not running: {e:#}")),
         }
     }
-    dev.rebuild_and_restart(&rx);
-
-    while !dev.stopping() {
-        dev.collect_events(&rx, TICK);
-        // Ctrl-C reaches the app too; do not report that as a crash.
-        if dev.stopping() {
-            break;
-        }
-        dev.reap_exited();
-        if dev.debounce.is_ready(Instant::now()) {
-            let files = dev.debounce.take();
-            ui::status_info("Changed", describe_changes(&project.root, &files));
-            dev.rebuild_and_restart(&rx);
-        }
-    }
-    dev.finish();
+    dev.main_loop(&rx, &project.root);
     Ok(())
+}
+
+/// Runs the dev loop for a one-file app until interrupted. The app runs in the
+/// current directory, like `zapline run`.
+pub fn run_script(script: &Script, opts: &DevOptions) -> Result<()> {
+    // A broken header is reported before anything starts.
+    let materialized = script.materialize()?;
+    let run_dir = std::env::current_dir().context("cannot determine the current directory")?;
+    let shutdown = install_signal_handlers()?;
+
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = notify::recommended_watcher(move |res| {
+        let _ = tx.send(res);
+    })
+    .context("cannot start the file watcher")?;
+    // The directory, not the file: editors that save by renaming a temporary
+    // file over the original would otherwise end the watch after one save.
+    let dir = script
+        .path
+        .parent()
+        .context("the script has no parent directory")?;
+    watcher
+        .watch(dir, RecursiveMode::NonRecursive)
+        .with_context(|| format!("cannot watch {}", dir.display()))?;
+    ui::status_info("Watching", &script.shown);
+
+    let mut dev = Dev {
+        project: &materialized.project,
+        script: Some(script),
+        run_dir,
+        opts,
+        bin: script.bin.clone(),
+        app: None,
+        debounce: Debouncer::new(opts.debounce),
+        shutdown,
+        css: None,
+    };
+    dev.main_loop(&rx, dir);
+    Ok(())
+}
+
+impl Dev<'_> {
+    /// Builds and starts the app, then rebuilds after every settled burst of
+    /// changes until a shutdown signal arrives.
+    fn main_loop(&mut self, rx: &mpsc::Receiver<notify::Result<notify::Event>>, root: &Path) {
+        self.rebuild_and_restart(rx);
+        while !self.stopping() {
+            self.collect_events(rx, TICK);
+            // Ctrl-C reaches the app too; do not report that as a crash.
+            if self.stopping() {
+                break;
+            }
+            self.reap_exited();
+            if self.debounce.is_ready(Instant::now()) {
+                let files = self.debounce.take();
+                ui::status_info("Changed", describe_changes(root, &files));
+                self.rebuild_and_restart(rx);
+            }
+        }
+        self.finish();
+    }
 }
 
 #[cfg(test)]

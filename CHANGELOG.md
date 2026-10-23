@@ -107,4 +107,5 @@ The first public release.
 
 ### Tooling
 - The `zapline` CLI: `new` (minimal/api/full templates), `generate`, `dev` (live reload), `routes`, `openapi`, `doctor` and `bench`.
+- One-file apps: a whole app in a single `.rs` file with no `Cargo.toml`. `zapline new hello.rs` writes a starter, `zapline run app.rs` (or `./app.rs` through its shebang) builds and runs it, and `zapline dev`, `test`, `check` and `routes` take the file too. Dependencies go in a `//! ```cargo` block at the top (zapline, serde, serde_json and tokio are built in); header errors are reported at `file:line:col`. Each file gets a hidden project under `$XDG_CACHE_HOME/zapline` (or `~/.cache/zapline`), all of them share one target directory, and an unchanged file starts without running cargo.
 - A wrk benchmark harness comparing zapline with axum and actix-web, and an mdBook user guide.

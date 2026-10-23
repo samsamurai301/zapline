@@ -5,6 +5,7 @@
 # Getting started
 
 - [Quickstart](quickstart.md)
+- [One-file apps](one-file.md)
 - [Cheatsheet](cheatsheet.md)
 - [Project layout & the CLI](cli.md)
 - [Coming from FastAPI, Spring, NestJS, axum or actix](comparison.md)
