@@ -3,11 +3,11 @@
 {% block content %}
 <h1>Choose a new password</h1>
 
-<form hx-post="/reset">
+<form method="post" action="/reset?token={{ token }}" hx-post="/reset?token={{ token }}">
   {% block form %}
-  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
-  <input type="hidden" name="token" value="{{ token }}">
-  <label>New password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password" autofocus></label>
+  {% if errors._form %}<p role="alert" class="error">{{ errors._form }}</p>{% endif %}
+  <label>New password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password" autofocus{% if errors.password %} aria-invalid="true"{% endif %}></label>
+  {% if errors.password %}<small class="error">Password {{ errors.password }}</small>{% endif %}
   <button>Save and log in</button>
   {% endblock %}
 </form>

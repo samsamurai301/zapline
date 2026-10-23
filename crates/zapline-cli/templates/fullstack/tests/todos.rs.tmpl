@@ -55,6 +55,33 @@ async fn json_api_creates_and_lists() {
 }
 
 #[tokio::test]
+async fn invalid_htmx_post_re_renders_the_form_with_errors() {
+    let client = app(Database::sqlite_memory()).test();
+    let title = "x".repeat(201);
+    let res = client
+        .post("/todos")
+        .header("hx-request", "true")
+        .header("hx-trigger", "todo-form")
+        .header("hx-target", "todos")
+        .form(&[("title", title.as_str())])
+        .send()
+        .await;
+    assert_eq!(res.status(), 422);
+    // Swapped into the form, not the list.
+    assert_eq!(res.header("hx-retarget"), Some("#todo-form"));
+    let form = res.text();
+    assert!(
+        form.contains("Title length must be between 1 and 200"),
+        "{form}"
+    );
+    assert!(form.contains(&format!("value=\"{title}\"")), "{form}");
+    assert!(!form.contains("<h1>"), "{form}");
+
+    let todos: Vec<Todo> = client.get("/api/todos").send().await.json();
+    assert!(todos.is_empty());
+}
+
+#[tokio::test]
 async fn toggle_and_delete() {
     let client = app(Database::sqlite_memory()).test();
     let todo: Todo = client

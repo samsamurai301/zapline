@@ -6,6 +6,7 @@
 
 pub mod routes;
 
+use zapline::cookies::key_from_env;
 use zapline::db::{Database, DbCheck, Factory};
 use zapline::live::Live;
 use zapline::middleware::SecurityHeaders;
@@ -15,12 +16,21 @@ use zapline::prelude::*;
 /// Builds the application on top of `db`. `main` passes the real database;
 /// tests pass `Database::sqlite_memory()`.
 pub fn app(db: Database) -> App {
+    // Signs the session cookie. Release builds need SESSION_SECRET (32+
+    // random bytes, `openssl rand -base64 48`); debug builds use a dev key.
+    let key = key_from_env("SESSION_SECRET").unwrap_or_else(|e| panic!("{}", e.message()));
     App::new()
         // Browser hardening headers (nosniff, no framing, referrer policy).
         .wrap(SecurityHeaders::default())
         // Routes, recent requests, jobs and mail at /_dev (debug builds only).
         .dev_console()
         .database(db)
+        // Sessions in the database (table `zapline_sessions`). They carry
+        // flash messages: `flash.success("Saved")` before a redirect shows
+        // on the next page (see `flash` in templates/base.html).
+        .cookie_key(key)
+        // `Secure` cookies in release builds (HTTPS); plain HTTP while developing.
+        .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
         // Every table at /admin (debug builds only; `zapline g auth` opens it
         // to the accounts in ADMIN_EMAILS).
         .admin(|admin| admin)

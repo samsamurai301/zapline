@@ -34,16 +34,49 @@ pub fn html_sections(template: &str, html: bool) -> String {
     out
 }
 
-/// What `generate auth` writes, before touching the disk.
+/// Keeps (`keep`) or drops the `// @@<name>` ... `// <name>@@` sections of
+/// a template.
+pub fn named_sections(template: &str, name: &str, keep: bool) -> String {
+    let (open, close) = (format!("// @@{name}"), format!("// {name}@@"));
+    let mut out = String::with_capacity(template.len());
+    let mut inside = false;
+    for line in template.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed == open {
+            inside = true;
+        } else if trimmed == close {
+            inside = false;
+        } else if keep || !inside {
+            out.push_str(line);
+        }
+    }
+    out
+}
+
+/// Whether the app in `lib` (its `src/lib.rs`) already sets up sessions:
+/// the fullstack template does, so its flash messages work before auth.
+pub fn has_sessions(lib: &str) -> bool {
+    lib.contains(".database_sessions(") || lib.contains("SessionLayer")
+}
+
+/// What `generate auth` writes, before touching the disk. `own_sessions`:
+/// the auth module sets up the cookie key and sessions itself (the app
+/// doesn't yet).
 pub fn files(
     package: &str,
     krate: &str,
     dialect: Dialect,
     html: bool,
     with_test: bool,
+    own_sessions: bool,
     migration: &str,
 ) -> Result<Vec<OutputFile>> {
     let vars = [("crate_name", krate), ("package", package)];
+    let module = named_sections(
+        &html_sections(templates::AUTH, html),
+        "own_sessions",
+        own_sessions,
+    );
     let mut files = vec![
         OutputFile {
             path: PathBuf::from(format!("migrations/{migration}")),
@@ -55,7 +88,7 @@ pub fn files(
         },
         OutputFile {
             path: PathBuf::from("src/routes/auth.rs"),
-            contents: render(&html_sections(templates::AUTH, html), &vars)?,
+            contents: render(&module, &vars)?,
         },
     ];
     if html {
@@ -211,6 +244,7 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
         dialect,
         html,
         with_test,
+        !has_sessions(&lib),
         &migration,
     )?;
 
@@ -295,6 +329,7 @@ mod tests {
             Dialect::Sqlite,
             true,
             true,
+            false,
             "1_create_users.sql",
         )
         .unwrap();
@@ -318,6 +353,10 @@ mod tests {
         assert!(all[1].contents.contains("signup_form"));
         assert!(all[6].contents.contains("use my_app::app;"));
         assert!(all[0].contents.contains("CREATE TABLE password_resets"));
+        // The fullstack app already has sessions: auth doesn't add more.
+        assert!(!all[1].contents.contains("database_sessions"));
+        assert!(!all[1].contents.contains("key_from_env"));
+        assert!(all[1].contents.contains("ValidForm<Credentials>"));
 
         let api = files(
             "my-app",
@@ -325,12 +364,28 @@ mod tests {
             Dialect::Postgres,
             false,
             false,
+            true,
             "1_create_users.sql",
         )
         .unwrap();
         assert_eq!(api.len(), 2);
         assert!(api[0].contents.contains("BIGSERIAL"));
         assert!(!api[1].contents.contains("Views"));
+        assert!(!api[1].contents.contains("Flash"));
+        assert!(api[1].contents.contains(".database_sessions("));
+        assert!(api[1].contents.contains(".cookie_key(key)"));
         assert!(!api[1].contents.contains("@@"));
+    }
+
+    #[test]
+    fn named_sections_and_session_detection() {
+        let t = "a\n// @@own_sessions\nb\n// own_sessions@@\nc\n";
+        assert_eq!(named_sections(t, "own_sessions", true), "a\nb\nc\n");
+        assert_eq!(named_sections(t, "own_sessions", false), "a\nc\n");
+        assert!(has_sessions(
+            "App::new().database_sessions(|l| l.secure(true))"
+        ));
+        assert!(has_sessions(".wrap(SessionLayer::new(MemoryStore::new()))"));
+        assert!(!has_sessions("App::new().database(db)"));
     }
 }

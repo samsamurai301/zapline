@@ -264,6 +264,8 @@ pub struct Plan<'a> {
     pub dialect: Dialect,
     /// Generate an htmx page (the project has `templates/base.html`).
     pub html: bool,
+    /// The app has sessions, so the pages can set flash messages.
+    pub flash: bool,
     /// Crate name for the test's imports, when a test can be generated.
     pub test_crate: Option<&'a str>,
     /// Migration file name (`<timestamp>_create_<plural>.sql`).
@@ -287,6 +289,10 @@ pub fn files(plan: &Plan<'_>) -> Vec<OutputFile> {
         out.push(OutputFile {
             path: PathBuf::from(format!("templates/{}/index.html", n.plural)),
             contents: template(plan),
+        });
+        out.push(OutputFile {
+            path: PathBuf::from(format!("templates/{}/edit.html", n.plural)),
+            contents: edit_template(plan),
         });
     }
     if let Some(krate) = plan.test_crate {
@@ -376,8 +382,11 @@ fn module(plan: &Plan<'_>) -> String {
     s.push('\n');
     s.push_str("use zapline::db::{sqlx, Db, ListParams, Listing, Paged};\n");
     s.push_str("use zapline::prelude::*;\n");
+    if plan.html && plan.flash {
+        s.push_str("use zapline::session::Flash;\n");
+    }
     if plan.html {
-        s.push_str("use zapline::view::{context, HxRequest, Views};\n");
+        s.push_str("use zapline::view::{context, HxRequest, ValidForm, Views};\n");
     }
     s.push('\n');
 
@@ -463,7 +472,13 @@ fn module(plan: &Plan<'_>) -> String {
     // Mount.
     let mut handlers = vec!["list", "get_one", "create", "replace", "remove"];
     if plan.html {
-        handlers.extend(["index_page", "create_form", "remove_form"]);
+        handlers.extend([
+            "index_page",
+            "create_form",
+            "edit_page",
+            "update_form",
+            "remove_form",
+        ]);
     }
     let _ = writeln!(s, "/// Adds the {} routes.", n.human);
     let _ = writeln!(
@@ -484,6 +499,22 @@ fn module(plan: &Plan<'_>) -> String {
         t = n.plural,
         cols = cols.join(", "),
         vals = placeholders.join(", "),
+    );
+    let _ = writeln!(
+        s,
+        "async fn fetch(db: &Db, id: i64) -> Result<{p}> {{\n    \
+         let row = sqlx::query_as::<_, {p}>(\"SELECT {select_cols} FROM {t} WHERE id = $1\")\n        \
+         .bind(id)\n        .fetch_one(&**db)\n        .await?;\n    Ok(row)\n}}\n",
+        p = n.pascal,
+        t = n.plural,
+    );
+    let _ = writeln!(
+        s,
+        "async fn update(db: &Db, id: i64, new: &New{p}) -> Result<{p}> {{\n    \
+         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets} WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){binds}\n    .bind(id)\n    .fetch_one(&**db)\n    .await?;\n    Ok(row)\n}}\n",
+        p = n.pascal,
+        t = n.plural,
+        sets = sets.join(", "),
     );
     let _ = writeln!(
         s,
@@ -510,8 +541,7 @@ fn module(plan: &Plan<'_>) -> String {
         s,
         "/// Fetch one {h}.\n#[get(\"{api}/{{id}}\", tag = \"{t}\")]\n\
          async fn get_one(db: Db, Path(id): Path<i64>) -> Result<Json<{p}>> {{\n    \
-         let row = sqlx::query_as::<_, {p}>(\"SELECT {select_cols} FROM {t} WHERE id = $1\")\n        \
-         .bind(id)\n        .fetch_one(&*db)\n        .await?;\n    Ok(Json(row))\n}}\n",
+         Ok(Json(fetch(&db, id).await?))\n}}\n",
         h = n.human,
         p = n.pascal,
         t = n.plural,
@@ -529,11 +559,10 @@ fn module(plan: &Plan<'_>) -> String {
         s,
         "/// Replace {a}.\n#[put(\"{api}/{{id}}\", tag = \"{t}\")]\n\
          async fn replace(\n    db: Db,\n    Path(id): Path<i64>,\n    Valid(Json(new)): Valid<Json<New{p}>>,\n) -> Result<Json<{p}>> {{\n    \
-         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets} WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){binds}\n    .bind(id)\n    .fetch_one(&*db)\n    .await?;\n    Ok(Json(row))\n}}\n",
+         Ok(Json(update(&db, id, &new).await?))\n}}\n",
         a = n.a_human,
         p = n.pascal,
         t = n.plural,
-        sets = sets.join(", "),
     );
     let _ = writeln!(
         s,
@@ -548,13 +577,23 @@ fn module(plan: &Plan<'_>) -> String {
         s.push_str(
             "// ---- HTML (htmx) -----------------------------------------------------------\n\n",
         );
+        s.push_str(
+            "// Forms post with htmx (and work without JavaScript). A rejected form comes\n\
+             // back as a 422 with its `form` block re-rendered: a message next to each\n\
+             // field and the typed values kept.\n\n",
+        );
+        let _ = writeln!(
+            s,
+            "async fn items(db: &Db) -> Result<Vec<{p}>> {{\n    \
+             let page: Paged<{p}> = listing().page_size(200, 200).fetch(db, &ListParams::default()).await?;\n    \
+             Ok(page.items)\n}}\n",
+            p = n.pascal,
+        );
         let _ = writeln!(
             s,
             "async fn render(views: &Views, db: &Db, hx: &HxRequest) -> Result<Html<String>> {{\n    \
-             let page: Paged<{p}> = listing().page_size(200, 200).fetch(db, &ListParams::default()).await?;\n    \
-             let items = page.items;\n    \
+             let items = items(db).await?;\n    \
              views.page_or_block(hx, \"{t}/index.html\", \"list\", context! {{ items }})\n}}\n",
-            p = n.pascal,
             t = n.plural,
         );
         let _ = writeln!(
@@ -567,11 +606,60 @@ fn module(plan: &Plan<'_>) -> String {
         );
         let _ = writeln!(
             s,
-            "/// Add {a} from the page's form.\n#[post(\"{path}\", tag = \"pages\")]\n\
-             async fn create_form(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    Valid(Form(new)): Valid<Form<New{p}>>,\n) -> Result<Html<String>> {{\n    \
-             insert(&db, &new).await?;\n    render(&views, &db, &hx).await\n}}\n",
+            "/// Add {a} from the page's form: the new list, or the form again with\n\
+             /// what is wrong.\n#[post(\"{path}\", tag = \"pages\")]\n\
+             async fn create_form(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    ValidForm(form): ValidForm<New{p}>,\n) -> Result<Response> {{\n    \
+             let new = match form {{\n        Ok(new) => new,\n        Err(invalid) => {{\n            \
+             let items = items(&db).await?;\n            \
+             return views.render_invalid(\"{t}/index.html\", context! {{ items }}, invalid);\n        }}\n    }};\n    \
+             insert(&db, &new).await?;\n    Ok(render(&views, &db, &hx).await?.into_response())\n}}\n",
             a = n.a_human,
             p = n.pascal,
+            t = n.plural,
+            path = n.path,
+        );
+        let _ = writeln!(
+            s,
+            "/// The form to edit {a}.\n#[get(\"{path}/{{id}}/edit\", tag = \"pages\")]\n\
+             async fn edit_page(views: Views, db: Db, Path(id): Path<i64>) -> Result<Html<String>> {{\n    \
+             let item = fetch(&db, id).await?;\n    \
+             views.render(\"{t}/edit.html\", context! {{ item }})\n}}\n",
+            a = n.a_human,
+            t = n.plural,
+            path = n.path,
+        );
+        let human = capitalized(&n.human);
+        let (flash_arg, hx_arg, done) = if plan.flash {
+            (
+                "\n    flash: Flash,",
+                "",
+                format!(
+                    "flash.success(\"{human} saved.\");\n    Ok(flash.redirect(\"{}\"))",
+                    n.path
+                ),
+            )
+        } else {
+            (
+                "",
+                "\n    hx: HxRequest,",
+                format!(
+                    "if hx.htmx {{\n        Ok(zapline::view::Hx::redirect(\"{p}\").into_response())\n    }} else {{\n        Ok(Redirect::to(\"{p}\").into_response())\n    }}",
+                    p = n.path
+                ),
+            )
+        };
+        let _ = writeln!(
+            s,
+            "/// Save the edit form: back to the list{note}, or the form again\n\
+             /// with what is wrong.\n#[post(\"{path}/{{id}}\", tag = \"pages\")]\n\
+             async fn update_form(\n    views: Views,{flash_arg}{hx_arg}\n    db: Db,\n    Path(id): Path<i64>,\n    ValidForm(form): ValidForm<New{p}>,\n) -> Result<Response> {{\n    \
+             let item = fetch(&db, id).await?;\n    \
+             let new = match form {{\n        Ok(new) => new,\n        \
+             Err(invalid) => return views.render_invalid(\"{t}/edit.html\", context! {{ item }}, invalid),\n    }};\n    \
+             update(&db, id, &new).await?;\n    {done}\n}}\n",
+            note = if plan.flash { " with a flash message" } else { "" },
+            p = n.pascal,
+            t = n.plural,
             path = n.path,
         );
         let _ = writeln!(
@@ -586,46 +674,76 @@ fn module(plan: &Plan<'_>) -> String {
     s.trim_end().to_string() + "\n"
 }
 
-fn input(f: &Field) -> String {
-    let required = if f.optional { "" } else { " required" };
-    match f.ty {
-        FieldType::String => format!(
-            "<input name=\"{n}\" placeholder=\"{l}\" maxlength=\"200\"{required}>",
-            n = f.name,
-            l = f.label()
-        ),
-        FieldType::Text => format!(
-            "<textarea name=\"{n}\" placeholder=\"{l}\"{required}></textarea>",
-            n = f.name,
-            l = f.label()
-        ),
-        FieldType::Int => format!(
-            "<input name=\"{n}\" type=\"number\" step=\"1\" placeholder=\"{l}\"{required}>",
-            n = f.name,
-            l = f.label()
-        ),
-        FieldType::Float => format!(
-            "<input name=\"{n}\" type=\"number\" step=\"any\" placeholder=\"{l}\"{required}>",
-            n = f.name,
-            l = f.label()
-        ),
-        FieldType::Bool => format!(
-            "<label><input name=\"{n}\" type=\"checkbox\"> {l}</label>",
-            n = f.name,
-            l = f.label()
-        ),
+/// Where a form input gets its value from.
+#[derive(Clone, Copy)]
+enum Prefill {
+    /// The create form: what the user typed, after a rejected post.
+    Old,
+    /// The edit form: what the user typed, or else the stored row.
+    OldOrItem,
+}
+
+impl Prefill {
+    /// A MiniJinja expression for the value of `f`.
+    fn value(self, f: &Field) -> String {
+        let n = &f.name;
+        match (self, f.optional) {
+            (Prefill::Old, _) => format!("old.{n}"),
+            // `old` is empty (falsy) until a post is rejected.
+            (Prefill::OldOrItem, false) => format!("old.{n} if old else item.{n}"),
+            (Prefill::OldOrItem, true) => {
+                format!("old.{n} if old else (item.{n} if item.{n} is not none)")
+            }
+        }
     }
 }
 
-fn template(plan: &Plan<'_>) -> String {
-    let n = plan.names;
-    let title = {
-        let mut t = n.plural_human.clone();
-        if let Some(first) = t.get_mut(0..1) {
-            first.make_ascii_uppercase();
-        }
-        t
+/// The input for `f`, with its error message under it.
+fn input(f: &Field, prefill: Prefill) -> String {
+    let required = if f.optional { "" } else { " required" };
+    let (n, l) = (&f.name, f.label());
+    let value = prefill.value(f);
+    let invalid = format!("{{% if errors.{n} %}} aria-invalid=\"true\"{{% endif %}}");
+    let attr_value = format!("value=\"{{{{ {value} }}}}\"");
+    let field = match f.ty {
+        FieldType::String => format!(
+            "<input name=\"{n}\" placeholder=\"{l}\" aria-label=\"{l}\" maxlength=\"200\" {attr_value}{required}{invalid}>"
+        ),
+        FieldType::Text => format!(
+            "<textarea name=\"{n}\" placeholder=\"{l}\" aria-label=\"{l}\"{required}{invalid}>{{{{ {value} }}}}</textarea>"
+        ),
+        FieldType::Int => format!(
+            "<input name=\"{n}\" type=\"number\" step=\"1\" placeholder=\"{l}\" aria-label=\"{l}\" {attr_value}{required}{invalid}>"
+        ),
+        FieldType::Float => format!(
+            "<input name=\"{n}\" type=\"number\" step=\"any\" placeholder=\"{l}\" aria-label=\"{l}\" {attr_value}{required}{invalid}>"
+        ),
+        FieldType::Bool => format!(
+            "<label><input name=\"{n}\" type=\"checkbox\"{{% if ({value}) %}} checked{{% endif %}}> {l}</label>"
+        ),
     };
+    format!(
+        "{field}\n  {{% if errors.{n} %}}<small class=\"error\">{l} {{{{ errors.{n} }}}}</small>{{% endif %}}"
+    )
+}
+
+/// `id` of the create form, so a rejected post is swapped into the form
+/// rather than into the list it targets.
+fn form_id(plan: &Plan<'_>) -> String {
+    format!("{}-form", plan.names.singular.replace('_', "-"))
+}
+
+fn capitalized(s: &str) -> String {
+    let mut out = s.to_string();
+    if let Some(first) = out.get_mut(0..1) {
+        first.make_ascii_uppercase();
+    }
+    out
+}
+
+fn edit_template(plan: &Plan<'_>) -> String {
+    let n = plan.names;
+    let title = format!("Edit {}", n.human);
     let mut s = String::new();
     s.push_str("{% extends \"base.html\" %}\n");
     let _ = writeln!(s, "{{% block title %}}{title}{{% endblock %}}");
@@ -633,14 +751,41 @@ fn template(plan: &Plan<'_>) -> String {
     let _ = writeln!(s, "<h1>{title}</h1>\n");
     let _ = writeln!(
         s,
-        "<form hx-post=\"{p}\" hx-target=\"#{t}\" hx-on::after-request=\"if (event.detail.successful) this.reset()\">",
+        "<form method=\"post\" action=\"{p}/{{{{ item.id }}}}\" hx-post=\"{p}/{{{{ item.id }}}}\">\n  {{% block form %}}",
+        p = n.path,
+    );
+    for f in plan.fields {
+        let _ = writeln!(s, "  {}", input(f, Prefill::OldOrItem));
+    }
+    let _ = writeln!(
+        s,
+        "  <button>Save</button> <a href=\"{}\">Cancel</a>\n  {{% endblock %}}\n</form>\n{{% endblock %}}",
+        n.path
+    );
+    s
+}
+
+fn template(plan: &Plan<'_>) -> String {
+    let n = plan.names;
+    let title = capitalized(&n.plural_human);
+    let mut s = String::new();
+    s.push_str("{% extends \"base.html\" %}\n");
+    let _ = writeln!(s, "{{% block title %}}{title}{{% endblock %}}");
+    s.push_str("{% block content %}\n");
+    let _ = writeln!(s, "<h1>{title}</h1>\n");
+    s.push_str("{# A rejected post re-renders the `form` block here (422), not the list. #}\n");
+    let _ = writeln!(
+        s,
+        "<form id=\"{id}\" method=\"post\" action=\"{p}\" hx-post=\"{p}\" hx-target=\"#{t}\"\n      \
+         hx-on::after-request=\"if (event.detail.xhr.status < 300) {{ this.reset(); this.querySelectorAll('.error').forEach((e) => e.remove()) }}\">\n  {{% block form %}}",
+        id = form_id(plan),
         p = n.path,
         t = n.plural
     );
     for f in plan.fields {
-        let _ = writeln!(s, "  {}", input(f));
+        let _ = writeln!(s, "  {}", input(f, Prefill::Old));
     }
-    s.push_str("  <button>Add</button>\n</form>\n\n");
+    s.push_str("  <button>Add</button>\n  {% endblock %}\n</form>\n\n");
     s.push_str("<table>\n  <thead><tr>");
     for f in plan.fields {
         let _ = write!(s, "<th>{}</th>", f.label());
@@ -658,7 +803,7 @@ fn template(plan: &Plan<'_>) -> String {
     }
     let _ = writeln!(
         s,
-        "<td><button class=\"link\" hx-delete=\"{p}/{{{{ item.id }}}}\" hx-target=\"#{t}\" aria-label=\"Delete\">✕</button></td></tr>",
+        "<td><a href=\"{p}/{{{{ item.id }}}}/edit\">Edit</a> <button class=\"link\" hx-delete=\"{p}/{{{{ item.id }}}}\" hx-target=\"#{t}\" aria-label=\"Delete\">✕</button></td></tr>",
         p = n.path,
         t = n.plural
     );
@@ -752,8 +897,135 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
              assert!(res.text().contains(\"<table>\"));\n}}\n",
             n.path
         );
+        html_tests(plan, &mut s);
     }
     s.trim_end().to_string() + "\n"
+}
+
+/// A value for an HTML form post.
+fn sample_form(f: &Field) -> &'static str {
+    match f.ty {
+        FieldType::String => "Example",
+        FieldType::Text => "Some longer text.",
+        FieldType::Int => "42",
+        FieldType::Float => "1.5",
+        FieldType::Bool => "on",
+    }
+}
+
+/// A field to get wrong in a form post, the bad value and the message the
+/// page then shows.
+fn breakable<'a>(plan: &Plan<'a>) -> Option<(&'a Field, &'static str, String)> {
+    let required_string = plan
+        .fields
+        .iter()
+        .find(|f| f.ty == FieldType::String && !f.optional);
+    if let Some(f) = required_string {
+        return Some((
+            f,
+            "",
+            format!("{} length must be between 1 and 200", f.label()),
+        ));
+    }
+    plan.fields
+        .iter()
+        .find(|f| matches!(f.ty, FieldType::Int | FieldType::Float))
+        .map(|f| (f, "abc", format!("{} must be a number", f.label())))
+}
+
+/// `&[("title", "Example"), ...]`, with `broken` set to `bad`.
+fn form_pairs(plan: &Plan<'_>, broken: Option<(&str, &str)>) -> String {
+    let pairs: Vec<String> = plan
+        .fields
+        .iter()
+        .map(|f| {
+            let value = match broken {
+                Some((name, bad)) if name == f.name => bad,
+                _ => sample_form(f),
+            };
+            format!("(\"{}\", \"{value}\")", f.name)
+        })
+        .collect();
+    format!("&[{}]", pairs.join(", "))
+}
+
+/// Tests for the pages: a rejected htmx post comes back with the messages
+/// in the form, and the edit form saves (with a flash, given sessions).
+fn html_tests(plan: &Plan<'_>, s: &mut String) {
+    let n = plan.names;
+    let api = api_path(plan);
+    let body: Vec<String> = plan
+        .fields
+        .iter()
+        .map(|f| format!("\"{}\": {}", f.name, f.sample_json()))
+        .collect();
+    let body = format!("{{{}}}", body.join(", "));
+    let id = form_id(plan);
+    if let Some((field, bad, message)) = breakable(plan) {
+        let pairs = form_pairs(plan, Some((&field.name, bad)));
+        let _ = writeln!(
+            s,
+            "#[tokio::test]\nasync fn invalid_htmx_post_re_renders_the_form_with_errors() {{\n    \
+             let client = app(Database::sqlite_memory()).test();\n    \
+             let res = client\n        .post(\"{path}\")\n        .header(\"hx-request\", \"true\")\n        \
+             .header(\"hx-trigger\", \"{id}\")\n        .header(\"hx-target\", \"{t}\")\n        \
+             .form({pairs})\n        .send()\n        .await;\n    \
+             assert_eq!(res.status(), 422);\n    \
+             // Swapped into the form, not the list it targets.\n    \
+             assert_eq!(res.header(\"hx-retarget\"), Some(\"#{id}\"));\n    \
+             let form = res.text();\n    \
+             assert!(form.contains(\"{message}\"), \"{{form}}\");\n    \
+             assert!(form.contains(\"value=\\\"{bad}\\\"\"), \"{{form}}\");\n    \
+             assert!(!form.contains(\"<table>\"), \"{{form}}\");\n    \
+             let list: Value = client.get(\"{api}\").send().await.json();\n    \
+             assert_eq!(list[\"total\"], 0);\n}}\n",
+            path = n.path,
+            t = n.plural,
+        );
+    }
+    let mut edit = format!(
+        "#[tokio::test]\nasync fn edit_form_saves_or_shows_the_errors() {{\n    \
+         let client = app(Database::sqlite_memory()).test().with_cookies();\n    \
+         let created: Value = client.post(\"{api}\").json(&json!({body})).send().await.json();\n    \
+         let id = created[\"id\"].as_i64().unwrap();\n    \
+         let page = client.get(&format!(\"{path}/{{id}}/edit\")).send().await;\n    \
+         assert_eq!(page.status(), 200);\n    \
+         assert!(page.text().contains(\"{sample}\"), \"{{}}\", page.text());\n\n",
+        path = n.path,
+        sample = sample_form(&plan.fields[0]),
+    );
+    if let Some((field, bad, message)) = breakable(plan) {
+        let pairs = form_pairs(plan, Some((&field.name, bad)));
+        let _ = write!(
+            edit,
+            "    let res = client.post(&format!(\"{path}/{{id}}\")).form({pairs}).send().await;\n    \
+             assert_eq!(res.status(), 422);\n    \
+             assert!(res.text().contains(\"{message}\"), \"{{}}\", res.text());\n\n",
+            path = n.path,
+        );
+    }
+    let pairs = form_pairs(plan, None);
+    let _ = write!(
+        edit,
+        "    let res = client.post(&format!(\"{path}/{{id}}\")).form({pairs}).send().await;\n    \
+         assert_eq!(res.status(), 303);\n    \
+         assert_eq!(res.header(\"location\"), Some(\"{path}\"));\n",
+        path = n.path,
+    );
+    if plan.flash {
+        let _ = write!(
+            edit,
+            "    // The list page shows the flash message once.\n    \
+             let html = client.get(\"{path}\").send().await.text();\n    \
+             assert!(html.contains(\"{human} saved.\"), \"{{html}}\");\n    \
+             let html = client.get(\"{path}\").send().await.text();\n    \
+             assert!(!html.contains(\"{human} saved.\"), \"{{html}}\");\n",
+            path = n.path,
+            human = capitalized(&n.human),
+        );
+    }
+    edit.push_str("}\n");
+    s.push_str(&edit);
 }
 
 #[cfg(test)]
@@ -795,6 +1067,7 @@ mod tests {
             fields: &fields,
             dialect: Dialect::Sqlite,
             html: false,
+            flash: false,
             test_crate: None,
             migration_name: "1_create_blog_posts.sql".into(),
         };
@@ -817,6 +1090,7 @@ mod tests {
             fields: &fields,
             dialect: Dialect::Sqlite,
             html: true,
+            flash: true,
             test_crate: Some("demo"),
             migration_name: "1_create_blog_posts.sql".into(),
         };
@@ -830,11 +1104,62 @@ mod tests {
                 "migrations/1_create_blog_posts.sql",
                 "src/routes/blog_posts.rs",
                 "templates/blog_posts/index.html",
+                "templates/blog_posts/edit.html",
                 "tests/blog_posts.rs"
             ]
         );
         let module = module(&plan);
         assert!(module.contains("#[get(\"/api/blog-posts\""));
         assert!(module.contains("#[get(\"/blog-posts\", tag = \"pages\")]"));
+    }
+
+    #[test]
+    fn forms_show_errors_and_old_values_and_edits_flash() {
+        let names = names();
+        let fields =
+            parse_fields(&["title".into(), "done:bool".into(), "score:float?".into()]).unwrap();
+        let mut plan = Plan {
+            names: &names,
+            fields: &fields,
+            dialect: Dialect::Sqlite,
+            html: true,
+            flash: true,
+            test_crate: Some("demo"),
+            migration_name: "1_create_blog_posts.sql".into(),
+        };
+        let index = template(&plan);
+        assert!(index.contains("<form id=\"blog-post-form\""), "{index}");
+        assert!(index.contains("value=\"{{ old.title }}\""), "{index}");
+        assert!(index.contains(
+            "{% if errors.title %}<small class=\"error\">Title {{ errors.title }}</small>{% endif %}"
+        ));
+        assert!(
+            index.contains("{% if (old.done) %} checked{% endif %}"),
+            "{index}"
+        );
+        let edit = edit_template(&plan);
+        assert!(
+            edit.contains("value=\"{{ old.title if old else item.title }}\""),
+            "{edit}"
+        );
+        assert!(edit.contains(
+            "value=\"{{ old.score if old else (item.score if item.score is not none) }}\""
+        ));
+        assert!(edit.contains("{% block form %}"));
+
+        let src = module(&plan);
+        assert!(src.contains("ValidForm(form): ValidForm<NewBlogPost>"));
+        assert!(src.contains("views.render_invalid(\"blog_posts/index.html\""));
+        assert!(src.contains("flash.success(\"Blog post saved.\");"));
+        let test = test(&plan, "demo");
+        assert!(test.contains("async fn invalid_htmx_post_re_renders_the_form_with_errors()"));
+        assert!(test.contains("Title length must be between 1 and 200"));
+        assert!(test.contains("Blog post saved."));
+
+        // Without sessions: a plain redirect, no flash.
+        plan.flash = false;
+        let src = module(&plan);
+        assert!(!src.contains("Flash"));
+        assert!(src.contains("Redirect::to(\"/blog-posts\")"));
     }
 }

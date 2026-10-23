@@ -8,7 +8,7 @@
 use zapline::db::{sqlx, Db};
 use zapline::live::Live;
 use zapline::prelude::*;
-use zapline::view::{context, HxRequest, Views};
+use zapline::view::{context, HxRequest, ValidForm, Views};
 
 /// A todo item.
 #[model]
@@ -90,17 +90,25 @@ async fn live_updates(live: Live) -> Response {
     live.sse("todos").into_response()
 }
 
-/// Add a todo from the page's form.
+/// Add a todo from the page's form. Invalid input gets the form back (422)
+/// with the message under the field and the text kept.
 #[post("/todos", tag = "pages")]
 async fn create_form(
     views: Views,
     db: Db,
     hx: HxRequest,
     live: Live,
-    Valid(Form(new)): Valid<Form<NewTodo>>,
-) -> Result<Html<String>> {
+    ValidForm(form): ValidForm<NewTodo>,
+) -> Result<Response> {
+    let new = match form {
+        Ok(new) => new,
+        Err(invalid) => {
+            let todos = all(&db).await?;
+            return views.render_invalid("todos/index.html", context! { todos }, invalid);
+        }
+    };
     insert(&db, new.title.trim()).await?;
-    changed(&views, &db, &hx, &live).await
+    Ok(changed(&views, &db, &hx, &live).await?.into_response())
 }
 
 /// Flip a todo between done and not done.

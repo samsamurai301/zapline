@@ -8,9 +8,32 @@
   <link rel="stylesheet" href="{{ asset('app.css') }}">
   <script src="https://unpkg.com/htmx.org@2.0.4/dist/htmx.min.js" defer></script>
   <script src="https://unpkg.com/htmx-ext-sse@2.2.2/sse.js" defer></script>
+  <script>
+    // A rejected form comes back as 422 with the form re-rendered (errors
+    // next to each field): swap it in like a success.
+    document.addEventListener("htmx:beforeSwap", (e) => {
+      if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
+    });
+    // Flash messages for htmx requests answered in place arrive as an
+    // `HX-Trigger: {"flash": ...}` event: show them like the ones below.
+    document.addEventListener("flash", (e) => {
+      const box = document.getElementById("flash");
+      for (const m of e.detail.messages || []) {
+        const p = document.createElement("p");
+        p.className = "flash flash-" + m.level;
+        p.setAttribute("role", "status");
+        p.textContent = m.message;
+        box.append(p);
+        setTimeout(() => p.remove(), 5000);
+      }
+    });
+  </script>
 </head>
 <body>
   <main>
+    <div id="flash" aria-live="polite">
+      {% for m in flash %}<p class="flash flash-{{ m.level }}" role="status">{{ m.message }}</p>{% endfor %}
+    </div>
     {% block content %}{% endblock %}
   </main>
 </body>

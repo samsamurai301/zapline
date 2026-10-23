@@ -24,7 +24,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use zapline::auth::oauth::{OAuth, OAuthLogin};
 use zapline::auth::password;
+// @@own_sessions
 use zapline::cookies::key_from_env;
+// own_sessions@@
 use zapline::db::{sqlx, Db};
 use zapline::extract::FromRequestParts;
 use zapline::mail::{Email, Mailer};
@@ -34,7 +36,8 @@ use zapline::prelude::*;
 use zapline::session::Session;
 use zapline::tasks::BackgroundTasks;
 // @@html
-use zapline::view::{context, Hx, Views};
+use zapline::session::Flash;
+use zapline::view::{context, FormErrors, HxRequest, Invalid, ValidForm, Views};
 // html@@
 
 /// Session key holding the logged-in user's id.
@@ -162,15 +165,21 @@ fn login_required() -> Error {
 
 /// Adds sessions, the mailer and the account routes.
 pub fn mount(app: App) -> App {
+    // @@own_sessions
     let key = key_from_env("SESSION_SECRET").unwrap_or_else(|e| panic!("{}", e.message()));
+    // own_sessions@@
     let mailer = Mailer::from_env().unwrap_or_else(|e| panic!("{}", e.message()));
     let mut app = app
+        // @@own_sessions
         .cookie_key(key)
+        // own_sessions@@
         // Form posts and fetches from other sites can't act with a user's
         // session cookie (403): CSRF protection without tokens in forms.
         .wrap(SameOrigin::new())
+        // @@own_sessions
         // `Secure` cookies in release builds (HTTPS); plain HTTP while developing.
         .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
+        // own_sessions@@
         .mailer(mailer)
         // Sign-up, log-in and password resets, rate-limited per client.
         .nest(
@@ -470,6 +479,11 @@ async fn reset(
 // @@html
 
 // ---- HTML (htmx) ---------------------------------------------------------------
+//
+// Each form posts with htmx (and works without JavaScript too). A rejected
+// form comes back as a 422 with its `form` block re-rendered: a message next
+// to each field and the email still filled in (passwords are never echoed).
+// Success sets a flash message and redirects, so the next page shows it.
 
 /// The sign-up page.
 #[get("/signup", tag = "pages")]
@@ -483,19 +497,32 @@ async fn login_page(views: Views, State(social): State<SocialLogins>) -> Result<
     views.render("auth/login.html", context! { providers => social.0 })
 }
 
-/// Sign up from the page's form: go home, or show what went wrong.
+/// Sign up from the page's form: go home, or show the form again.
 #[post("/signup", tag = "pages")]
 async fn signup_form(
     views: Views,
     db: Db,
     session: Session,
-    Form(creds): Form<Credentials>,
+    flash: Flash,
+    State(social): State<SocialLogins>,
+    ValidForm(form): ValidForm<Credentials>,
 ) -> Result<Response> {
-    let result = match creds.validate() {
-        Ok(()) => register(&db, &session, &creds).await.map(|_| ()),
-        Err(_) => Err(Error::unprocessable("enter a valid email and a password of at least 8 characters")),
+    let ctx = context! { providers => social.0 };
+    let creds = match form {
+        Ok(creds) => creds,
+        Err(invalid) => return views.render_invalid("auth/signup.html", ctx, invalid),
     };
-    form_result(&views, "auth/signup.html", &creds.email, result)
+    match register(&db, &session, &creds).await {
+        Ok(user) => {
+            flash.success(format!("Welcome, {}!", user.email));
+            Ok(flash.redirect("/"))
+        }
+        Err(e) if e.code() == Some("email_taken") => {
+            let errors = FormErrors::one("email", "is already registered");
+            views.render_invalid("auth/signup.html", ctx, Invalid::new(errors, &creds))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Log in from the page's form.
@@ -504,17 +531,34 @@ async fn login_form(
     views: Views,
     db: Db,
     session: Session,
-    Form(creds): Form<Credentials>,
+    flash: Flash,
+    State(social): State<SocialLogins>,
+    ValidForm(form): ValidForm<Credentials>,
 ) -> Result<Response> {
-    let result = authenticate(&db, &session, &creds).await.map(|_| ());
-    form_result(&views, "auth/login.html", &creds.email, result)
+    let ctx = context! { providers => social.0 };
+    let creds = match form {
+        Ok(creds) => creds,
+        Err(invalid) => return views.render_invalid("auth/login.html", ctx, invalid),
+    };
+    match authenticate(&db, &session, &creds).await {
+        Ok(_) => {
+            flash.success("You are logged in.");
+            Ok(flash.redirect("/"))
+        }
+        // "wrong email or password", above the fields.
+        Err(e) if e.status().is_client_error() => {
+            views.render_invalid("auth/login.html", ctx, Invalid::new(FormErrors::from_error(&e), &creds))
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Log out and go to the log-in page.
 #[post("/logout", tag = "pages")]
-async fn logout_form(session: Session) -> Response {
+async fn logout_form(session: Session, flash: Flash) -> Response {
     session.destroy();
-    Hx::redirect("/login").into_response()
+    flash.info("You are logged out.");
+    flash.redirect("/login")
 }
 
 /// The "forgot your password?" page.
@@ -530,14 +574,16 @@ async fn forgot_form(
     db: Db,
     mail: Mailer,
     tasks: BackgroundTasks,
-    Form(form): Form<ForgotPassword>,
-) -> Result<Html<String>> {
-    if form.validate().is_err() {
-        let error = "enter a valid email";
-        return views.render_block("auth/forgot.html", "form", context! { error, email => form.email });
-    }
+    hx: HxRequest,
+    ValidForm(form): ValidForm<ForgotPassword>,
+) -> Result<Response> {
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("auth/forgot.html", context! {}, invalid),
+    };
     send_reset_link(&db, &mail, &tasks, &form.email).await?;
-    views.render_block("auth/forgot.html", "form", context! { sent => true, email => form.email })
+    let ctx = context! { sent => true, email => form.email };
+    Ok(views.page_or_block(&hx, "auth/forgot.html", "form", ctx)?.into_response())
 }
 
 /// The link in the reset email: a form for the new password.
@@ -552,40 +598,36 @@ pub struct ResetLink {
     pub token: String,
 }
 
+/// The new password, from the reset page's form (the token stays in the URL).
+#[model]
+pub struct NewPassword {
+    #[validate(length(min = 8, max = 128))]
+    pub password: String,
+}
+
 /// Set the new password from the page's form, then go home logged in.
 #[post("/reset", tag = "pages")]
 async fn reset_form(
     views: Views,
     db: Db,
     session: Session,
-    Form(form): Form<ResetPassword>,
+    flash: Flash,
+    Query(link): Query<ResetLink>,
+    ValidForm(form): ValidForm<NewPassword>,
 ) -> Result<Response> {
-    let result = match form.validate() {
-        Ok(()) => reset_password(&db, &session, &form).await.map(|_| ()),
-        Err(_) => Err(Error::unprocessable("choose a password of at least 8 characters")),
+    let ctx = context! { token => &link.token };
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("auth/reset.html", ctx, invalid),
     };
-    match result {
-        Ok(()) => Ok(Hx::redirect("/").into_response()),
-        Err(e) if e.status().is_client_error() => {
-            let error = e.message().to_string();
-            Ok(views
-                .render_block("auth/reset.html", "form", context! { error, token => form.token })?
-                .into_response())
+    let new_password = ResetPassword { token: link.token.clone(), password: form.password };
+    match reset_password(&db, &session, &new_password).await {
+        Ok(_) => {
+            flash.success("Your password is changed and you are logged in.");
+            Ok(flash.redirect("/"))
         }
-        Err(e) => Err(e),
-    }
-}
-
-/// Success sends htmx home; a client error re-renders the form's `form`
-/// block with the message (status 200, so htmx swaps it in).
-fn form_result(views: &Views, template: &str, email: &str, result: Result<()>) -> Result<Response> {
-    match result {
-        Ok(()) => Ok(Hx::redirect("/").into_response()),
         Err(e) if e.status().is_client_error() => {
-            let error = e.message().to_string();
-            Ok(views
-                .render_block(template, "form", context! { error, email })?
-                .into_response())
+            views.render_invalid("auth/reset.html", ctx, Invalid { errors: FormErrors::from_error(&e), ..Invalid::default() })
         }
         Err(e) => Err(e),
     }

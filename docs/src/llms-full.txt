@@ -353,8 +353,8 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 
 | Command | What it does |
 |---|---|
-| `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, and a JSON API. |
-| `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, an htmx page (when `templates/base.html` exists) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
+| `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, database sessions with flash messages, and a JSON API. |
+| `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, htmx pages (when `templates/base.html` exists: a list with a create form and an edit form; rejected posts come back with a message per field, saves set a flash message) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
 | `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
@@ -3358,7 +3358,7 @@ zapline g auth
 |---|---|
 | `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
 | `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
-| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
 | `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
 It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.

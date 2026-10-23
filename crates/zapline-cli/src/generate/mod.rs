@@ -346,6 +346,8 @@ fn sql_resource(
         fields: &fields,
         dialect,
         html,
+        // Flash messages need sessions: the fullstack template and `g auth` add them.
+        flash: auth::has_sessions(&lib) || project.root.join("src/routes/auth.rs").is_file(),
         test_crate: testable.then_some(krate.as_str()),
         // Regenerating (--force) rewrites the existing migration instead of adding a second one.
         migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))

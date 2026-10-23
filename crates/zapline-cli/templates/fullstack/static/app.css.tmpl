@@ -4,6 +4,13 @@ main { max-width: 40rem; }
 #todos li.done label { text-decoration: line-through; opacity: .6; }
 #todos li.empty { opacity: .6; }
 button.link { background: none; border: none; color: inherit; padding: .25rem .5rem; width: auto; }
-form { display: flex; gap: .5rem; }
+form { display: flex; gap: .5rem; flex-wrap: wrap; }
 form input { flex: 1; }
 form button { width: auto; }
+form small.error, form .error { flex-basis: 100%; }
+.error { color: #c62828; }
+.flash { padding: .5rem .75rem; border-radius: .25rem; border-left: .25rem solid; }
+.flash-success { border-color: #2e7d32; }
+.flash-error { border-color: #c62828; }
+.flash-warning { border-color: #ef6c00; }
+.flash-info { border-color: #1565c0; }
