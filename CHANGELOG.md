@@ -86,6 +86,7 @@ The first public release.
 - Thread-per-core runtimes with `SO_REUSEPORT`, or a work-stealing runtime.
 - Graceful shutdown on SIGINT/SIGTERM with a drain timeout. Custom shutdown triggers.
 - HTTP/2 (h2c and ALPN), TLS via rustls, Unix domain sockets, connection limits and header limits.
+- Upgraded WebSockets count against `max_connections`, or a separate `ServerConfig::max_upgraded` (excess upgrades get a 503 `ws_too_many_connections` with `Retry-After: 1`). Graceful shutdown waits for open sockets: each sends a 1001 close frame on its next read or write, upgrades during shutdown get a 503 `ws_shutting_down`, and callbacks still running at `shutdown_timeout` are dropped. The hyper 1.12 `pipeline_flush` bug that drops 400/431 responses for malformed heads is documented with an upstream issue draft (`docs/src/upstream-issues.md`) and a canary test.
 
 ### API documentation and validation
 - OpenAPI 3.1 generated from handler signatures, doc comments and macro arguments. Security requirements come from auth extractors and policies.

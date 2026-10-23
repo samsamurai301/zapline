@@ -7,7 +7,7 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Area | State |
 |---|---|
 | Core: routing, extractors, errors, middleware, lifecycle, plugins, test client (browser-like cookie jar and origins) | done |
-| Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits | done |
+| Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits (WebSockets included in `max_connections`/`max_upgraded` and the drain) | done |
 | OpenAPI 3.1 and docs UIs, validation | done |
 | DI, layered config, background tasks, cron schedules, durable and cluster-wide cron jobs, job metrics | done |
 | Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed, session-bound) | done |
@@ -22,8 +22,7 @@ Run `./scripts/check.sh` to verify everything locally.
 
 ## Deferred, with reasons
 
-- **WebSocket connections and `max_connections`/drain.** Upgraded connections release their connection slot at upgrade, and the shutdown drain doesn't track them. Fixing this means wrapping every connection's IO type. That needs a careful, measured change: an earlier change of that kind cost about 2% of instructions per request by blocking LTO inlining. Documented in `docs/src/server.md`.
-- **hyper 1.12 + `pipeline_flush`.** Malformed or oversized request heads close the connection without the 400/431 response. This is an upstream issue; `ServerConfig::pipeline_flush = false` works around it. Report it upstream and re-test on new hyper releases.
+- **hyper 1.12 + `pipeline_flush`.** Malformed or oversized request heads close the connection without the 400/414/431 response, and buffered responses to earlier pipelined requests are lost with it. zapline can't answer for hyper: only hyper knows what was in its dropped write buffer, so a zapline-written 400 could answer the wrong pipelined request. The cause and a verified two-line fix are in the issue draft in `docs/src/upstream-issues.md`: file it, and re-test on new hyper releases (the canary test `hyper_drops_automatic_error_responses_with_pipeline_flush` fails once it is fixed). Until then `ServerConfig::pipeline_flush = false` works around it.
 - **OpenAPI:** credential schemes are matched by kind only. A custom `ApiKeyConfig` header name isn't visible at build time, so declare `api_key_auth(name, header)` explicitly.
 
 ## Next milestones

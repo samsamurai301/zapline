@@ -7,7 +7,9 @@
 //! and the Unix-socket and TLS paths are only reachable through function
 //! pointers created by `App::run_unix` and `TlsConfig`: binaries that never
 //! use them do not contain them, and keep the fast single-instantiation
-//! HTTP/1.1 path.
+//! HTTP/1.1 path. For the same reason upgraded (WebSocket) connections are
+//! accounted for from the handler (`server::upgrade`), never by wrapping
+//! the IO type here.
 
 use std::future::poll_fn;
 use std::future::Future;
@@ -18,11 +20,11 @@ use std::sync::Arc;
 use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
+use super::limit::{Limit, Permit};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 #[cfg(feature = "http2")]
 use hyper::server::conn::http2;
@@ -347,8 +349,7 @@ use idle::{Activity, IdleH2, Tracked};
 
 /// Serves one TLS connection from a stream of type `I`.
 #[cfg(feature = "tls")]
-pub(crate) type TlsServe<I> =
-    fn(I, Service, Arc<Proto>, Slot, Option<OwnedSemaphorePermit>) -> BoxFuture<()>;
+pub(crate) type TlsServe<I> = fn(I, Service, Arc<Proto>, Slot, Option<Permit>) -> BoxFuture<()>;
 
 /// The TLS serving code, one entry per stream type. Only `TlsConfig`
 /// creates it, so apps without TLS do not contain that code at all.
@@ -377,7 +378,7 @@ fn serve_tls<I: Accepted>(
     service: Service,
     proto: Arc<Proto>,
     slot: Slot,
-    permit: Option<OwnedSemaphorePermit>,
+    permit: Option<Permit>,
 ) -> BoxFuture<()> {
     Box::pin(async move {
         proto.serve_tls(io, service, slot).await;
@@ -507,7 +508,7 @@ impl Proto {
         io: I,
         service: Service,
         mut slot: Slot,
-        permit: Option<OwnedSemaphorePermit>,
+        permit: Option<Permit>,
     ) {
         let Some(h2) = &self.http2 else { return };
         let detect = within(self.detect_timeout, io.detect_h2());
@@ -582,26 +583,36 @@ pub(crate) struct Worker {
     app: Arc<AppInner>,
     proto: Arc<Proto>,
     signal: Signal,
-    max_connections: Option<usize>,
+    limit: Option<Arc<Limit>>,
     shutdown_timeout: Duration,
     /// `ServerConfig::drain_grace` is not zero.
     drain_grace: bool,
 }
 
 impl Worker {
+    /// Serves a per-worker copy of `app` (see [`AppInner::for_worker`]).
+    /// With the `ws` feature that copy also carries this accept loop's
+    /// upgrade accounting.
     pub(crate) fn new(
-        app: Arc<AppInner>,
+        app: &AppInner,
         proto: &Proto,
         config: &ServerConfig,
         signal: Signal,
     ) -> Worker {
+        let limit = config.max_connections.map(Limit::new);
+        #[cfg(feature = "ws")]
+        let upgrades =
+            super::upgrade::Upgrades::new(signal.clone(), limit.clone(), config.max_upgraded);
         Worker {
-            app,
+            app: Arc::new(app.for_worker(
+                #[cfg(feature = "ws")]
+                Some(upgrades),
+            )),
             // Each worker gets its own copy so per-connection refcounting
             // stays core-local.
             proto: Arc::new(proto.clone()),
             signal,
-            max_connections: config.max_connections,
+            limit,
             shutdown_timeout: config.shutdown_timeout,
             drain_grace: !config.drain_grace.is_zero(),
         }
@@ -612,19 +623,15 @@ impl Worker {
 pub(crate) async fn serve<L: Listen>(listener: L, worker: Worker) -> io::Result<()> {
     let local_addr = listener.local_addr();
     let secure = worker.proto.is_tls();
-    let limit = worker.max_connections.map(|n| Arc::new(Semaphore::new(n)));
     let mut stop = worker.signal.register();
 
     let result = loop {
-        let permit = match &limit {
+        let permit = match &worker.limit {
             None => None,
-            Some(sem) => tokio::select! {
+            Some(limit) => tokio::select! {
                 biased;
                 () = stop.stopped() => break Ok(()),
-                p = sem.clone().acquire_owned() => match p {
-                    Ok(p) => Some(p),
-                    Err(_) => break Ok(()),
-                },
+                p = limit.acquire() => Some(p),
             },
         };
         let accepted = tokio::select! {
@@ -662,12 +669,7 @@ pub(crate) async fn serve<L: Listen>(listener: L, worker: Worker) -> io::Result<
     result
 }
 
-fn spawn_connection<I: Accepted>(
-    io: I,
-    conn: ConnInfo,
-    worker: &Worker,
-    permit: Option<OwnedSemaphorePermit>,
-) {
+fn spawn_connection<I: Accepted>(io: I, conn: ConnInfo, worker: &Worker, permit: Option<Permit>) {
     let slot = worker.signal.register();
     let service = Service {
         app: worker.app.clone(),

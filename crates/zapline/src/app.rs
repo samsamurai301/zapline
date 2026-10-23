@@ -385,6 +385,8 @@ impl Prepared {
         let shared = Arc::new(Shared {
             states: self.resources.snapshot().into(),
             body_limit: self.body_limit,
+            #[cfg(feature = "ws")]
+            upgrades: None,
         });
         Ok(Running {
             app: AppInner {
@@ -449,13 +451,18 @@ impl AppInner {
 
     /// A copy for one worker thread. Shares the router but gets its own
     /// `Arc` handles so per-request refcount traffic stays core-local.
-    pub(crate) fn for_worker(&self) -> AppInner {
+    pub(crate) fn for_worker(
+        &self,
+        #[cfg(feature = "ws")] upgrades: Option<crate::server::Upgrades>,
+    ) -> AppInner {
         AppInner {
             router: self.router.clone(),
             middleware: self.middleware.clone(),
             shared: Arc::new(Shared {
                 states: self.shared.states.clone(),
                 body_limit: self.shared.body_limit,
+                #[cfg(feature = "ws")]
+                upgrades,
             }),
         }
     }

@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use super::limit::Permit;
 use pin_project_lite::pin_project;
-use tokio::sync::OwnedSemaphorePermit;
 
 /// Serving normally.
 pub(crate) const RUNNING: u8 = 0;
@@ -215,12 +215,12 @@ pin_project! {
         // Armed when draining starts.
         grace: Option<Pin<Box<tokio::time::Sleep>>>,
         // A `max_connections` permit, released with the connection.
-        permit: Option<OwnedSemaphorePermit>,
+        permit: Option<Permit>,
     }
 }
 
 impl<C> Watched<C> {
-    pub(crate) fn new(conn: C, slot: Slot, permit: Option<OwnedSemaphorePermit>) -> Self {
+    pub(crate) fn new(conn: C, slot: Slot, permit: Option<Permit>) -> Self {
         Watched {
             conn,
             slot,

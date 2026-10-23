@@ -5,6 +5,8 @@
 //! (Ctrl-C on Windows), then stops accepting, lets in-flight requests finish
 //! (for up to [`ServerConfig::shutdown_timeout`]), closes the remaining
 //! connections and runs the shutdown hooks. A second signal skips the wait.
+//! Upgraded WebSockets are part of the drain (they get a `1001` close
+//! frame) and of [`ServerConfig::max_connections`].
 //!
 //! ```no_run
 //! use std::time::Duration;
@@ -30,8 +32,11 @@
 //! [`ENV_READY_PATH`] for zero-downtime swaps.
 
 mod conn;
+mod limit;
 mod ready;
 mod shutdown;
+#[cfg(feature = "ws")]
+mod upgrade;
 
 pub use self::ready::{ENV_READY_PATH, ENV_READY_TIMEOUT, ENV_REUSE_PORT};
 
@@ -54,6 +59,8 @@ use crate::handler::BoxFuture;
 pub(crate) use self::conn::TlsEntry;
 use self::conn::{Proto, Worker};
 use self::shutdown::{Signal, Trigger};
+#[cfg(feature = "ws")]
+pub(crate) use self::upgrade::{Refused, ShutdownWatch, Upgrades};
 
 /// Whether this platform load-balances `SO_REUSEPORT` listeners.
 const REUSEPORT_BALANCES: bool = cfg!(any(
@@ -140,15 +147,35 @@ pub struct ServerConfig {
     /// HTTP/1.1 keep-alive. Default: `true`.
     pub keep_alive: bool,
     /// Batch responses to pipelined HTTP/1.1 requests into fewer writes, a
-    /// large win for pipelining clients. Trade-off (hyper 1.x): a malformed
-    /// or oversized request head then closes the connection without the
-    /// automatic `400`/`431` response. Default: `true`.
+    /// large win for pipelining clients. Trade-off (a hyper 1.12 bug): a
+    /// malformed or oversized request head then closes the connection
+    /// without the automatic `400`/`414`/`431` response, and responses to
+    /// earlier pipelined requests still buffered on that connection are lost
+    /// too. The guide's "Upstream issues" page has the details. Default:
+    /// `true`.
     pub pipeline_flush: bool,
     /// Maximum open connections per accept loop: per worker in
     /// [`RuntimeMode::PerCore`], in total otherwise. At the limit the server
     /// stops accepting until a connection closes (the kernel backlog queues
-    /// new ones). Default: unlimited.
+    /// new ones). Upgraded (WebSocket) connections keep counting after the
+    /// upgrade, unless `max_upgraded` gives them their own limit. Default:
+    /// unlimited.
     pub max_connections: Option<usize>,
+    /// Count upgraded (WebSocket) connections against this separate limit,
+    /// per accept loop like `max_connections`, instead of against
+    /// `max_connections`. An upgrade beyond it is refused with `503`
+    /// (`ws_too_many_connections`) before the handshake, and the HTTP
+    /// connection's `max_connections` slot is freed at the upgrade. `None`
+    /// (default): upgraded connections share `max_connections`.
+    ///
+    /// ```
+    /// use zapline::prelude::*;
+    ///
+    /// let mut app = App::new().max_connections(1_000);
+    /// // Up to 1,000 HTTP connections and, separately, 50,000 WebSockets.
+    /// app.server_config_mut().max_upgraded = Some(50_000);
+    /// ```
+    pub max_upgraded: Option<usize>,
     /// Maximum size in bytes of an HTTP/1.1 request head (request line and
     /// headers); larger heads are rejected (see `pipeline_flush`). `None`
     /// (default): bounded by `max_buf_size`.
@@ -198,6 +225,7 @@ impl Default for ServerConfig {
             keep_alive: true,
             pipeline_flush: true,
             max_connections: None,
+            max_upgraded: None,
             max_header_size: None,
             max_headers: None,
             max_buf_size: None,
@@ -245,6 +273,9 @@ pub(crate) fn check_config(config: &ServerConfig) -> io::Result<()> {
     }
     if config.max_connections == Some(0) {
         return invalid("ServerConfig::max_connections must be at least 1");
+    }
+    if config.max_upgraded == Some(0) {
+        return invalid("ServerConfig::max_upgraded must be at least 1");
     }
     if config.http2 && !cfg!(feature = "http2") {
         return invalid(&crate::codes::with_help(
@@ -352,7 +383,15 @@ impl App {
 
     /// Cap open connections per worker (in total for
     /// [`RuntimeMode::MultiThread`] and [`App::serve`]). At the limit the
-    /// server stops accepting until a connection closes.
+    /// server stops accepting until a connection closes. Upgraded WebSocket
+    /// connections keep their slot (see [`ServerConfig::max_upgraded`]).
+    ///
+    /// ```
+    /// use zapline::prelude::*;
+    ///
+    /// let mut app = App::new().max_connections(10_000);
+    /// assert_eq!(app.server_config_mut().max_connections, Some(10_000));
+    /// ```
     pub fn max_connections(mut self, n: usize) -> Self {
         self.config.max_connections = Some(n.max(1));
         self
@@ -667,7 +706,7 @@ fn run_workers(
     let result = if per_core {
         run_per_core(app, listeners, signals, &trigger, &proto, &config)
     } else {
-        let worker = Worker::new(Arc::new(app), &proto, &config, signals[0].clone());
+        let worker = Worker::new(&app, &proto, &config, signals[0].clone());
         let listener = listeners.into_iter().next().expect("one listener");
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(workers)
@@ -709,7 +748,7 @@ fn run_per_core(
     let mut handles = Vec::with_capacity(listeners.len());
     let mut result = Ok(());
     for (i, (listener, signal)) in listeners.into_iter().zip(signals).enumerate() {
-        let worker = Worker::new(Arc::new(app.for_worker()), proto, config, signal);
+        let worker = Worker::new(&app, proto, config, signal);
         let on_error = trigger.clone();
         let spawned = std::thread::Builder::new()
             .name(format!("zapline-worker-{i}"))
@@ -886,7 +925,7 @@ pub(crate) async fn serve(
     }
     let signal = Signal::new(config.drain_grace);
     let driver = tokio::spawn(drive(shutdown, Trigger::new(vec![signal.clone()]), None));
-    let worker = Worker::new(Arc::new(app), &Proto::new(&config), &config, signal);
+    let worker = Worker::new(&app, &Proto::new(&config), &config, signal);
     let result = conn::serve(listener, worker).await;
     driver.abort();
 

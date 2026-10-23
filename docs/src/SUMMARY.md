@@ -68,3 +68,4 @@
 - [Platform support (Linux, macOS, Windows)](platforms.md)
 - [Feature flags](features.md)
 - [Architecture](architecture.md)
+- [Upstream issues](upstream-issues.md)

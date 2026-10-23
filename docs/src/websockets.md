@@ -209,10 +209,10 @@ ws.send("hello, room");
   }
   ```
 
-- **Middleware only sees the handshake.** `Timeout`, `ConcurrencyLimit` and `RateLimit` apply to the upgrade request. They don't bound the lifetime of the connection afterwards, and a connection doesn't hold a concurrency slot. Limit connections yourself (a semaphore in state, or a per-user count) and use `max_message_size`.
+- **Middleware only sees the handshake.** `Timeout`, `ConcurrencyLimit` and `RateLimit` apply to the upgrade request. They don't bound the lifetime of the connection afterwards, and a connection doesn't hold a concurrency slot. The server does count it: an upgraded socket keeps its `max_connections` slot, or counts against `ServerConfig::max_upgraded` if you set it (upgrades beyond it get `503`, code `ws_too_many_connections`). For per-user limits, keep a count in state, and use `max_message_size`. See [Server: WebSockets and the server](server.md#websockets-and-the-server).
 - **Dead peers.** Idle proxies and NATs drop silent connections, and TCP won't tell you for a long time. Send a ping every 20 to 30 seconds with `socket.send(Message::ping(Bytes::new()))`, and treat a failed send as a closed connection.
 - **Reverse proxies** must forward the upgrade headers. For nginx: `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`, plus a long `proxy_read_timeout`.
-- **Shutdown.** Open sockets keep running while the server drains. If you use a worker, a job or `App::tasks_grace_period(..)`, `State<zapline::tasks::Shutdown>` is available: `select!` on `shutdown.wait()` in your loop and call `socket.close_with(close_code::AWAY, "restarting")`. See [Background tasks](tasks.md).
+- **Shutdown.** The drain waits for open sockets. Each one sends a `1001` close frame (`close_code::AWAY`) the next time your callback reads or writes, so a `recv` loop ends by itself and a later `send` fails with `ws_closed`. Callbacks still running after `shutdown_timeout` are dropped. If your loop waits on something else, put `socket.recv()` in the same `select!` so the close goes out at once. New upgrades during the drain get `503` (`ws_shutting_down`).
 - **HTTP/2.** WebSockets over HTTP/2 (RFC 8441 extended `CONNECT`) are not supported; clients use an HTTP/1.1 connection for the upgrade.
 
 ## Testing
