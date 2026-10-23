@@ -493,7 +493,7 @@ Examples:
         /// HTTP method
         #[arg(short, long, value_enum, default_value = "get")]
         method: HandlerMethod,
-        /// Route path [default: `/<name in kebab-case>`]
+        /// Route path (default: `/<name in kebab-case>`)
         #[arg(short, long, value_name = "PATH")]
         path: Option<String>,
     },
@@ -680,7 +680,7 @@ pub struct DevArgs {
 /// Arguments of `zapline snap`.
 #[derive(Debug, Args)]
 pub struct SnapArgs {
-    /// Snapshot name: tests/snapshots/<NAME>.json (letters, digits, `-`, `_`)
+    /// Snapshot name: `tests/snapshots/<NAME>.json` (letters, digits, `-`, `_`)
     pub name: String,
 
     /// Where the app listens [default: from ADDR or PORT like the app's main, else
