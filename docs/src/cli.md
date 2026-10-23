@@ -15,7 +15,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
-| `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
+| `zapline dev [--bin X] [--no-proxy] [-- app args]` | The [dev loop](#the-dev-loop-zapline-dev): template, translation and static file changes reload open pages without a restart, CSS is swapped in place, Rust changes rebuild in the background and swap in the new binary with no downtime, and compile errors show as an overlay in the browser. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
@@ -47,6 +47,55 @@ my-api/
 ```
 
 Each route module exposes `pub fn mount(app: App) -> App`, which makes it a [plugin](lifecycle.md#plugins). `routes/mod.rs` installs the modules between `// zapline:routes:start` and `// zapline:routes:end`. `zapline generate resource` inserts new modules there.
+
+## The dev loop: `zapline dev`
+
+`zapline dev` is a Vite-style loop for a Rust app. Run it in the project and open the address your app prints (`http://localhost:8080` for the templates):
+
+```console
+$ zapline dev
+    Watching src/, config/, migrations/, Cargo.toml, build.rs, .env
+    Watching templates/, static/ (browser reload, no rebuild)
+    Building todo
+       Proxy http://localhost:8080 with live reload
+     Running `target/debug/todo` (pid 4242) at http://localhost:8080
+```
+
+What each kind of change does:
+
+| You change | What happens | Rust process |
+|---|---|---|
+| `templates/`, `locales/`, `i18n/`, files in `static/`, `public/`, `assets/` | Open pages reload, keeping their scroll position | Keeps running: templates and translations are read again on the next request |
+| a `.css` file in `static/`, `public/`, `assets/` (including Tailwind's `static/app.css`) | The stylesheet is swapped in place, no page reload | Keeps running |
+| `src/`, `config/`, `migrations/`, `Cargo.toml`, `build.rs`, `.env` | Rebuild in the background; pages show a small "Rebuilding" badge | The old version keeps serving until the new one answers, then gets SIGTERM |
+| ...and the build fails | Pages show the compiler errors (file, line, rustc's message) as an overlay | The old version keeps serving |
+
+The swap has no downtime: while cargo compiles, every request is still answered by the previous version. The new binary starts next to it, and requests move over only once it answers HTTP; the old process then finishes its in-flight requests and exits (SIGTERM, then a kill after 5 seconds). If the new version crashes during startup, the old one keeps serving and the overlay says so.
+
+The overlay appears in every open page and in pages you open while the build is broken. Press Esc to hide it; the next good build clears it and reloads the page. A page opened before the very first build finishes shows "Building..." and reloads by itself once the app is up.
+
+`zapline dev` sets `ZAPLINE_DEV=1` for the app, so 500 responses show the real error, templates and asset hashes are read again even in a `--release` build, and translations loaded with `I18n::load` are re-read when a file changes. `--no-proxy` turns all of this browser side off and runs the app directly: rebuild, stop the old process, start the new one.
+
+### How it works
+
+```text
+browser ──▶ zapline dev proxy (the app's address, e.g. :8080)
+              │  /__zapline/events   server-sent events: reload, css, problem, ...
+              │  /__zapline/client.js
+              └─▶ app on a free loopback port (127.0.0.1:41234)
+```
+
+1. `zapline dev` starts the app with `ZAPLINE_DEV_PROXY=<file>`. `App::run` then listens on a free loopback port instead of the address you gave it and writes both addresses to that file (`zapline::dev::ENV_DEV_PROXY`). Nothing else in the app changes, and without `ZAPLINE_DEV=1` the variable is ignored.
+2. The CLI listens on the app's own address and forwards every request to the app. HTML pages get one tag before `</head>`: `<script src="/__zapline/client.js" defer>` (fragments such as htmx partials are left alone). An external script, so a `script-src 'self'` policy allows it; with a nonce-based Content-Security-Policy the page's nonce is reused. Pages are fetched uncompressed so the tag can be added; everything else (JSON, assets, streams, server-sent events, WebSocket upgrades) passes through untouched.
+3. The client opens an `EventSource` on `/__zapline/events`. The CLI classifies each file change (Rust or asset), and pushes `reload`, `css`, `building`, `problem` (the parsed `cargo build --message-format=json` errors) or `clear`.
+4. Each forwarded request opens its own connection to the app, so pointing the proxy at a new version takes effect on the very next request.
+
+The cost in production is zero: the proxy is part of the CLI, and the app side is one environment check in `App::run` at startup. Some limits:
+
+- Apps served with TLS (`ServerConfig::tls`), on a Unix socket, or with `App::serve` on your own listener are run directly (no proxy), as with `--no-proxy`.
+- The browser talks HTTP/1.1 to the proxy; the app may still serve HTTP/2 to other clients.
+- Each open tab holds one event-stream connection; browsers allow about six HTTP/1.1 connections per host, so keep fewer than that many tabs of the app open.
+- The proxy remembers the app's address from the last run, so the overlay also works when the first build of a session fails. On the very first run in a project it learns the address when the app first starts.
 
 ## How `routes` and `openapi` work
 

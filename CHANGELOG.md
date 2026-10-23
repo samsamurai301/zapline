@@ -50,6 +50,7 @@ The first public release.
 - `zapline client`: a typed, dependency-free TypeScript client generated from the OpenAPI document; `zapline dev --client <file>` regenerates it after every build for end-to-end types.
 - `zapline::extract::{empty_as_none, checkbox}` serde helpers for HTML forms.
 - `ZAPLINE_DEV=1` (set by `zapline dev`) shows the real cause of 500 errors.
+- `zapline dev` is a Vite-style dev loop: a small proxy on the app's own address reloads open pages when templates, translations or static files change (no restart; a CSS change is swapped in place), Rust changes build in the background while the old version keeps serving and the new binary takes over only once it answers HTTP, and compile errors (from cargo's JSON diagnostics) and startup or runtime crashes show as an overlay in the browser. On the app side everything is decided at startup under `ZAPLINE_DEV=1` (`zapline::dev::ENV_DEV_PROXY` handshake in `App::run`, templates, asset hashes and `I18n::load` translations re-read on change). TLS, Unix-socket and `App::serve` apps, and `--no-proxy`, keep the plain stop-then-start loop. One-file apps (`zapline dev app.rs`) get the same loop.
 
 ### AI-assisted development
 - `AGENTS.md` in the repository and in every project `zapline new` creates: commands, layout and the one canonical way to do each task.

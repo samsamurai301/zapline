@@ -609,10 +609,21 @@ impl Script {
 
     /// Builds the script, reusing the last executable when nothing changed.
     pub fn build(&self, m: &Materialized, release: bool) -> Result<BuildOutcome> {
+        self.build_with(m, release, |_| {})
+    }
+
+    /// [`Script::build`], calling `on_spawn` with cargo's process id if a
+    /// build runs (see [`build::build_with`]).
+    pub fn build_with(
+        &self,
+        m: &Materialized,
+        release: bool,
+        on_spawn: impl FnOnce(u32),
+    ) -> Result<BuildOutcome> {
         if let Some(exe) = self.fresh_executable(&m.key, &m.extra_inputs, release) {
             return Ok(BuildOutcome::Built(exe));
         }
-        let outcome = build::build(&m.project, &self.bin, release)?;
+        let outcome = build::build_with(&m.project, &self.bin, release, on_spawn)?;
         if let BuildOutcome::Built(exe) = &outcome {
             self.record_build(&m.key, release, exe);
         }
@@ -866,7 +877,7 @@ pub fn run(opts: &RunOptions) -> Result<()> {
     }
     let exe = match script.build(&m, opts.release)? {
         BuildOutcome::Built(exe) => exe,
-        BuildOutcome::Failed => bail!("could not compile `{}`", script.shown),
+        BuildOutcome::Failed(_) => bail!("could not compile `{}`", script.shown),
     };
     let mut cmd = std::process::Command::new(&exe);
     cmd.args(&opts.args);

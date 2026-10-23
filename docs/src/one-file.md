@@ -6,7 +6,7 @@ webhooks, demos, bug reports and code an AI assistant hands you in one piece.
 
 ```sh
 zapline new hello.rs      # write a starter: routes, a validated JSON model, OpenAPI docs, tests
-zapline dev hello.rs      # serve on http://localhost:8080 and restart on every save
+zapline dev hello.rs      # serve on http://localhost:8080, rebuild and live-reload on every save
 zapline run hello.rs      # build (cached) and run it
 ./hello.rs                # the same, through its shebang line
 zapline test hello.rs     # run the #[cfg(test)] tests inside the file
@@ -81,7 +81,7 @@ hidden project, so a script next to a zapline checkout can use
 |---|---|
 | `zapline new <name>.rs [--path DIR]` | Write a starter (refuses to overwrite). On unix it is made executable |
 | `zapline run [--release] <file.rs> [args]` | Build if needed, then run it in the current directory with `args` (a `--` before them is optional). Exits with the app's exit code |
-| `zapline dev <file.rs> [-- args]` | Watch the file, rebuild after each save and restart the app, like `zapline dev` in a project. Header changes take effect on save. A broken header or build keeps the previous version running |
+| `zapline dev <file.rs> [-- args]` | Watch the file, rebuild after each save and swap in the new version with a browser reload, like `zapline dev` in a project (see [The dev loop](cli.md#the-dev-loop-zapline-dev)). Header changes take effect on save. A broken header or build keeps the previous version running |
 | `zapline test <file.rs> [filter]` | Run the tests in the file and print only the failures and a summary |
 | `zapline check [--clippy] <file.rs>` | One line per error or warning |
 | `zapline routes [--json] <file.rs>` | Print the route table |

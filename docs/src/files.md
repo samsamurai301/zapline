@@ -134,7 +134,7 @@ In templates (feature `views`) it is a function, whether `.views(..)` comes befo
 - An old hash still serves today's file, with `no-cache`, so pages cached before a deploy keep working.
 - `/static/app.css` (no hash) is still served, without the long cache.
 - A file that does not exist keeps its plain URL; hidden files stay hidden.
-- Hashes are 8 hex digits of the content. In debug builds they are recomputed when a file's size or modification time changes, so `zapline dev` picks up edits; release builds hash each file once.
+- Hashes are 8 hex digits of the content. In debug builds (and under `zapline dev`, even with `--release`) they are recomputed when a file's size or modification time changes, so edits show up at once; release builds hash each file once.
 
 No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
 
@@ -146,7 +146,7 @@ zapline g tailwind
 
 This writes `styles/app.css` and compiles it to `static/app.css` with Tailwind's official standalone binary. zapline downloads it once into your user cache (`~/.cache/zapline`), pinned to one version and checked against its SHA-256 before it runs; set `ZAPLINE_TAILWIND=/path/to/tailwindcss` to use your own. No Node, npm or `package.json`.
 
-- `zapline dev` runs Tailwind's watcher alongside the app: add a class in `templates/` and `static/app.css` (and its hashed URL) is updated by the time you refresh.
+- `zapline dev` runs Tailwind's watcher alongside the app: add a class in `templates/` and open pages reload, then get the rebuilt `static/app.css` swapped in without another reload ([the dev loop](cli.md#the-dev-loop-zapline-dev)).
 - `zapline css` builds once; `zapline css --minify` for a smaller file before you deploy.
 - Commit `static/app.css`. It is what the server (and the Docker image) serves, so deploys need no Tailwind.
 

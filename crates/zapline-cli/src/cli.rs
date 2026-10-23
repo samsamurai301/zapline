@@ -24,7 +24,7 @@ Examples:
   zapline new hello.rs                     A whole app in one file, no Cargo.toml
   zapline run hello.rs                     Build (cached) and run a one-file app
   zapline dev hello.rs                     Live reload for a one-file app
-  zapline dev                              Rebuild and restart on every change
+  zapline dev                              Rebuild, swap and live-reload on every change
   zapline dev -- --port 9000               Pass arguments to your app
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
   zapline g handler ping --method get      Add a single route
@@ -107,12 +107,19 @@ Examples:
     #[command(visible_alias = "g")]
     Generate(GenerateArgs),
 
-    /// Rebuild and restart the app whenever files change
+    /// Rebuild, swap and live-reload the app whenever files change
     #[command(after_long_help = "\
-Watches src/, config/, migrations/, Cargo.toml and build.rs (ignoring target/ and editor
-temp files), rebuilds after the changes settle, and restarts the binary. The old process
-gets SIGTERM and is killed after 5 seconds if it does not exit. If a build fails, the
-previous version keeps running.
+Rust changes (src/, config/, migrations/, Cargo.toml, build.rs, .env) rebuild in the
+background while the previous version keeps serving; the new binary takes over once it
+answers, then the old one gets SIGTERM (and a kill after 5 seconds). A failed build keeps
+the previous version running and shows the compiler errors as an overlay in the browser.
+
+Asset changes (templates/, static/, public/, assets/, locales/, i18n/) reload open pages
+without restarting anything; a CSS change swaps the stylesheet in place.
+
+A small proxy on the app's own address makes this work: the app listens on a free
+loopback port, and the proxy adds one <script> to HTML pages. --no-proxy runs the app
+directly instead.
 
 Given a one-file app (see `zapline run --help`), watches just that file and runs the
 app in the current directory.
@@ -455,6 +462,11 @@ pub struct DevArgs {
     /// Keep a TypeScript client of the API up to date (see `zapline client`)
     #[arg(long, value_name = "FILE")]
     pub client: Option<PathBuf>,
+
+    /// Run the app directly: no proxy, no browser live reload, no error
+    /// overlay, and restarts stop the old process before the new one starts
+    #[arg(long)]
+    pub no_proxy: bool,
 
     /// How long (ms) files must stay quiet before rebuilding
     #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]

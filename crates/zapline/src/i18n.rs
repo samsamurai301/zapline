@@ -41,8 +41,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Write as _};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::extract::FromRequestParts;
 use crate::middleware::Next;
@@ -61,6 +62,8 @@ struct Catalogs {
     /// Language tag (as written in the file name) -> key -> message.
     langs: BTreeMap<String, HashMap<String, String>>,
     default: String,
+    /// The directory [`I18n::load`] read, for reloading under `zapline dev`.
+    source: Option<PathBuf>,
 }
 
 impl I18n {
@@ -83,18 +86,7 @@ impl I18n {
             Error::internal(format!("cannot read translations in {}", dir.display())).with_source(e)
         };
         let mut i18n = I18n(Arc::default());
-        let mut files: Vec<_> = std::fs::read_dir(dir)
-            .map_err(read_err)?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-            .collect();
-        files.sort();
-        for path in files {
-            let lang = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_owned();
+        for (lang, path) in toml_files(dir).map_err(read_err)? {
             let text = std::fs::read_to_string(&path).map_err(read_err)?;
             i18n = i18n.messages(&lang, &text)?;
         }
@@ -104,7 +96,26 @@ impl I18n {
                 dir.display()
             )));
         }
+        Arc::make_mut(&mut i18n.0).source = Some(dir.to_owned());
         Ok(i18n)
+    }
+
+    /// These catalogs with every language file in `dir` read again: a
+    /// file's messages replace that language's, other languages stay.
+    fn reloaded(&self, dir: &Path) -> Result<Self> {
+        let mut out = (*self.0).clone();
+        for (lang, path) in toml_files(dir).map_err(|e| {
+            Error::internal(format!("cannot read translations in {}", dir.display())).with_source(e)
+        })? {
+            let text = std::fs::read_to_string(&path).map_err(|e| {
+                Error::internal(format!("cannot read {}", path.display())).with_source(e)
+            })?;
+            let fresh = I18n::default().messages(&lang, &text)?;
+            if let Some(messages) = Arc::unwrap_or_clone(fresh.0).langs.remove(&lang) {
+                out.langs.insert(lang, messages);
+            }
+        }
+        Ok(I18n(Arc::new(out)))
     }
 
     /// Add (or extend) language `lang` from TOML text, e.g. a file embedded
@@ -289,6 +300,75 @@ impl I18n {
     }
 }
 
+/// The `*.toml` files in `dir` with their language, sorted by name.
+fn toml_files(dir: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e == "toml"))
+        .collect();
+    files.sort();
+    Ok(files
+        .into_iter()
+        .map(|path| {
+            let lang = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or_default()
+                .to_owned();
+            (lang, path)
+        })
+        .collect())
+}
+
+/// Under `zapline dev`: catalogs read again whenever a language file
+/// changes, so editing a translation shows on the next request without a
+/// restart. Installed by [`App::i18n`] only when `ZAPLINE_DEV=1`.
+struct LiveI18n {
+    dir: PathBuf,
+    current: Mutex<(Vec<FileStamp>, I18n)>,
+}
+
+/// A file's name, size and modification time.
+type FileStamp = (PathBuf, u64, Option<SystemTime>);
+
+impl LiveI18n {
+    fn new(dir: PathBuf, i18n: I18n) -> Self {
+        let stamp = Self::stamp(&dir);
+        LiveI18n {
+            dir,
+            current: Mutex::new((stamp, i18n)),
+        }
+    }
+
+    fn stamp(dir: &Path) -> Vec<FileStamp> {
+        toml_files(dir)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(_, path)| {
+                let meta = std::fs::metadata(&path).ok();
+                let len = meta.as_ref().map_or(0, std::fs::Metadata::len);
+                let modified = meta.and_then(|m| m.modified().ok());
+                (path, len, modified)
+            })
+            .collect()
+    }
+
+    /// The catalogs, read again first if a file changed. A broken file
+    /// keeps the last good catalogs (and says why on stderr).
+    fn current(&self) -> I18n {
+        let stamp = Self::stamp(&self.dir);
+        let mut current = self.current.lock().unwrap_or_else(|e| e.into_inner());
+        if current.0 != stamp {
+            match current.1.reloaded(&self.dir) {
+                Ok(fresh) => current.1 = fresh,
+                Err(e) => eprintln!("zapline: translations not reloaded: {e}"),
+            }
+            current.0 = stamp;
+        }
+        current.1.clone()
+    }
+}
+
 impl Default for I18n {
     /// No languages yet: add them with [`messages`](Self::messages).
     fn default() -> Self {
@@ -410,7 +490,13 @@ impl Locale {
 
 impl FromRequestParts for Locale {
     async fn from_request_parts(req: &mut Request) -> Result<Self> {
-        match req.state::<I18n>() {
+        // `zapline dev` puts freshly reloaded catalogs in the extensions
+        // (see `LiveI18n`); otherwise this is one empty-map lookup.
+        let i18n = req
+            .extensions()
+            .get::<I18n>()
+            .or_else(|| req.state::<I18n>());
+        match i18n {
             Some(i18n) => Ok(i18n.negotiate(req)),
             None => Err(Error::internal(
                 "no translations registered: add `.i18n(I18n::load(\"locales\")?)` to the app",
@@ -534,7 +620,20 @@ impl App {
     pub fn i18n(self, i18n: I18n) -> Self {
         let remember = i18n.clone();
         let panel = i18n.clone();
-        self.state(i18n)
+        let live = match &i18n.0.source {
+            Some(dir) if crate::dev::live_reload() => {
+                Some(Arc::new(LiveI18n::new(dir.clone(), i18n.clone())))
+            }
+            _ => None,
+        };
+        let app = match live {
+            Some(live) => self.wrap(move |mut req: Request, next: Next| {
+                req.extensions_mut().insert(live.current());
+                async move { next.run(req).await }
+            }),
+            None => self,
+        };
+        app.state(i18n)
             .wrap(move |req: Request, next: Next| {
                 let chosen = req
                     .query_string()

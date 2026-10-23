@@ -378,3 +378,131 @@ pub(crate) fn escape(s: &str) -> String {
     }
     out
 }
+
+// ---- `zapline dev` live reload ----------------------------------------------------------
+
+/// Set by `zapline dev` (together with `ZAPLINE_DEV=1`) to a file path: the
+/// app then listens on a free loopback port instead of its own address and
+/// writes both addresses to that file as JSON, so the dev proxy can serve
+/// the real address, inject live reload into pages, and swap to a rebuilt
+/// app without dropping a request.
+///
+/// ```json
+/// {"addr":"0.0.0.0:8080","internal":"127.0.0.1:41234","pid":4242}
+/// ```
+///
+/// `internal` is `null` when the app serves its address itself (TLS or a
+/// Unix socket). Only [`App::run`] reads it, once at startup; nothing else
+/// changes, and nothing happens without `ZAPLINE_DEV=1`.
+///
+/// ```no_run
+/// // What `zapline dev` does, by hand:
+/// std::process::Command::new("target/debug/my-app")
+///     .env("ZAPLINE_DEV", "1")
+///     .env(zapline::dev::ENV_DEV_PROXY, "/tmp/my-app.handshake.json")
+///     .spawn()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub const ENV_DEV_PROXY: &str = "ZAPLINE_DEV_PROXY";
+
+/// Whether the app runs under `zapline dev` (`ZAPLINE_DEV=1`). Read once;
+/// features use it at build time to switch on reloading.
+#[allow(dead_code)] // Used by optional features (views, fs, i18n).
+pub(crate) fn live_reload() -> bool {
+    crate::error::dev_mode()
+}
+
+/// Where to write the [`ENV_DEV_PROXY`] handshake, if `zapline dev` asked.
+pub(crate) fn proxy_handshake() -> Option<std::path::PathBuf> {
+    if !crate::error::dev_mode() {
+        return None;
+    }
+    std::env::var_os(ENV_DEV_PROXY)
+        .filter(|v| !v.is_empty())
+        .map(std::path::PathBuf::from)
+}
+
+/// The loopback address of the same family as `addr`, on a free port.
+pub(crate) fn internal_addr(addr: std::net::SocketAddr) -> std::net::SocketAddr {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    if addr.is_ipv6() {
+        SocketAddr::from((Ipv6Addr::LOCALHOST, 0))
+    } else {
+        SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
+    }
+}
+
+/// The handshake JSON for `addr` (as the app asked for it) and the address
+/// actually bound, if the proxy should forward to it.
+pub(crate) fn handshake_json(addr: &str, internal: Option<std::net::SocketAddr>) -> String {
+    use std::fmt::Write as _;
+    let quote = |s: &str| {
+        let mut out = String::from("\"");
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                c if (c as u32) < 0x20 => {
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        out
+    };
+    let internal = internal.map_or_else(|| "null".to_owned(), |a| quote(&a.to_string()));
+    format!(
+        "{{\"addr\":{},\"internal\":{internal},\"pid\":{}}}",
+        quote(addr),
+        std::process::id()
+    )
+}
+
+/// Write the handshake atomically (a temporary file, then a rename), so the
+/// dev CLI never reads half of it.
+pub(crate) fn write_handshake(
+    path: &std::path::Path,
+    addr: &str,
+    internal: Option<std::net::SocketAddr>,
+) {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = std::path::PathBuf::from(tmp);
+    let written = std::fs::write(&tmp, handshake_json(addr, internal))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if let Err(e) = written {
+        eprintln!(
+            "zapline: cannot write the dev handshake to {}: {e}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handshake_is_json() {
+        let internal = "127.0.0.1:41234".parse().ok();
+        let json = handshake_json("0.0.0.0:8080", internal);
+        assert!(
+            json.starts_with(r#"{"addr":"0.0.0.0:8080","internal":"127.0.0.1:41234","pid":"#),
+            "{json}"
+        );
+        let direct = handshake_json("unix:/tmp/a \"b\"", None);
+        assert!(
+            direct.starts_with(r#"{"addr":"unix:/tmp/a \"b\"","internal":null,"#),
+            "{direct}"
+        );
+    }
+
+    #[test]
+    fn internal_address_keeps_the_family() {
+        let v4 = internal_addr("0.0.0.0:8080".parse().unwrap());
+        assert_eq!(v4.to_string(), "127.0.0.1:0");
+        let v6 = internal_addr("[::]:8080".parse().unwrap());
+        assert_eq!(v6.to_string(), "[::1]:0");
+    }
+}

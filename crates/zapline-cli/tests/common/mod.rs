@@ -247,3 +247,127 @@ pub fn pid_from_line(line: &str) -> Option<u32> {
     let rest = line.split("(pid ").nth(1)?;
     rest.split(')').next()?.trim().parse().ok()
 }
+
+/// Writes `src/main.rs` of a fake app that speaks the `zapline dev` proxy
+/// handshake like `App::run`: with `ZAPLINE_DEV_PROXY` set it listens on a
+/// free loopback port and reports it; otherwise it binds `$FAKE_ADDR`. Every
+/// request gets a page naming `version`.
+pub fn write_live_main(root: &Path, version: &str) {
+    const MAIN: &str = r##"use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
+
+fn main() {
+    let addr = std::env::var("FAKE_ADDR").expect("FAKE_ADDR");
+    let listener = match std::env::var_os("ZAPLINE_DEV_PROXY") {
+        Some(path) => {
+            let l = TcpListener::bind("127.0.0.1:0").unwrap();
+            let json = format!(
+                r#"{{"addr":"{addr}","internal":"{}","pid":{}}}"#,
+                l.local_addr().unwrap(),
+                std::process::id()
+            );
+            let tmp = format!("{}.tmp", path.to_str().unwrap());
+            std::fs::write(&tmp, json).unwrap();
+            std::fs::rename(&tmp, &path).unwrap();
+            l
+        }
+        None => TcpListener::bind(&addr).unwrap(),
+    };
+    println!("fake-live __VERSION__ listening");
+    for conn in listener.incoming() {
+        let Ok(mut conn) = conn else { continue };
+        let mut reader = BufReader::new(conn.try_clone().unwrap());
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                break;
+            }
+        }
+        let body = "<html><head><title>t</title></head><body>__VERSION__</body></html>";
+        let _ = write!(
+            conn,
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    }
+}
+"##;
+    fs::write(
+        root.join("src/main.rs"),
+        MAIN.replace("__VERSION__", version),
+    )
+    .unwrap();
+}
+
+/// A free TCP port on 127.0.0.1 (free when this returns).
+pub fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// `GET path` with `Connection: close`: the status code and body.
+pub fn http_get(port: u16, path: &str) -> std::io::Result<(u16, String)> {
+    use std::io::Write;
+    let mut conn = std::net::TcpStream::connect(("127.0.0.1", port))?;
+    conn.set_read_timeout(Some(Duration::from_secs(20)))?;
+    write!(
+        conn,
+        "GET {path} HTTP/1.1\r\nhost: localhost:{port}\r\naccept: text/html\r\nconnection: close\r\n\r\n"
+    )?;
+    let mut raw = String::new();
+    conn.read_to_string(&mut raw)?;
+    let status = raw
+        .split(' ')
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body = raw
+        .split_once("\r\n\r\n")
+        .map(|(_, b)| b.to_owned())
+        .unwrap_or_default();
+    Ok((status, body))
+}
+
+/// Server-sent events from `zapline dev`'s `/__zapline/events`, as
+/// `(event, data)` pairs read on a background thread.
+pub fn dev_events(port: u16) -> Receiver<(String, String)> {
+    use std::io::Write;
+    let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    write!(
+        conn,
+        "GET /__zapline/events HTTP/1.1\r\nhost: localhost\r\naccept: text/event-stream\r\n\r\n"
+    )
+    .unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut event = String::new();
+        for line in BufReader::new(conn).lines().map_while(Result::ok) {
+            if let Some(name) = line.strip_prefix("event: ") {
+                event = name.to_owned();
+            } else if let Some(data) = line.strip_prefix("data: ") {
+                if tx.send((event.clone(), data.to_owned())).is_err() {
+                    return;
+                }
+            }
+        }
+    });
+    rx
+}
+
+/// Waits for event `name` and returns its data.
+pub fn wait_event(events: &Receiver<(String, String)>, name: &str, timeout: Duration) -> String {
+    let deadline = Instant::now() + timeout;
+    let mut seen = Vec::new();
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match events.recv_timeout(left) {
+            Ok((event, data)) if event == name => return data,
+            Ok(other) => seen.push(other),
+            Err(_) => panic!("no {name:?} event; saw {seen:?}"),
+        }
+    }
+}

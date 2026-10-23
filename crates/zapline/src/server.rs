@@ -31,8 +31,9 @@ mod shutdown;
 use std::future::Future;
 use std::io;
 use std::net::{SocketAddr, ToSocketAddrs};
+use std::path::Path;
 #[cfg(unix)]
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -500,7 +501,15 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
         .map_or(Bind::Tcp(addr), |(path, serve)| Bind::Unix(path, serve));
     #[cfg(not(unix))]
     let bind = Bind::Tcp(addr);
-    let result = run_workers(app, bind, config, options.shutdown, system.handle());
+    let handshake = crate::dev::proxy_handshake();
+    let result = run_workers(
+        app,
+        bind,
+        config,
+        options.shutdown,
+        system.handle(),
+        handshake.as_deref(),
+    );
     system.block_on(lifecycle.run_shutdown(&resources));
     // Don't hang on blocking tasks that ignore shutdown (plain drop would
     // wait for them forever).
@@ -540,7 +549,16 @@ fn run_workers(
     config: ServerConfig,
     shutdown: Option<BoxFuture<()>>,
     system: &tokio::runtime::Handle,
+    handshake: Option<&Path>,
 ) -> io::Result<()> {
+    // Under `zapline dev`: listen on a free loopback port behind its proxy,
+    // which serves the address the app asked for (see `ENV_DEV_PROXY`).
+    let (bind, proxied) = match (bind, handshake) {
+        (Bind::Tcp(addr), Some(_)) if !config.is_tls() => {
+            (Bind::Tcp(crate::dev::internal_addr(addr)), Some(addr))
+        }
+        (bind, _) => (bind, None),
+    };
     let workers = config.worker_count();
     let per_core = config.runtime == RuntimeMode::PerCore
         && (REUSEPORT_BALANCES || !matches!(bind, Bind::Tcp(_)));
@@ -557,13 +575,29 @@ fn run_workers(
         _ => None,
     };
 
+    if let Some(path) = handshake {
+        let (addr, internal) = match (&bind, proxied) {
+            #[cfg(unix)]
+            (Bind::Unix(path, _), _) => (format!("unix:{}", path.display()), None),
+            (_, Some(asked)) => (asked.to_string(), Some(listeners[0].local_addr()?)),
+            (_, None) => (listeners[0].local_addr()?.to_string(), None),
+        };
+        crate::dev::write_handshake(path, &addr, internal);
+    }
+
     if config.banner {
         let url = match (&bind, &listeners[0]) {
             #[cfg(unix)]
             (Bind::Unix(path, _), _) => format!("unix:{}", path.display()),
             (_, listener) => {
                 let scheme = if config.is_tls() { "https" } else { "http" };
-                format!("{scheme}://{}", listener.local_addr()?)
+                match proxied {
+                    Some(asked) => format!(
+                        "{scheme}://{asked} (zapline dev proxy, app on {})",
+                        listener.local_addr()?
+                    ),
+                    None => format!("{scheme}://{}", listener.local_addr()?),
+                }
             }
         };
         let mode = if per_core {

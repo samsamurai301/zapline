@@ -183,6 +183,7 @@ pub fn execute(cli: Cli) -> Result<()> {
                 release: a.release,
                 app_args: a.app_args,
                 debounce: Duration::from_millis(a.debounce_ms),
+                proxy: !a.no_proxy,
                 client: match a.client {
                     Some(c) => Some(openapi::resolve_output(
                         &std::env::current_dir()

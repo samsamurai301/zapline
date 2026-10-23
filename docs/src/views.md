@@ -56,7 +56,7 @@ Values are HTML-escaped automatically in `.html` templates. Use `{{ value | safe
 
 ## Hot reload
 
-In debug builds templates are read from disk on every render: edit a template, refresh the browser, no rebuild. Release builds load each template once. Copy `templates/` next to the binary when you deploy (the generated Dockerfiles do).
+In debug builds templates are read from disk on every render: edit a template and refresh, no rebuild. Under [`zapline dev`](cli.md#the-dev-loop-zapline-dev) you don't even refresh: open pages reload by themselves when a template changes (also with `--release`, since `ZAPLINE_DEV=1` keeps reloading on). Release builds load each template once. Copy `templates/` next to the binary when you deploy (the generated Dockerfiles do).
 
 ## Errors
 

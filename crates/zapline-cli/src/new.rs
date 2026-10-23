@@ -295,7 +295,10 @@ pub fn run(opts: &NewOptions) -> Result<()> {
     eprintln!("  cd {cd}");
     eprintln!(
         "  zapline dev       {}",
-        ui::dim(color, "# rebuild and restart on every change")
+        ui::dim(
+            color,
+            "# live reload: browser refresh, zero-downtime rebuilds"
+        )
     );
     eprintln!("  cargo test        {}", ui::dim(color, "# run the tests"));
     if opts.template != Template::Minimal {

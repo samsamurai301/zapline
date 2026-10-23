@@ -35,24 +35,124 @@ pub fn resolve_bin(project: &Project, requested: Option<&str>) -> Result<String>
 pub enum BuildOutcome {
     /// Built; the executable is at this path.
     Built(PathBuf),
-    /// Cargo reported errors (already printed to stderr).
-    Failed,
+    /// Cargo reported errors (already printed to stderr). These are the
+    /// compiler errors, empty when cargo failed before compiling (a broken
+    /// `Cargo.toml`, a missing dependency).
+    Failed(Vec<Diagnostic>),
+}
+
+/// One compiler error, from cargo's `--message-format=json` output.
+///
+/// ```
+/// let line = r#"{"reason":"compiler-message","message":{"level":"error","message":"cannot find value `x`","spans":[{"file_name":"src/main.rs","line_start":3,"column_start":5,"is_primary":true}],"rendered":"error: cannot find value `x`"}}"#;
+/// let d = zapline_cli::build::diagnostic_from_message(line).unwrap();
+/// assert_eq!((d.file.as_deref(), d.line, d.column), (Some("src/main.rs"), 3, 5));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Diagnostic {
+    /// `error` (or `error: internal compiler error`).
+    pub level: String,
+    /// The one-line message, e.g. ``cannot find value `x` in this scope``.
+    pub message: String,
+    /// The file of the primary span, relative to the workspace root for
+    /// workspace members.
+    pub file: Option<String>,
+    /// 1-based line of the primary span (0 when there is none).
+    pub line: u32,
+    /// 1-based column of the primary span (0 when there is none).
+    pub column: u32,
+    /// The full rustc rendering (source snippet, notes, help), as printed to
+    /// the terminal; may contain ANSI colour codes.
+    pub rendered: String,
+}
+
+/// The compiler *error* in one line of cargo's JSON output, if it is one
+/// (warnings and other messages are `None`).
+pub fn diagnostic_from_message(line: &str) -> Option<Diagnostic> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    if msg.get("reason")?.as_str()? != "compiler-message" {
+        return None;
+    }
+    let message = msg.get("message")?;
+    let level = message.get("level")?.as_str()?;
+    if !level.starts_with("error") {
+        return None;
+    }
+    let spans = message.get("spans").and_then(|s| s.as_array());
+    let primary = spans.and_then(|spans| {
+        spans
+            .iter()
+            .find(|s| s.get("is_primary").and_then(|p| p.as_bool()) == Some(true))
+            .or_else(|| spans.first())
+    });
+    let number = |key: &str| {
+        primary
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok())
+            .unwrap_or(0)
+    };
+    Some(Diagnostic {
+        level: level.to_owned(),
+        message: message.get("message")?.as_str()?.to_owned(),
+        file: primary
+            .and_then(|s| s.get("file_name"))
+            .and_then(|f| f.as_str())
+            .map(str::to_owned),
+        line: number("line_start"),
+        column: number("column_start"),
+        rendered: message
+            .get("rendered")
+            .and_then(|r| r.as_str())
+            .unwrap_or_default()
+            .to_owned(),
+    })
+}
+
+/// The rendered text of a compiler message (error or warning), to print.
+fn rendered_message(line: &str) -> Option<String> {
+    let msg: serde_json::Value = serde_json::from_str(line).ok()?;
+    if msg.get("reason")?.as_str()? != "compiler-message" {
+        return None;
+    }
+    msg.get("message")?
+        .get("rendered")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// Builds binary `bin` of `project`, streaming cargo's own output (compiler
 /// diagnostics included) to stderr, and returns the path of the executable.
 pub fn build(project: &Project, bin: &str, release: bool) -> Result<BuildOutcome> {
+    build_with(project, bin, release, |_| {})
+}
+
+/// [`build`], calling `on_spawn` with cargo's process id once it runs (so
+/// another thread can stop a build that is no longer wanted).
+pub fn build_with(
+    project: &Project,
+    bin: &str,
+    release: bool,
+    on_spawn: impl FnOnce(u32),
+) -> Result<BuildOutcome> {
+    let color = ui::stderr_color();
     let mut cmd = cargo();
     cmd.args([
         "build",
-        "--message-format=json-render-diagnostics",
+        // Diagnostics as JSON, so `zapline dev` can show them in the
+        // browser; we print their rendering ourselves.
+        if color {
+            "--message-format=json-diagnostic-rendered-ansi"
+        } else {
+            "--message-format=json"
+        },
         "--bin",
         bin,
     ]);
     if release {
         cmd.arg("--release");
     }
-    if ui::stderr_color() {
+    if color {
         cmd.args(["--color", "always"]);
     }
     cmd.current_dir(&project.root)
@@ -62,21 +162,28 @@ pub fn build(project: &Project, bin: &str, release: bool) -> Result<BuildOutcome
     let mut child = cmd
         .spawn()
         .context("failed to run `cargo build` (is cargo installed?)")?;
+    on_spawn(child.id());
 
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| anyhow!("no cargo stdout"))?;
     let mut executable = None;
+    let mut errors = Vec::new();
     for line in BufReader::new(stdout).lines() {
         let line = line.context("cannot read cargo output")?;
         if let Some(path) = executable_from_message(&line, bin) {
             executable = Some(path);
+        } else if let Some(text) = rendered_message(&line) {
+            eprint!("{text}");
+            if let Some(d) = diagnostic_from_message(&line) {
+                errors.push(d);
+            }
         }
     }
     let status = child.wait().context("failed to wait for cargo")?;
     if !status.success() {
-        return Ok(BuildOutcome::Failed);
+        return Ok(BuildOutcome::Failed(errors));
     }
     match executable {
         Some(path) => Ok(BuildOutcome::Built(path)),
@@ -240,7 +347,7 @@ pub fn run_app(
     let bin = resolve_bin(project, bin)?;
     match build(project, &bin, false)? {
         BuildOutcome::Built(_) => {}
-        BuildOutcome::Failed => bail!("build failed"),
+        BuildOutcome::Failed(_) => bail!("build failed"),
     }
     let mut cmd = cargo();
     cmd.args(["run", "--quiet", "--bin", &bin])
@@ -273,6 +380,39 @@ mod tests {
         assert_eq!(executable_from_message(other, "my-app"), None);
         assert_eq!(executable_from_message("not json", "my-app"), None);
         assert_eq!(executable_from_message("", "my-app"), None);
+    }
+
+    #[test]
+    fn parses_compiler_errors_with_their_primary_span() {
+        let line = r#"{"reason":"compiler-message","package_id":"x","manifest_path":"/w/Cargo.toml","target":{"kind":["bin"],"name":"app"},"message":{"rendered":"error[E0425]: cannot find value `nope` in this scope\n --> src/main.rs:4:13\n","$message_type":"diagnostic","children":[],"code":{"code":"E0425","explanation":null},"level":"error","message":"cannot find value `nope` in this scope","spans":[{"byte_end":60,"byte_start":56,"column_end":17,"column_start":13,"expansion":null,"file_name":"src/lib.rs","is_primary":false,"label":null,"line_end":2,"line_start":2,"suggested_replacement":null,"suggestion_applicability":null,"text":[]},{"byte_end":60,"byte_start":56,"column_end":17,"column_start":13,"expansion":null,"file_name":"src/main.rs","is_primary":true,"label":"not found in this scope","line_end":4,"line_start":4,"suggested_replacement":null,"suggestion_applicability":null,"text":[]}]}}"#;
+        let d = diagnostic_from_message(line).unwrap();
+        assert_eq!(d.level, "error");
+        assert_eq!(d.message, "cannot find value `nope` in this scope");
+        assert_eq!(d.file.as_deref(), Some("src/main.rs"));
+        assert_eq!((d.line, d.column), (4, 13));
+        assert!(d.rendered.starts_with("error[E0425]"), "{}", d.rendered);
+        assert!(rendered_message(line).is_some());
+    }
+
+    #[test]
+    fn errors_without_spans_and_non_errors() {
+        let summary = r#"{"reason":"compiler-message","message":{"rendered":"error: aborting due to 1 previous error\n","level":"error","message":"aborting due to 1 previous error","spans":[]}}"#;
+        let d = diagnostic_from_message(summary).unwrap();
+        assert_eq!((d.file, d.line, d.column), (None, 0, 0));
+        let ice = r#"{"reason":"compiler-message","message":{"rendered":"","level":"error: internal compiler error","message":"boom","spans":[]}}"#;
+        assert_eq!(diagnostic_from_message(ice).unwrap().message, "boom");
+
+        let warning = r#"{"reason":"compiler-message","message":{"rendered":"warning: unused variable: `x`\n","level":"warning","message":"unused variable: `x`","spans":[]}}"#;
+        assert_eq!(diagnostic_from_message(warning), None);
+        // Warnings are still printed.
+        assert_eq!(
+            rendered_message(warning).as_deref(),
+            Some("warning: unused variable: `x`\n")
+        );
+        let artifact = r#"{"reason":"compiler-artifact","target":{"kind":["bin"],"name":"x"},"executable":"/t/x"}"#;
+        assert_eq!(diagnostic_from_message(artifact), None);
+        assert_eq!(rendered_message(artifact), None);
+        assert_eq!(diagnostic_from_message("garbage"), None);
     }
 
     #[cfg(unix)]

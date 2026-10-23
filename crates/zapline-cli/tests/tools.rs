@@ -375,6 +375,140 @@ mod dev {
     }
 
     #[test]
+    fn live_reload_swaps_without_downtime_and_shows_build_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = fake_app(tmp.path(), "live-app");
+        write_live_main(&app, "v1");
+        fs::create_dir_all(app.join("templates")).unwrap();
+        fs::create_dir_all(app.join("static")).unwrap();
+        let port = free_port();
+        let mut cmd = dev_command(&app, &[]);
+        cmd.env("FAKE_ADDR", format!("127.0.0.1:{port}"));
+        let mut dev = Watched::spawn(cmd);
+        let running = dev.wait_for("Running", SLOW);
+        assert!(
+            dev.seen[running].contains(&format!("at http://localhost:{port}")),
+            "{:?}",
+            dev.seen[running]
+        );
+        let first_pid = pid_from_line(&dev.seen[running]).unwrap();
+
+        // Pages come through the proxy with the live reload client.
+        let (status, body) = http_get(port, "/").unwrap();
+        assert_eq!(status, 200);
+        assert!(body.contains("<body>v1</body>"), "{body}");
+        assert!(body.contains("/__zapline/client.js"), "{body}");
+        let events = dev_events(port);
+        wait_event(&events, "hello", SLOW);
+
+        // A template change reloads the page; nothing is rebuilt.
+        let builds = dev.seen.iter().filter(|l| l.contains("Building")).count();
+        fs::write(app.join("templates/index.html"), "<h1>hi</h1>").unwrap();
+        wait_event(&events, "reload", SLOW);
+        dev.wait_for("Reloaded", SLOW);
+        // A stylesheet is swapped in place.
+        fs::write(app.join("static/app.css"), "body { color: red }").unwrap();
+        let css = wait_event(&events, "css", SLOW);
+        assert_eq!(css, r#"{"paths":["static/app.css"]}"#);
+        assert_eq!(
+            dev.seen.iter().filter(|l| l.contains("Building")).count(),
+            builds,
+            "{:?}",
+            dev.seen
+        );
+        assert!(process_alive(first_pid));
+
+        // A Rust change: the old version keeps answering until the new one
+        // takes over; no request fails in between.
+        write_live_main(&app, "v2");
+        wait_event(&events, "building", SLOW);
+        let deadline = std::time::Instant::now() + SLOW;
+        loop {
+            let (status, body) = http_get(port, "/").expect("the proxy always answers");
+            assert_eq!(status, 200, "{body}");
+            if body.contains("<body>v2</body>") {
+                break;
+            }
+            assert!(body.contains("<body>v1</body>"), "{body}");
+            assert!(std::time::Instant::now() < deadline, "v2 never came up");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        wait_event(&events, "reload", SLOW);
+        let stopping = dev.wait_for("Stopping", SLOW);
+        assert!(
+            dev.seen[stopping].contains(&first_pid.to_string()),
+            "{:?}",
+            dev.seen[stopping]
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while process_alive(first_pid) && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!process_alive(first_pid), "old app still running");
+
+        // A compile error shows in the browser; v2 keeps serving.
+        fs::write(
+            app.join("src/main.rs"),
+            "fn main() {\n    let x: u32 = \"text\";\n}\n",
+        )
+        .unwrap();
+        let problem: serde_json::Value =
+            serde_json::from_str(&wait_event(&events, "problem", SLOW)).unwrap();
+        assert_eq!(problem["title"], "Build failed");
+        let error = &problem["errors"][0];
+        assert_eq!(error["file"], "src/main.rs", "{problem}");
+        assert_eq!(error["line"], 2, "{problem}");
+        assert!(
+            error["message"]
+                .as_str()
+                .unwrap()
+                .contains("mismatched types"),
+            "{problem}"
+        );
+        assert!(!error["rendered"].as_str().unwrap().contains('\x1b'));
+        assert!(http_get(port, "/").unwrap().1.contains("<body>v2</body>"));
+
+        // The fix clears the overlay and swaps in v3.
+        write_live_main(&app, "v3");
+        wait_event(&events, "clear", SLOW);
+        wait_event(&events, "reload", SLOW);
+        assert!(http_get(port, "/").unwrap().1.contains("<body>v3</body>"));
+
+        signal(dev.child.id(), "INT");
+        assert!(dev.wait_exit(Duration::from_secs(30)).success());
+    }
+
+    #[test]
+    fn no_proxy_runs_the_app_directly() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = fake_app(tmp.path(), "direct-app");
+        write_live_main(&app, "v1");
+        let port = free_port();
+        let mut cmd = dev_command(&app, &["--no-proxy"]);
+        cmd.env("FAKE_ADDR", format!("127.0.0.1:{port}"));
+        let mut dev = Watched::spawn(cmd);
+        dev.wait_for("fake-live v1 listening", SLOW);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        let body = loop {
+            match http_get(port, "/") {
+                Ok((200, body)) => break body,
+                _ if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50))
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(!body.contains("__zapline"), "{body}");
+        assert!(
+            !dev.seen.iter().any(|l| l.contains("Proxy")),
+            "{:?}",
+            dev.seen
+        );
+        signal(dev.child.id(), "INT");
+        assert!(dev.wait_exit(Duration::from_secs(30)).success());
+    }
+
+    #[test]
     fn unknown_bin_fails_fast() {
         let tmp = tempfile::tempdir().unwrap();
         let app = fake_app(tmp.path(), "dev-app");
