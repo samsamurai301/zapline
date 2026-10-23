@@ -77,6 +77,11 @@ const IGNORED_DIRS: &[&str] = &["target", ".git", "node_modules", ".idea", ".vsc
 /// same name as `zapline::dev::ENV_DEV_PROXY`).
 pub const ENV_DEV_PROXY: &str = "ZAPLINE_DEV_PROXY";
 
+/// The variable that gives the app the proxy's per-run key (the same name
+/// as `zapline::dev::ENV_DEV_PROXY_KEY`), so it can tell requests the proxy
+/// relays from this machine from any other forwarded request.
+pub const ENV_DEV_PROXY_KEY: &str = "ZAPLINE_DEV_PROXY_KEY";
+
 /// How often the main loop wakes up to check for exits and signals.
 const TICK: Duration = Duration::from_millis(50);
 /// Quiet period for asset changes: short, there is nothing to compile.
@@ -691,6 +696,7 @@ impl Dev<'_> {
         let _ = std::fs::remove_file(&handshake_file);
         let mut cmd = self.command(exe);
         cmd.env(ENV_DEV_PROXY, &handshake_file);
+        cmd.env(ENV_DEV_PROXY_KEY, self.hub.key());
         match cmd.spawn() {
             Ok(child) => {
                 ui::status_info(

@@ -117,11 +117,34 @@ fn frame(name: &str, data: &serde_json::Value) -> String {
     format!("event: {name}\ndata: {data}\n\n")
 }
 
+/// The header the proxy sends [`Hub::key`] in (any copy a client sends is
+/// dropped).
+pub const KEY_HEADER: &str = "x-zapline-dev-proxy";
+
+/// 128 random bits as hex, from the standard library's per-process random
+/// hash keys.
+fn random_key() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut out = String::with_capacity(32);
+    for i in 0u8..2 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u8(i);
+        h.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        out.push_str(&format!("{:016x}", h.finish()));
+    }
+    out
+}
+
 /// Shared state of the proxy: where the app is, what pages should show,
 /// and the open event streams.
 #[derive(Debug)]
 pub struct Hub {
     epoch: String,
+    key: String,
     state: Mutex<HubState>,
 }
 
@@ -149,6 +172,7 @@ impl Hub {
             .map_or(0, |d| d.as_nanos());
         let hub = Arc::new(Hub {
             epoch: format!("{epoch:x}-{}", std::process::id()),
+            key: random_key(),
             state: Mutex::default(),
         });
         let weak = Arc::downgrade(&hub);
@@ -160,6 +184,19 @@ impl Hub {
 
     fn lock(&self) -> MutexGuard<'_, HubState> {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The random key sent to the app with every request, in
+    /// [`KEY_HEADER`], and given to it in `ZAPLINE_DEV_PROXY_KEY`: the app
+    /// trusts the proxy's `X-Forwarded-For` only when the key matches.
+    ///
+    /// ```
+    /// let hub = zapline_cli::dev::proxy::Hub::new();
+    /// assert_eq!(hub.key().len(), 32);
+    /// assert_ne!(hub.key(), zapline_cli::dev::proxy::Hub::new().key());
+    /// ```
+    pub fn key(&self) -> &str {
+        &self.key
     }
 
     /// The app requests are forwarded to.
@@ -688,7 +725,16 @@ fn serve(
         return Ok(after);
     };
     let _ = upstream.set_nodelay(true);
-    forward(&req, &method, reader, client, upstream, peer, keep_alive)
+    forward(
+        &req,
+        &method,
+        reader,
+        client,
+        upstream,
+        peer,
+        keep_alive,
+        hub.key(),
+    )
 }
 
 /// Sends a small complete response.
@@ -740,6 +786,7 @@ fn forward(
     upstream: TcpStream,
     peer: Option<SocketAddr>,
     keep_alive: bool,
+    key: &str,
 ) -> io::Result<After> {
     let upgrade = req
         .get("upgrade")
@@ -751,6 +798,7 @@ fn forward(
     let mut drop: Vec<&str> = HOP_BY_HOP.to_vec();
     drop.push("expect");
     drop.push("x-forwarded-for");
+    drop.push(KEY_HEADER);
     if wants_html {
         drop.push("accept-encoding");
     }
@@ -773,6 +821,7 @@ fn forward(
     if !forwarded_for.is_empty() {
         extra.push(("x-forwarded-for", &forwarded_for));
     }
+    extra.push((KEY_HEADER, key));
     if req.get("x-forwarded-proto").is_none() {
         extra.push(("x-forwarded-proto", "http"));
     }

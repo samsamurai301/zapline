@@ -305,6 +305,8 @@ fn request_bodies_and_headers_reach_the_app() {
     assert!(seen.contains("host: localhost\n"), "{seen}");
     assert!(seen.contains("connection: close\n"), "{seen}");
     assert!(seen.contains("x-forwarded-for: 127.0.0.1\n"), "{seen}");
+    let key = format!("x-zapline-dev-proxy: {}\n", _hub.key());
+    assert!(seen.contains(&key), "the app learns the key: {seen}");
     assert!(seen.contains("x-forwarded-proto: http\n"), "{seen}");
     // Pages are fetched uncompressed so the client can be added...
     assert!(!seen.contains("accept-encoding"), "{seen}");
@@ -502,4 +504,28 @@ fn dropping_the_proxy_frees_its_port() {
             Err(_) => std::thread::sleep(Duration::from_millis(20)),
         }
     }
+}
+
+/// A client can't pass itself off as the proxy: its own copy of the key
+/// header is dropped, and its own `X-Forwarded-For` is kept in front of the
+/// address the proxy saw, so the app sees two hops and does not trust it.
+#[test]
+fn clients_cannot_forge_the_proxy_key_or_their_address() {
+    let (hub, proxy) = proxy_to(Some(upstream("v1")));
+    let mut c = Client::connect(proxy.addr());
+    c.send(
+        "GET /headers HTTP/1.1\r\nhost: x\r\nx-zapline-dev-proxy: forged\r\n\
+         x-forwarded-for: 127.0.0.1\r\n\r\n",
+    );
+    let (_, seen) = c.response(false);
+    assert!(!seen.contains("forged"), "{seen}");
+    assert_eq!(seen.matches("x-zapline-dev-proxy:").count(), 1, "{seen}");
+    assert!(
+        seen.contains(&format!("x-zapline-dev-proxy: {}\n", hub.key())),
+        "{seen}"
+    );
+    assert!(
+        seen.contains("x-forwarded-for: 127.0.0.1, 127.0.0.1\n"),
+        "{seen}"
+    );
 }

@@ -296,11 +296,55 @@ pub(crate) fn internal(routes: Routes) -> Routes {
 /// reverse proxy on the same host connects from loopback too.) The host it
 /// was sent to must be a loopback name too, so a web page can't reach it by
 /// pointing its own domain at 127.0.0.1 (DNS rebinding).
+///
+/// The one proxy trusted is `zapline dev`'s own: it proves itself with the
+/// per-run key from [`ENV_DEV_PROXY_KEY`], and its `X-Forwarded-For` (the
+/// address of its client, which it always sets) must then be a single
+/// loopback address.
 pub(crate) fn local(req: &Request) -> bool {
     const FORWARDED: [&str; 3] = ["forwarded", "x-forwarded-for", "x-real-ip"];
     req.remote_addr().is_some_and(|a| a.ip().is_loopback())
-        && !FORWARDED.iter().any(|h| req.headers().contains_key(*h))
+        && (!FORWARDED.iter().any(|h| req.headers().contains_key(*h)) || via_dev_proxy(req))
         && loopback_host(req)
+}
+
+/// The header `zapline dev`'s proxy sends its key in.
+const DEV_PROXY_KEY_HEADER: &str = "x-zapline-dev-proxy";
+
+/// The [`ENV_DEV_PROXY_KEY`] this app was started with, under `zapline dev`
+/// only. Read once.
+fn dev_proxy_key() -> Option<&'static str> {
+    static KEY: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| {
+        proxy_handshake()?;
+        std::env::var(ENV_DEV_PROXY_KEY)
+            .ok()
+            .filter(|k| k.len() >= 16)
+    })
+    .as_deref()
+}
+
+/// Relayed by `zapline dev`'s proxy (it sent the key) for a client on this
+/// machine: one `X-Forwarded-For` entry, a loopback address, and no other
+/// forwarding header.
+fn via_dev_proxy(req: &Request) -> bool {
+    let Some(key) = dev_proxy_key() else {
+        return false;
+    };
+    let headers = req.headers();
+    let single = |name: &str| {
+        let mut values = headers.get_all(name).iter();
+        match (values.next(), values.next()) {
+            (Some(v), None) => v.to_str().ok(),
+            _ => None,
+        }
+    };
+    single(DEV_PROXY_KEY_HEADER).is_some_and(|k| k == key)
+        && !headers.contains_key("forwarded")
+        && !headers.contains_key("x-real-ip")
+        && single("x-forwarded-for")
+            .and_then(|v| v.trim().parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback())
 }
 
 /// Whether `Host` (or the HTTP/2 authority) names this machine. Browsers
@@ -576,6 +620,24 @@ pub(crate) fn escape(s: &str) -> String {
 /// # Ok::<(), std::io::Error>(())
 /// ```
 pub const ENV_DEV_PROXY: &str = "ZAPLINE_DEV_PROXY";
+
+/// A random key `zapline dev` gives the app next to [`ENV_DEV_PROXY`]. Its
+/// proxy sends it with every request it relays (with the browser's address
+/// in `X-Forwarded-For`), so the app can tell its own dev proxy from any
+/// other: requests the proxy relays from this machine may see the
+/// [dev console](crate::dev), the dev inbox and the dev error pages, and
+/// requests it relays from elsewhere still may not. Ignored without
+/// `ZAPLINE_DEV=1` and [`ENV_DEV_PROXY`].
+///
+/// ```no_run
+/// std::process::Command::new("target/debug/my-app")
+///     .env("ZAPLINE_DEV", "1")
+///     .env(zapline::dev::ENV_DEV_PROXY, "/tmp/my-app.handshake.json")
+///     .env(zapline::dev::ENV_DEV_PROXY_KEY, "a-long-random-key-for-this-run")
+///     .spawn()?;
+/// # Ok::<(), std::io::Error>(())
+/// ```
+pub const ENV_DEV_PROXY_KEY: &str = "ZAPLINE_DEV_PROXY_KEY";
 
 /// Whether the app runs under `zapline dev` (`ZAPLINE_DEV=1`). Read once;
 /// features use it at build time to switch on reloading.
