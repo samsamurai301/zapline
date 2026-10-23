@@ -28,6 +28,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Startup / shutdown | `App::on_startup(\|res\| async move { res.insert(pool); Ok(()) })` (then `State<Pool>`), `App::on_shutdown(..)` |
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
 | Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
+| Optional features | `zapline add ws redis` turns them on in `Cargo.toml`; `zapline add --list` shows them all. A missing one shows up in `zapline check` as `` hint: enable the `ws` feature: zapline add ws `` ([Feature flags](features.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
 | Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |

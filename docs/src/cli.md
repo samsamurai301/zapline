@@ -13,10 +13,11 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
+| `zapline add <feature>...` / `zapline add --list` | Turn on zapline [features](features.md) in `Cargo.toml` (`zapline add ws redis`), whatever shape the `zapline` dependency has. The list stays sorted, the rest of the file is untouched, features already on are reported and skipped, and a misspelled name gets a suggestion (`wss`: did you mean `ws`?). `--list` prints every feature with a one-line description and marks the ones the project has |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
-| `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
+| `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix. When an error comes from a zapline feature the project has not enabled, it says which ([below](#missing-features)) |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
@@ -26,6 +27,24 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline bench <url> [-c 256 -d 10s -t N]` | Load-test with wrk |
 
 `-C <dir>` runs any command as if it had been started in `<dir>`.
+
+## Missing features
+
+Most of zapline is opt-in, so code copied from the guide can need a feature the project does not have yet. Plain `cargo check` only says `` could not find `ws` in `zapline` ``. `zapline check` and `zapline test` add the fix:
+
+```text
+error[E0432] src/routes/chat.rs:1:14: unresolved import `zapline::ws`
+    could not find `ws` in `zapline`
+    hint: enable the `ws` feature: zapline add ws
+error[E0599] src/lib.rs:12:10: no method named `views` found for struct `zapline::App` in the current scope
+    method not found in `zapline::App`
+    hint: enable the `views` feature: zapline add views
+error[E0425] src/routes/posts.rs:8:20: cannot find type `Db` in this scope
+    not found in this scope
+    hint: enable the `sqlite` or `postgres` feature: zapline add sqlite
+```
+
+The hint covers unresolved imports and paths (`zapline::ws`, `zapline::auth::Jwt`), unknown types (`WebSocketUpgrade`, `Views`, `Db`, `JwtConfig`, `Cache`...) and builder methods that a feature adds (`App::views`, `App::database`, `Storage::s3`...). It only appears when none of the features that provide the name is on, so an error that has another cause gets no hint. The `check` and `test` MCP tools show the same hint, and `add_feature` applies it.
 
 ## Generated layout (`api` template)
 
@@ -88,6 +107,7 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 |---|---|
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
+| `add_feature` | Turns on zapline features in `Cargo.toml` (like `zapline add`); with no `features`, the list of features and what each one unlocks |
 | `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
 | `db_new_migration` | Creates a migration, with its SQL if given |
 | `db_migrate` | Applies pending migrations |

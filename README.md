@@ -92,7 +92,7 @@ zapline = "0.1"   # default features: macros, json, query, form, openapi, valida
 
 `#[model]` derives serde, `JsonSchema` and `Validate` through zapline's re-exports, so no other crate is needed.
 
-Enable more with features such as `ws`, `fs`, `multipart`, `compression`, `jwt`, `cookies`, `tls` and `http2`, or turn on everything with `full`.
+Enable more with features such as `ws`, `fs`, `multipart`, `compression`, `jwt`, `cookies`, `tls` and `http2` (`zapline add ws fs` edits Cargo.toml for you), or turn on everything with `full`. When code needs a feature that is off, `zapline check` says which one.
 
 ## A tour
 
