@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use crate::generate::{self, HandlerMethod, Report};
 use crate::project::Project;
 use crate::templates::Template;
-use crate::{brief, build, db, new, openapi, routes};
+use crate::{brief, build, db, features, new, openapi, routes};
 
 /// The whole guide (docs/src/llms-full.txt, copied by scripts/gen-llms.sh).
 pub const GUIDE: &str = include_str!("../assets/guide.md");
@@ -36,7 +36,8 @@ zapline is a Rust web framework. Before writing zapline code, call `docs` (no to
 cheatsheet, or `docs` with a topic (\"extractors\", \"database\", \"htmx\", \"errors\"...). \
 Conventions: handlers are `async fn` with extractor arguments (Path, Query, Json, Valid<Json<T>>, \
 State, Dep, Db); return `zapline::Result<T>`; errors are `Error::not_found()` etc.; no \
-#[tokio::main] (App::run owns the runtime). Prefer the generators over writing boilerplate, and \
+#[tokio::main] (App::run owns the runtime). Optional modules (ws, views, sqlite, jwt, redis...) \
+are Cargo features: turn them on with `add_feature`. Prefer the generators over writing boilerplate, and \
 `check`/`test` over raw cargo: their output is condensed.";
 
 /// Runs the server until stdin closes.
@@ -126,6 +127,13 @@ fn tool_list() -> Value {
                 "name": { "type": "string", "description": "Package name, e.g. my-app" },
                 "template": { "type": "string", "enum": ["minimal", "api", "full", "fullstack"] },
                 "path": { "type": "string", "description": "Parent directory; default: the current directory" }
+            }}
+        },
+        {
+            "name": "add_feature",
+            "description": "Enable zapline Cargo features in the project's Cargo.toml (e.g. ws, views, sqlite, postgres, jwt, cookies, redis, cache, mail, storage). Without `features`: the list of features with what each unlocks. `check` and `test` say which feature a \"not found\" error needs.",
+            "inputSchema": { "type": "object", "properties": {
+                "features": { "type": "array", "items": { "type": "string" }, "description": "Feature names, e.g. [\"ws\", \"redis\"]" }
             }}
         },
         {
@@ -265,6 +273,21 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
                 created.files.len(),
                 created.files.join("\n")
             ))
+        }
+        "add_feature" => {
+            let names: Vec<&str> = args
+                .get("features")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default();
+            if names.is_empty() {
+                let manifest = Project::discover(here)
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p.root.join("Cargo.toml")).ok());
+                return Ok(features::list(manifest.as_deref()));
+            }
+            let project = Project::discover(here)?;
+            Ok(features::add(&project.root, &names)?.message())
         }
         "generate_resource" => {
             let fields: Vec<String> = args
@@ -640,6 +663,19 @@ mod tests {
         }
         let r = request("tools/call", json!({ "name": "nope", "arguments": {} }));
         assert_eq!(r["result"]["isError"], true);
+    }
+
+    #[test]
+    fn add_feature_lists_features_and_rejects_typos_before_touching_anything() {
+        let list = run_tool("add_feature", &json!({})).unwrap();
+        assert!(list.contains("ws ") && list.contains("WebSocket"), "{list}");
+        assert!(list.contains("zapline add <feature>"), "{list}");
+        // Validation happens before Cargo.toml is read, so this never
+        // edits this crate's manifest.
+        let err = run_tool("add_feature", &json!({ "features": ["wss"] }))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("did you mean `ws`?"), "{err}");
     }
 
     #[test]

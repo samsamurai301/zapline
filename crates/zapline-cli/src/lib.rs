@@ -17,6 +17,7 @@ pub mod client;
 pub mod db;
 pub mod dev;
 pub mod doctor;
+pub mod features;
 pub mod generate;
 pub mod mcp;
 pub mod naming;
@@ -152,6 +153,19 @@ pub fn execute(cli: Cli) -> Result<()> {
                 GenerateKind::Tailwind => tailwind::generate(&Project::discover(here)?, g.force)?,
             };
             report.print();
+            Ok(())
+        }
+        Command::Add(a) => {
+            if a.list {
+                // Inside a project, mark the features it already has.
+                let manifest = Project::discover(Path::new("."))
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p.root.join("Cargo.toml")).ok());
+                print!("{}", features::list(manifest.as_deref()));
+                return Ok(());
+            }
+            let project = Project::discover(Path::new("."))?;
+            print!("{}", features::add(&project.root, &a.features)?.message());
             Ok(())
         }
         Command::Dev(a) => {

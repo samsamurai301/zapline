@@ -51,7 +51,7 @@ fn help_lists_every_command_with_examples() {
     assert!(out.status.success());
     let help = stdout(&out);
     for cmd in [
-        "new", "generate", "dev", "routes", "openapi", "doctor", "bench",
+        "new", "generate", "add", "dev", "routes", "openapi", "doctor", "bench",
     ] {
         assert!(
             help.contains(&format!("\n  {cmd}")),
@@ -572,4 +572,99 @@ fn generate_job_registers_it_in_the_app() {
     let api = new_project(tmp.path(), "svc", "api");
     let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
     assert!(log.contains("no migrations/ directory"), "{log}");
+}
+
+// ---- add --------------------------------------------------------------------------------
+
+#[test]
+fn add_enables_features_in_cargo_toml() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "rt", "minimal");
+    let before = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    let dep_line = before
+        .lines()
+        .find(|l| l.starts_with("zapline = "))
+        .unwrap()
+        .to_string();
+    let version = dep_line.trim_start_matches("zapline = ").to_string();
+    assert!(version.starts_with('"'), "{dep_line}");
+
+    let out = run_in(&root, &["add", "ws", "redis"]);
+    expect_success(&out);
+    let text = stdout(&out);
+    assert!(text.starts_with("Added features: ws, redis\n"), "{text}");
+    assert!(text.contains("  ws: use zapline::ws::"), "{text}");
+
+    // Only the dependency line changed, and the features are sorted.
+    let after = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert_eq!(
+        after,
+        before.replace(
+            &dep_line,
+            &format!("zapline = {{ version = {version}, features = [\"redis\", \"ws\"] }}")
+        )
+    );
+    let manifest = read_toml(&root.join("Cargo.toml"));
+    let features: Vec<&str> = manifest["dependencies"]["zapline"]["features"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(features, ["redis", "ws"]);
+
+    // Again: nothing to do, file untouched. `json` is on by default.
+    let out = run_in(&root, &["add", "ws", "json"]);
+    expect_success(&out);
+    let text = stdout(&out);
+    assert!(text.contains("Already enabled: ws, json"), "{text}");
+    assert!(text.contains("Nothing to do"), "{text}");
+    assert_eq!(fs::read_to_string(root.join("Cargo.toml")).unwrap(), after);
+
+    // A third one joins the sorted list.
+    expect_success(&run_in(&root, &["add", "cache"]));
+    let manifest = fs::read_to_string(root.join("Cargo.toml")).unwrap();
+    assert!(
+        manifest.contains("features = [\"cache\", \"redis\", \"ws\"]"),
+        "{manifest}"
+    );
+
+    // Typos are refused with a suggestion, and nothing is written.
+    let err = expect_failure(&run_in(&root, &["add", "views", "wss"]));
+    assert!(
+        err.contains("unknown feature `wss`; did you mean `ws`?"),
+        "{err}"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("Cargo.toml")).unwrap(),
+        manifest
+    );
+}
+
+#[test]
+fn add_list_describes_every_feature() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_in(tmp.path(), &["add", "--list"]);
+    expect_success(&out);
+    let text = stdout(&out);
+    for f in [
+        "ws ",
+        "views ",
+        "sqlite ",
+        "postgres ",
+        "jwt ",
+        "redis ",
+        "otlp ",
+    ] {
+        assert!(text.contains(f), "missing {f}:\n{text}");
+    }
+    assert!(!text.contains("* enabled"), "{text}");
+
+    // Inside a project the enabled ones are marked.
+    let root = new_project(tmp.path(), "marked", "minimal");
+    expect_success(&run_in(&root, &["add", "ws"]));
+    let text = stdout(&run_in(&root, &["add", "--list"]));
+    assert!(text.contains("\n* ws "), "{text}");
+    assert!(text.contains("\n  views "), "{text}");
+    assert!(text.contains("* enabled in this project"), "{text}");
 }

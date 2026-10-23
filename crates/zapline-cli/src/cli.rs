@@ -26,7 +26,8 @@ Examples:
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
   zapline g handler ping --method get      Add a single route
   zapline g middleware audit               Add a middleware function
-  zapline routes                           Print the route table
+  zapline add ws redis                     Enable zapline features in Cargo.toml
+  zapline routes                         Print the route table
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
   zapline db new create_posts              Add a SQL migration
   zapline db migrate                       Apply pending migrations
@@ -79,6 +80,23 @@ Examples:
     /// Generate code in the current project
     #[command(visible_alias = "g")]
     Generate(GenerateArgs),
+
+    /// Enable zapline features (ws, views, sqlite, redis...) in Cargo.toml
+    #[command(after_long_help = "\
+Adds the features to the `zapline` dependency in Cargo.toml, whatever its shape
+(`zapline = \"0.1\"`, an inline table with `version` or `path`, or a
+[dependencies.zapline] table), keeping the list sorted and the rest of the file as it
+was. Features already on (listed, on by default, or implied by another) are reported
+and left alone. A misspelled name gets a suggestion.
+
+`zapline check` and `zapline test` print `hint: enable the `ws` feature: zapline add ws`
+when an error comes from a feature that is off.
+
+Examples:
+  zapline add ws
+  zapline add sqlite views fs
+  zapline add --list")]
+    Add(AddArgs),
 
     /// Rebuild and restart the app whenever files change
     #[command(after_long_help = "\
@@ -178,8 +196,9 @@ Examples:
     /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
     #[command(after_long_help = "\
 Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
-new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
-db_migrate, check, test, routes, openapi. Start it from the project directory.
+new_project, add_feature, generate_resource, generate_handler, generate_middleware,
+generate_auth, generate_job, db_new_migration, db_migrate, db_seed, check, test, routes,
+openapi, typescript_client. Start it from the project directory.
 
 Setup:
   Claude Code   claude mcp add zapline -- zapline mcp
@@ -354,6 +373,18 @@ Examples:
         #[arg(value_enum)]
         target: crate::generate::deploy::Target,
     },
+}
+
+/// Arguments of `zapline add`.
+#[derive(Debug, Args)]
+pub struct AddArgs {
+    /// Features to enable, e.g. `ws redis`
+    #[arg(value_name = "FEATURE", required_unless_present = "list")]
+    pub features: Vec<String>,
+
+    /// List every feature with a one-line description
+    #[arg(long, conflicts_with = "features")]
+    pub list: bool,
 }
 
 /// Arguments of `zapline dev`.
@@ -579,6 +610,21 @@ mod tests {
             (10, "5s", Some(2))
         );
         assert!(matches!(parse(&["doctor"]).command, Command::Doctor));
+    }
+
+    #[test]
+    fn add_takes_features_or_list() {
+        let Command::Add(a) = parse(&["add", "ws", "redis"]).command else {
+            panic!()
+        };
+        assert_eq!(a.features, ["ws", "redis"]);
+        assert!(!a.list);
+        let Command::Add(a) = parse(&["add", "--list"]).command else {
+            panic!()
+        };
+        assert!(a.list && a.features.is_empty());
+        assert!(Cli::try_parse_from(["zapline", "add"]).is_err());
+        assert!(Cli::try_parse_from(["zapline", "add", "ws", "--list"]).is_err());
     }
 
     #[test]

@@ -6,7 +6,12 @@
 //! act on: one line per error or warning (`file:line:col`, code, message,
 //! the first help), the failing tests with the start of their panic message,
 //! and a one-line summary.
+//!
+//! A "not found" error for something behind one of zapline's features that
+//! the project has not enabled (`use zapline::ws::..` without `ws`) gets a
+//! `hint: enable the `ws` feature: zapline add ws` line.
 
+use std::collections::BTreeSet;
 use std::io::Read;
 use std::process::Stdio;
 
@@ -14,6 +19,7 @@ use anyhow::{Context, Result};
 use serde_json::Value;
 
 use crate::build::cargo;
+use crate::features;
 use crate::project::Project;
 
 /// One compiler diagnostic, condensed.
@@ -127,6 +133,76 @@ pub fn parse_diagnostic(line: &str) -> Option<Diagnostic> {
     })
 }
 
+/// Error codes for names rustc could not find: unresolved imports and
+/// paths, unknown types and values, missing methods.
+const NOT_FOUND_CODES: &[&str] = &["E0432", "E0433", "E0412", "E0425", "E0599"];
+
+/// The `hint: enable the `ws` feature: zapline add ws` line for a "not
+/// found" error about something behind zapline features that are all off in
+/// `enabled` (see [`features::enabled`]).
+///
+/// ```
+/// use zapline_cli::brief::{feature_hint, Diagnostic};
+/// let d = Diagnostic {
+///     level: "error".into(),
+///     code: Some("E0432".into()),
+///     message: "unresolved import `zapline::ws`".into(),
+///     location: None,
+///     notes: vec![],
+/// };
+/// let on = zapline_cli::features::enabled("[dependencies]\nzapline = \"0.1\"\n").unwrap();
+/// assert_eq!(
+///     feature_hint(&d, &on).as_deref(),
+///     Some("hint: enable the `ws` feature: zapline add ws")
+/// );
+/// ```
+pub fn feature_hint(d: &Diagnostic, enabled: &BTreeSet<String>) -> Option<String> {
+    let code = d.code.as_deref().filter(|c| NOT_FOUND_CODES.contains(c))?;
+    let mut text = d.message.clone();
+    for note in &d.notes {
+        text.push('\n');
+        text.push_str(note);
+    }
+    let candidates = features::missing_for(code, &text);
+    // If one of them is on, the error is about something else.
+    if candidates.is_empty() || candidates.iter().any(|f| enabled.contains(f.name)) {
+        return None;
+    }
+    let names: Vec<String> = candidates.iter().map(|f| format!("`{}`", f.name)).collect();
+    Some(format!(
+        "hint: enable the {} feature: zapline add {}",
+        names.join(" or "),
+        candidates[0].name
+    ))
+}
+
+/// Appends [`feature_hint`] to each error it applies to. `manifest` is the
+/// project's Cargo.toml; without a `zapline` dependency whose features it
+/// declares, nothing is added.
+///
+/// ```
+/// use zapline_cli::brief::{add_feature_hints, Diagnostic};
+/// let mut diags = vec![Diagnostic {
+///     level: "error".into(),
+///     code: Some("E0599".into()),
+///     message: "no method named `views` found for struct `App` in the current scope".into(),
+///     location: None,
+///     notes: vec![],
+/// }];
+/// add_feature_hints(&mut diags, "[dependencies]\nzapline = \"0.1\"\n");
+/// assert_eq!(diags[0].notes, ["hint: enable the `views` feature: zapline add views"]);
+/// ```
+pub fn add_feature_hints(diags: &mut [Diagnostic], manifest: &str) {
+    let Some(enabled) = features::enabled(manifest) else {
+        return;
+    };
+    for d in diags.iter_mut().filter(|d| d.level == "error") {
+        if let Some(hint) = feature_hint(d, &enabled) {
+            d.notes.push(hint);
+        }
+    }
+}
+
 /// Runs `cargo <args> --message-format=json` and collects unique diagnostics.
 fn diagnostics(project: &Project, args: &[&str]) -> Result<(bool, Vec<Diagnostic>)> {
     let output = cargo()
@@ -144,6 +220,9 @@ fn diagnostics(project: &Project, args: &[&str]) -> Result<(bool, Vec<Diagnostic
         if !found.contains(&d) {
             found.push(d);
         }
+    }
+    if let Ok(manifest) = std::fs::read_to_string(project.root.join("Cargo.toml")) {
+        add_feature_hints(&mut found, &manifest);
     }
     Ok((output.status.success(), found))
 }
@@ -372,6 +451,92 @@ mod tests {
         let noise = r#"{"reason":"compiler-message","message":{"level":"error","message":"aborting due to 2 previous errors","spans":[],"children":[]}}"#;
         assert!(parse_diagnostic(noise).is_none());
         assert!(parse_diagnostic(r#"{"reason":"compiler-artifact"}"#).is_none());
+    }
+
+    /// Recorded from `cargo check --message-format=json` on a project that
+    /// uses `zapline::ws` without the feature (explanation shortened).
+    const UNRESOLVED_WS: &str = r##"{"reason":"compiler-message","message":{"rendered":null,"$message_type":"diagnostic","children":[{"children":[],"code":null,"level":"note","message":"found an item that was configured out","rendered":null,"spans":[{"byte_end":6834,"byte_start":6820,"column_end":21,"column_start":7,"expansion":null,"file_name":"/zapline/src/lib.rs","is_primary":false,"label":"the item is gated behind the `ws` feature","line_end":147,"line_start":147,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":21,"highlight_start":7,"text":"#[cfg(feature = \"ws\")]"}]},{"byte_end":6847,"byte_start":6845,"column_end":11,"column_start":9,"expansion":null,"file_name":"/zapline/src/lib.rs","is_primary":true,"label":null,"line_end":148,"line_start":148,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":11,"highlight_start":9,"text":"pub mod ws;"}]}]}],"level":"error","message":"unresolved import `zapline::ws`","spans":[{"byte_end":15,"byte_start":13,"column_end":16,"column_start":14,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":"could not find `ws` in `zapline`","line_end":1,"line_start":1,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":16,"highlight_start":14,"text":"use zapline::ws::WebSocketUpgrade;"}]}],"code":{"code":"E0432","explanation":"An import was unresolved.\n"}}}"##;
+
+    #[test]
+    fn a_missing_feature_gets_a_hint() {
+        let mut diags = vec![parse_diagnostic(UNRESOLVED_WS).unwrap()];
+        add_feature_hints(&mut diags, "[dependencies]\nzapline = \"0.1\"\n");
+        assert_eq!(
+            diags[0].line(),
+            "error[E0432] src/lib.rs:1:14: unresolved import `zapline::ws`\n    could not find `ws` in `zapline`\n    hint: enable the `ws` feature: zapline add ws"
+        );
+
+        // Already on: the error is about something else.
+        let mut diags = vec![parse_diagnostic(UNRESOLVED_WS).unwrap()];
+        add_feature_hints(
+            &mut diags,
+            "[dependencies]\nzapline = { version = \"0.1\", features = [\"full\"] }\n",
+        );
+        assert_eq!(diags[0].notes, ["could not find `ws` in `zapline`"]);
+
+        // Not a zapline project: no hints.
+        let mut diags = vec![parse_diagnostic(UNRESOLVED_WS).unwrap()];
+        add_feature_hints(&mut diags, "[dependencies]\nserde = \"1\"\n");
+        assert_eq!(diags[0].notes.len(), 1);
+    }
+
+    #[test]
+    fn hints_for_types_methods_and_either_database() {
+        let on = features::enabled("[dependencies]\nzapline = \"0.1\"\n").unwrap();
+        let diag = |code: &str, message: &str, label: &str| Diagnostic {
+            level: "error".into(),
+            code: Some(code.into()),
+            message: message.into(),
+            location: None,
+            notes: vec![label.into()],
+        };
+        let hint = |d: &Diagnostic| feature_hint(d, &on);
+        // Labels and messages as rustc 1.9x prints them.
+        assert_eq!(
+            hint(&diag(
+                "E0425",
+                "cannot find type `Db` in this scope",
+                "not found in this scope"
+            ))
+            .as_deref(),
+            Some("hint: enable the `sqlite` or `postgres` feature: zapline add sqlite")
+        );
+        assert_eq!(
+            hint(&diag(
+                "E0599",
+                "no method named `views` found for struct `zapline::App` in the current scope",
+                "method not found in `zapline::App`"
+            ))
+            .as_deref(),
+            Some("hint: enable the `views` feature: zapline add views")
+        );
+        assert_eq!(
+            hint(&diag(
+                "E0433",
+                "cannot find `cache` in `zapline`",
+                "could not find `cache` in `zapline`"
+            ))
+            .as_deref(),
+            Some("hint: enable the `cache` feature: zapline add cache")
+        );
+        assert_eq!(
+            hint(&diag(
+                "E0432",
+                "unresolved import `zapline::auth::Jwt`",
+                "no `Jwt` in `auth`"
+            ))
+            .as_deref(),
+            Some("hint: enable the `jwt` feature: zapline add jwt")
+        );
+        assert_eq!(
+            hint(&diag("E0308", "mismatched types", "expected `WebSocket`")),
+            None
+        );
+        // `Json` is a default feature, so this is some other problem.
+        assert_eq!(
+            hint(&diag("E0425", "cannot find type `Json` in this scope", "")),
+            None
+        );
     }
 
     #[test]
