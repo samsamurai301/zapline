@@ -1,0 +1,4 @@
+{% extends "mail/layout.html" %}
+{% block subject %}Welcome, {{ name }}!{% endblock %}
+{% block body %}<h1>Hi {{ name }}</h1>
+<p>Please <a href="{{ url }}">confirm your address</a>.</p>{% endblock %}

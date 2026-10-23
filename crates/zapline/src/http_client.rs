@@ -55,3 +55,16 @@ pub(crate) async fn fetch(req: Request<Full<Bytes>>, what: &str) -> Result<Fetch
         body,
     })
 }
+
+/// Send `req` and return the response with its body unread, for large
+/// downloads (S3 `get_stream`).
+#[cfg(feature = "s3")]
+pub(crate) async fn fetch_streaming(
+    req: Request<Full<Bytes>>,
+    what: &str,
+) -> Result<http::Response<hyper::body::Incoming>> {
+    client()
+        .request(req)
+        .await
+        .map_err(|e| Error::service_unavailable(format!("cannot reach {what}")).with_source(e))
+}

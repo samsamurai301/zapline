@@ -1,0 +1,3 @@
+Hi {{ name }},
+
+Confirm your address: {{ url }}
