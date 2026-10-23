@@ -219,8 +219,13 @@ impl TestClient {
     /// requests. Set `ZAPLINE_FUZZ_SEED` or `ZAPLINE_FUZZ_CASES` to override
     /// the defaults without editing the test (`zapline fuzz --seed` does).
     ///
+    /// An operation that times out gets no further cases, and a response
+    /// that turns out to be an event stream (`text/event-stream`) is not
+    /// read past its headers.
+    ///
     /// The app shares state across cases, like a real server: requests that
-    /// create things do create them.
+    /// create things do create them. Each request comes from its own peer
+    /// address, so per-IP rate limits don't hide routes.
     ///
     /// Await it for a [`FuzzReport`]; configure it with [`Fuzz::config`].
     pub fn fuzz(&self) -> Fuzz {
@@ -352,6 +357,7 @@ impl FuzzRequest {
         }
     }
 
+    /// The HTTP method.
     pub fn method(&self) -> &Method {
         &self.method
     }
@@ -366,6 +372,7 @@ impl FuzzRequest {
         &self.headers
     }
 
+    /// The body as sent (empty for none).
     pub fn body(&self) -> &Bytes {
         &self.body
     }
@@ -446,10 +453,12 @@ impl FuzzFailure {
         &self.operation
     }
 
+    /// The operation's `operationId` (empty when the document has none).
     pub fn operation_id(&self) -> &str {
         &self.operation_id
     }
 
+    /// What went wrong.
     pub fn kind(&self) -> &FailureKind {
         &self.kind
     }
@@ -470,6 +479,7 @@ impl FuzzFailure {
         self.status
     }
 
+    /// The response body (empty after a panic or a timeout).
     pub fn response_body(&self) -> &Bytes {
         &self.response
     }
@@ -491,10 +501,12 @@ pub struct FuzzReport {
 }
 
 impl FuzzReport {
+    /// No failures.
     pub fn is_clean(&self) -> bool {
         self.failures.is_empty()
     }
 
+    /// One entry per operation and kind of failure, in document order.
     pub fn failures(&self) -> &[FuzzFailure] {
         &self.failures
     }
@@ -515,6 +527,8 @@ impl FuzzReport {
         &self.skipped
     }
 
+    /// The seed used: pass it to [`FuzzConfig::seed`] (or `ZAPLINE_FUZZ_SEED`)
+    /// to send the same requests again.
     pub fn seed(&self) -> u64 {
         self.seed
     }
@@ -627,6 +641,7 @@ fn op_seed(seed: u64, op: &Operation) -> u64 {
     h ^ seed.rotate_left(17)
 }
 
+#[derive(Clone)]
 struct Outcome {
     status: Option<u16>,
     body: Bytes,
@@ -675,8 +690,7 @@ async fn run(client: TestClient, config: FuzzConfig) -> FuzzReport {
             plan.push(planner.random());
         }
 
-        // (failure, first failing case, occurrences)
-        let mut found: Vec<(FailureKind, Case, usize)> = Vec::new();
+        let mut found: Vec<Found> = Vec::new();
         for case in plan {
             let Some(rendered) = case.render(op, &config.headers) else {
                 continue;
@@ -684,26 +698,38 @@ async fn run(client: TestClient, config: FuzzConfig) -> FuzzReport {
             report.requests += 1;
             let valid = case.is_valid(op, &r, body_limit);
             let outcome = execute(&client, op, &r, &rendered, valid, &config, timeout).await;
-            if let Some(kind) = outcome.failure {
-                match found.iter_mut().find(|(k, _, _)| k.same_bug(&kind)) {
-                    Some(entry) => entry.2 += 1,
-                    None => found.push((kind, case, 1)),
-                }
+            let Some(kind) = outcome.failure.clone() else {
+                continue;
+            };
+            let timed_out = kind == FailureKind::Timeout;
+            match found.iter_mut().find(|f| f.kind.same_bug(&kind)) {
+                Some(f) => f.occurrences += 1,
+                None => found.push(Found {
+                    kind,
+                    case,
+                    rendered,
+                    outcome,
+                    occurrences: 1,
+                }),
+            }
+            // Each further timeout would cost the full timeout again.
+            if timed_out {
+                break;
             }
         }
 
-        for (kind, case, occurrences) in found {
-            let (case, rendered, outcome, spent) =
-                shrink(&client, op, &r, case, &kind, body_limit, &config, timeout).await;
+        for f in found {
+            let occurrences = f.occurrences;
+            let (f, spent) = shrink(&client, op, &r, f, body_limit, &config, timeout).await;
             report.requests += spent;
             report.failures.push(FuzzFailure {
                 operation: op.label(),
                 operation_id: op.id.clone(),
-                kind: outcome.failure.unwrap_or(kind),
-                case: case.label.clone(),
-                request: FuzzRequest::of(&rendered, &config.headers),
-                status: outcome.status,
-                response: outcome.body,
+                kind: f.kind,
+                case: f.case.label,
+                request: FuzzRequest::of(&f.rendered, &config.headers),
+                status: f.outcome.status,
+                response: f.outcome.body,
                 occurrences,
             });
         }
@@ -711,29 +737,36 @@ async fn run(client: TestClient, config: FuzzConfig) -> FuzzReport {
     report
 }
 
-/// Replace `case` with simpler ones that still show the same bug, within
-/// [`SHRINK_BUDGET`] requests. Returns the final case, as sent, its outcome
-/// and the requests spent.
-#[allow(clippy::too_many_arguments)]
+/// A failing request: the first one seen for a bug, later the smallest.
+struct Found {
+    kind: FailureKind,
+    case: Case,
+    rendered: Rendered,
+    outcome: Outcome,
+    occurrences: usize,
+}
+
+/// Replace the failing request with simpler ones that still show the same
+/// bug, within [`SHRINK_BUDGET`] requests. Returns the smallest one found,
+/// with the response it got, and the requests spent.
 async fn shrink(
     client: &TestClient,
     op: &Operation,
     r: &Resolver<'_>,
-    mut case: Case,
-    kind: &FailureKind,
+    mut found: Found,
     body_limit: usize,
     config: &FuzzConfig,
     timeout: Duration,
-) -> (Case, Rendered, Outcome, usize) {
+) -> (Found, usize) {
     let mut spent = 0;
     // Timeouts are slow to confirm: keep the original request.
-    let mut budget = if *kind == FailureKind::Timeout {
+    let mut budget = if found.kind == FailureKind::Timeout {
         0
     } else {
         SHRINK_BUDGET
     };
     'outer: while budget > 0 {
-        for candidate in simplifications(op, &case) {
+        for candidate in simplifications(op, &found.case) {
             if budget == 0 {
                 break 'outer;
             }
@@ -744,27 +777,20 @@ async fn shrink(
             spent += 1;
             let valid = candidate.is_valid(op, r, body_limit);
             let outcome = execute(client, op, r, &rendered, valid, config, timeout).await;
-            if outcome.failure.as_ref().is_some_and(|k| k.same_bug(kind)) {
-                case = Case {
-                    label: case.label.clone(),
+            if let Some(kind) = outcome.failure.clone().filter(|k| k.same_bug(&found.kind)) {
+                found.case = Case {
+                    label: std::mem::take(&mut found.case.label),
                     ..candidate
                 };
+                found.kind = kind;
+                found.rendered = rendered;
+                found.outcome = outcome;
                 continue 'outer;
             }
         }
         break;
     }
-    // The final request once more, for the report (state may have moved).
-    let rendered = case
-        .render(op, &config.headers)
-        .expect("a case that was sent renders again");
-    let valid = case.is_valid(op, r, body_limit);
-    let mut outcome = execute(client, op, r, &rendered, valid, config, timeout).await;
-    spent += 1;
-    if !outcome.failure.as_ref().is_some_and(|k| k.same_bug(kind)) {
-        outcome.failure = Some(kind.clone());
-    }
-    (case, rendered, outcome, spent)
+    (found, spent)
 }
 
 async fn execute(
@@ -776,7 +802,9 @@ async fn execute(
     config: &FuzzConfig,
     timeout: Duration,
 ) -> Outcome {
-    let mut req = client.request(rendered.method.clone(), &rendered.uri);
+    let mut req = client
+        .request(rendered.method.clone(), &rendered.uri)
+        .remote_addr(next_peer());
     for (n, v) in &rendered.headers {
         req = req.header(n, v);
     }
@@ -785,7 +813,7 @@ async fn execute(
     install_panic_hook();
     let slot: Arc<Mutex<Option<String>>> = Arc::default();
     let sent = Captured {
-        inner: Box::pin(req.send()),
+        inner: Box::pin(req.send_skipping_streams()),
         slot: slot.clone(),
     };
     let result = tokio::time::timeout(timeout, AssertUnwindSafe(sent).catch_unwind()).await;
@@ -828,6 +856,17 @@ async fn execute(
         body,
         failure,
     }
+}
+
+/// A new peer address per request, from the benchmarking range
+/// `198.18.0.0/15`, so per-IP rate limits don't turn every case after the
+/// first hundred into a `429`.
+fn next_peer() -> std::net::SocketAddr {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed) % (1 << 17);
+    let ip = std::net::Ipv4Addr::from(u32::from(std::net::Ipv4Addr::new(198, 18, 0, 0)) + n);
+    std::net::SocketAddr::from((ip, 40000))
 }
 
 /// Whether a response is a failure.

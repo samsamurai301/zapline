@@ -101,14 +101,19 @@ impl Operation {
     }
 
     /// The response object documented for `status`: its code, its `NXX`
-    /// range, or `default`.
+    /// range, or for error statuses `default` (zapline documents errors
+    /// there; a success it covers would be validated as an error body).
     pub(crate) fn response(&self, status: u16) -> Option<&Value> {
         let range = format!("{}XX", status / 100);
         self.responses
             .get(&status.to_string())
             .or_else(|| self.responses.get(&range))
             .or_else(|| self.responses.get(&range.to_ascii_lowercase()))
-            .or_else(|| self.responses.get("default"))
+            .or_else(|| {
+                (status >= 400)
+                    .then(|| self.responses.get("default"))
+                    .flatten()
+            })
     }
 }
 
@@ -817,6 +822,7 @@ mod tests {
         let op = &ops[0];
         assert_eq!(op.label(), "GET /items/{id}");
         assert!(op.response(404).is_some() && op.response(500).is_none());
+        assert!(op.response(201).is_none());
         let r = Resolver::new(&doc);
 
         let case = Case {

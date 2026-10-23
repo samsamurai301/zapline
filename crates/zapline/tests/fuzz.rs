@@ -301,7 +301,7 @@ async fn list_items(store: State<Store>, Query(page): Query<Page>) -> Json<Vec<I
     Json(all.into_iter().skip(offset).take(limit).collect())
 }
 
-#[delete("/items/{id}")]
+#[delete("/items/{id}", status = 204)]
 async fn delete_item(
     store: State<Store>,
     Path(id): Path<u64>,
@@ -391,4 +391,15 @@ async fn websockets_and_event_streams_are_skipped() {
     assert_eq!(report.operations(), 0);
     let skipped: Vec<&str> = report.skipped().iter().map(|(op, _)| op.as_str()).collect();
     assert_eq!(skipped, ["GET /events", "GET /ws"]);
+}
+
+#[tokio::test]
+async fn undocumented_event_streams_are_not_read_to_the_end() {
+    // Returns `Response`, so the spec knows nothing about the stream.
+    let app = App::new().get("/feed", || async {
+        Sse::new(futures_util::stream::pending::<Result<zapline::sse::Event>>()).into_response()
+    });
+    let report = app.test().fuzz().config(FuzzConfig::new().cases(5)).await;
+    report.assert_clean();
+    assert_eq!(report.requests(), 5);
 }

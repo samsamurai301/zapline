@@ -334,6 +334,18 @@ impl TestRequest {
     }
 
     pub async fn send(self) -> TestResponse {
+        self.send_with(true).await
+    }
+
+    /// Like `send`, but a `text/event-stream` response comes back with an
+    /// empty body instead of being read until the stream ends (never, for
+    /// most of them).
+    #[cfg(feature = "openapi")]
+    pub(crate) async fn send_skipping_streams(self) -> TestResponse {
+        self.send_with(false).await
+    }
+
+    async fn send_with(self, read_streams: bool) -> TestResponse {
         let mut req = self
             .builder
             .body(ReqBody::Full(self.body))
@@ -354,6 +366,17 @@ impl TestRequest {
         let (parts, body) = res.into_parts();
         if let Some((jar, path)) = jar {
             jar.lock().unwrap().store(&path, &parts.headers);
+        }
+        let streaming = parts
+            .headers
+            .get(CONTENT_TYPE)
+            .is_some_and(|v| v.as_bytes().starts_with(b"text/event-stream"));
+        if streaming && !read_streams {
+            return TestResponse {
+                status: parts.status,
+                headers: parts.headers,
+                body: Bytes::new(),
+            };
         }
         let body = body
             .collect()
