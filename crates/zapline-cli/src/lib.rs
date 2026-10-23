@@ -156,6 +156,18 @@ pub fn execute(cli: Cli) -> Result<()> {
         }
         Command::Dev(a) => {
             let project = Project::discover(Path::new("."))?;
+            let clients = match (a.no_client, a.client) {
+                (true, _) => client::Configured::default(),
+                (false, Some(c)) => client::Configured {
+                    paths: vec![openapi::resolve_output(
+                        &std::env::current_dir()
+                            .context("cannot determine the current directory")?,
+                        &c,
+                    )],
+                    explicit: true,
+                },
+                (false, None) => client::configured(&project)?,
+            };
             dev::run(
                 &project,
                 &dev::DevOptions {
@@ -163,14 +175,8 @@ pub fn execute(cli: Cli) -> Result<()> {
                     release: a.release,
                     app_args: a.app_args,
                     debounce: Duration::from_millis(a.debounce_ms),
-                    client: match a.client {
-                        Some(c) => Some(openapi::resolve_output(
-                            &std::env::current_dir()
-                                .context("cannot determine the current directory")?,
-                            &c,
-                        )),
-                        None => None,
-                    },
+                    clients: clients.paths,
+                    clients_explicit: clients.explicit,
                     ..dev::DevOptions::default()
                 },
             )
@@ -205,7 +211,7 @@ pub fn execute(cli: Cli) -> Result<()> {
         }
         Command::Client(a) => {
             let project = Project::discover(Path::new("."))?;
-            client::run(&project, a.bin.as_deref(), &a.output)
+            client::run(&project, a.bin.as_deref(), a.output.as_deref())
         }
         Command::Css { minify, watch } => {
             let project = Project::discover(Path::new("."))?;

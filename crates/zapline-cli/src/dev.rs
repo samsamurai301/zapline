@@ -12,6 +12,11 @@
 //!
 //! A project with `styles/app.css` (Tailwind) also gets `tailwindcss --watch`
 //! running alongside, rebuilding `static/app.css` as templates change.
+//!
+//! Typed API clients (`--client`, `[client]` in `zapline.toml`, or
+//! `frontend/src/api.ts` when there is a `frontend/`) are regenerated from
+//! each new binary before it starts, and only rewritten when they change, so
+//! a frontend's `tsc --watch` or vite flags a Rust signature change at once.
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -51,8 +56,13 @@ pub struct DevOptions {
     pub debounce: Duration,
     /// How long the old process gets to exit after SIGTERM before it is killed.
     pub grace: Duration,
-    /// Regenerate this TypeScript client after every successful build.
-    pub client: Option<PathBuf>,
+    /// Typed clients (`.ts`, or `.js` modules) to regenerate after every
+    /// successful build; see [`crate::client::configured`].
+    pub clients: Vec<PathBuf>,
+    /// Whether `clients` were asked for (`--client`, `zapline.toml`) rather
+    /// than found (`frontend/`). Found ones turn off quietly when the app has
+    /// no OpenAPI document.
+    pub clients_explicit: bool,
 }
 
 impl Default for DevOptions {
@@ -63,7 +73,8 @@ impl Default for DevOptions {
             app_args: Vec::new(),
             debounce: Duration::from_millis(300),
             grace: Duration::from_secs(5),
-            client: None,
+            clients: Vec::new(),
+            clients_explicit: false,
         }
     }
 }
@@ -267,6 +278,8 @@ struct Dev<'a> {
     shutdown: Arc<AtomicBool>,
     /// `tailwindcss --watch`, which exits when its stdin closes.
     css: Option<(Child, ChildStdin)>,
+    /// Typed clients regenerated after each build.
+    clients: crate::client::Live,
 }
 
 impl Dev<'_> {
@@ -307,13 +320,9 @@ impl Dev<'_> {
                     ui::status_info("Changed", "files changed during the build, rebuilding");
                     return;
                 }
-                if let Some(target) = &self.opts.client {
-                    let shown = target.strip_prefix(&self.project.root).unwrap_or(target);
-                    match crate::client::regenerate(self.project, &exe, target) {
-                        Ok(true) => ui::status("Client", format!("updated {}", shown.display())),
-                        Ok(false) => {}
-                        Err(e) => ui::status_warn("Client", format!("not updated: {e:#}")),
-                    }
+                if !self.clients.is_empty() {
+                    self.clients
+                        .refresh_and_report(self.project, &exe, self.opts.clients_explicit);
                 }
                 self.restart(&exe);
             }
@@ -452,6 +461,7 @@ pub fn run(project: &Project, opts: &DevOptions) -> Result<()> {
         debounce: Debouncer::new(opts.debounce),
         shutdown,
         css: None,
+        clients: crate::client::Live::new(opts.clients.clone()),
     };
     if crate::tailwind::is_used(&project.root) {
         match crate::tailwind::watch(&project.root) {

@@ -201,12 +201,149 @@ fn failed_exports_never_clobber_the_existing_spec() {
     );
 }
 
+// ---- client ------------------------------------------------------------------------------
+
+/// A fake app whose spec has one operation per name in `ops`.
+fn write_spec_main(app: &std::path::Path, ops: &[&str]) {
+    let paths: Vec<String> = ops
+        .iter()
+        .map(|op| {
+            format!(
+                r#""/{op}":{{"get":{{"operationId":"{op}","responses":{{"200":{{"description":"OK","content":{{"application/json":{{"schema":{{"type":"string"}}}}}}}}}}}}}}"#
+            )
+        })
+        .collect();
+    let spec = format!(
+        r#"{{"openapi":"3.1.0","info":{{"title":"fake","version":"1"}},"paths":{{{}}}}}"#,
+        paths.join(",")
+    );
+    fs::write(
+        app.join("src/main.rs"),
+        format!(
+            r####"fn main() {{
+    if let Some(path) = std::env::var_os("ZAPLINE_EXPORT_OPENAPI") {{
+        std::fs::write(path, r###"{spec}"###).unwrap();
+        return;
+    }}
+    println!("spec-app running");
+    std::thread::sleep(std::time::Duration::from_secs(120));
+}}
+"####
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn client_writes_the_configured_typescript_and_javascript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = fake_app(tmp.path(), "client-app");
+    write_spec_main(&app, &["list_users"]);
+    fs::write(
+        app.join("zapline.toml"),
+        "[client]\nts = \"web/src/api.ts\"\njs = \"static/api.js\"\n",
+    )
+    .unwrap();
+    let log = expect_success(&run_in(&app, &["client"]));
+    assert!(log.contains("web/src/api.ts (1 operations)"), "{log}");
+    let ts = fs::read_to_string(app.join("web/src/api.ts")).unwrap();
+    assert!(ts.contains("listUsers: (options?: CallOptions) =>"), "{ts}");
+    let js = fs::read_to_string(app.join("static/api.js")).unwrap();
+    assert!(js.contains("@returns {Promise<string>}"), "{js}");
+
+    // Unchanged files are not rewritten.
+    let log = expect_success(&run_in(&app, &["client"]));
+    assert!(log.contains("Unchanged"), "{log}");
+
+    // `-o` wins; the extension picks the language.
+    expect_success(&run_in(&app, &["client", "-o", "out/api.mjs"]));
+    let mjs = fs::read_to_string(app.join("out/api.mjs")).unwrap();
+    assert!(mjs.contains("// @ts-check"), "{mjs}");
+}
+
+#[test]
+fn client_defaults_to_the_frontend_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app = fake_app(tmp.path(), "client-app");
+    write_spec_main(&app, &["health"]);
+    fs::create_dir(app.join("frontend")).unwrap();
+    expect_success(&run_in(&app, &["client"]));
+    assert!(app.join("frontend/src/api.ts").is_file());
+}
+
 // ---- dev ---------------------------------------------------------------------------------
 
 #[cfg(unix)]
 mod dev {
     use super::*;
     use std::process::Command;
+
+    #[test]
+    fn keeps_the_frontend_client_current() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = fake_app(tmp.path(), "dev-client-app");
+        write_spec_main(&app, &["one"]);
+        fs::create_dir(app.join("frontend")).unwrap();
+        let mut dev = Watched::spawn(dev_command(&app, &[]));
+        let first = dev.wait_for("updated frontend/src/api.ts", SLOW);
+        dev.wait_for("spec-app running", SLOW);
+        let ts = fs::read_to_string(app.join("frontend/src/api.ts")).unwrap();
+        assert!(ts.contains("one: (options?: CallOptions) =>"), "{ts}");
+
+        // A new route: the client follows and dev says what changed.
+        write_spec_main(&app, &["one", "two"]);
+        let second = dev.wait_for_after(first + 1, "updated frontend/src/api.ts", SLOW);
+        assert!(
+            dev.seen[second].contains("(+two)"),
+            "{:?}",
+            dev.seen[second]
+        );
+        let ts = fs::read_to_string(app.join("frontend/src/api.ts")).unwrap();
+        assert!(ts.contains("two: (options?: CallOptions) =>"), "{ts}");
+
+        signal(dev.child.id(), "INT");
+        assert!(dev.wait_exit(Duration::from_secs(30)).success());
+    }
+
+    #[test]
+    fn a_found_frontend_without_openapi_turns_the_client_off() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = fake_app(tmp.path(), "dev-noapi-app");
+        // What `App::run` does when asked for a spec it doesn't have.
+        fs::write(
+            app.join("src/main.rs"),
+            r#"fn main() {
+    if std::env::var_os("ZAPLINE_EXPORT_OPENAPI").is_some() {
+        eprintln!("zapline: ZAPLINE_EXPORT_OPENAPI is set but the app has no OpenAPI document");
+        std::process::exit(78);
+    }
+    println!("plain-app running");
+    std::thread::sleep(std::time::Duration::from_secs(120));
+}
+"#,
+        )
+        .unwrap();
+        fs::create_dir(app.join("frontend")).unwrap();
+        let mut dev = Watched::spawn(dev_command(&app, &[]));
+        dev.wait_for("off for this session", SLOW);
+        dev.wait_for("plain-app running", SLOW);
+        assert!(!app.join("frontend/src/api.ts").exists());
+        signal(dev.child.id(), "INT");
+        assert!(dev.wait_exit(Duration::from_secs(30)).success());
+    }
+
+    #[test]
+    fn no_client_skips_the_frontend_client() {
+        let tmp = tempfile::tempdir().unwrap();
+        let app = fake_app(tmp.path(), "dev-noclient-app");
+        write_spec_main(&app, &["one"]);
+        fs::create_dir(app.join("frontend")).unwrap();
+        let mut dev = Watched::spawn(dev_command(&app, &["--no-client"]));
+        dev.wait_for("spec-app running", SLOW);
+        assert!(!app.join("frontend/src/api.ts").exists());
+        signal(dev.child.id(), "INT");
+        assert!(dev.wait_exit(Duration::from_secs(30)).success());
+    }
 
     fn dev_command(app: &std::path::Path, extra: &[&str]) -> Command {
         let mut cmd = zapline();
