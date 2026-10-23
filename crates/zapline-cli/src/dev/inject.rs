@@ -158,6 +158,39 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
+/// Whether `html` (or the start of it) is a whole page, not a fragment such
+/// as an htmx partial: it has an `<html>`, `<head>`, `<body>` or doctype.
+pub(crate) fn is_page(html: &[u8]) -> bool {
+    ["<!doctype", "<html", "<head", "<body"]
+        .iter()
+        .any(|marker| find_bytes_ci(html, marker).is_some())
+}
+
+/// Whether `html` already loads the client.
+pub(crate) fn loads_client(html: &[u8]) -> bool {
+    html.windows(CLIENT_PATH.len())
+        .any(|w| w == CLIENT_PATH.as_bytes())
+}
+
+/// Where the client tag goes in the start of a page that is still
+/// arriving: before `</head`, else right after the opening `<body>` tag (as
+/// [`inject`] does). `None` until one of them has arrived.
+pub(crate) fn early_insertion_point(html: &[u8]) -> Option<usize> {
+    find_bytes_ci(html, "</head").or_else(|| {
+        let start = find_bytes_ci(html, "<body")?;
+        html[start..]
+            .iter()
+            .position(|&b| b == b'>')
+            .map(|end| start + end + 1)
+    })
+}
+
+fn find_bytes_ci(haystack: &[u8], needle: &str) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+}
+
 fn attr(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('"', "&quot;")

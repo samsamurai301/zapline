@@ -4,9 +4,12 @@
 //!
 //! It is a plain HTTP/1.1 proxy on threads (one per connection): fast
 //! enough for one developer, with no async runtime in the CLI. Request and
-//! response bodies stream through untouched except HTML pages, which are
-//! buffered to add one `<script>` tag. WebSocket (and other) upgrades are
-//! tunnelled, so live views and websockets keep working.
+//! response bodies stream through untouched except HTML pages, which get
+//! one `<script>` tag: a page that arrives in one go is buffered and sent
+//! with its new length; one the app streams (it pauses, or passes
+//! [`MAX_INJECT`]) is forwarded as it arrives, re-chunked, with the tag
+//! spliced in on the way. WebSocket (and other) upgrades are tunnelled, so
+//! live views and websockets keep working.
 //!
 //! Each forwarded request opens its own connection to the app with
 //! `Connection: close`, so switching to a rebuilt app ([`Hub::set_upstream`])
@@ -26,8 +29,14 @@ use crate::build::Diagnostic;
 
 /// Largest request or response head accepted.
 const MAX_HEAD: usize = 64 * 1024;
-/// HTML pages larger than this are passed through without the client.
+/// Most of an HTML page buffered to add the client. A larger page is
+/// streamed to the browser instead (the client still added on the way).
 const MAX_INJECT: usize = 32 * 1024 * 1024;
+/// How long an HTML page may pause before the proxy stops waiting for the
+/// rest and streams what it has (a page the app writes progressively).
+const HTML_PAUSE: Duration = Duration::from_millis(100);
+/// Most bytes of an HTML body read at a time.
+const PIECE: u64 = 64 * 1024;
 /// How long an idle keep-alive connection from a browser stays open.
 const IDLE: Duration = Duration::from_secs(120);
 /// How often open event streams get a keep-alive comment.
@@ -539,33 +548,123 @@ fn copy_chunked(from: &mut impl BufRead, to: &mut impl Write) -> io::Result<()> 
     }
 }
 
-/// Reads a chunked body into memory (without the framing), up to `limit`.
-fn read_chunked(from: &mut impl BufRead, limit: usize) -> io::Result<Vec<u8>> {
-    let mut body = Vec::new();
-    let mut line = Vec::new();
-    loop {
-        line.clear();
-        if from.read_until(b'\n', &mut line)? == 0 {
-            return Err(io::ErrorKind::UnexpectedEof.into());
+/// A response body read piece by piece, without its framing.
+enum BodyReader {
+    /// `left`: bytes of the current chunk not read yet.
+    Chunked { left: u64, done: bool },
+    /// Bytes left.
+    Length(u64),
+    /// The body ends when the app closes the connection.
+    Close { done: bool },
+}
+
+impl BodyReader {
+    fn new(res: &Head) -> BodyReader {
+        if res.chunked() {
+            BodyReader::Chunked {
+                left: 0,
+                done: false,
+            }
+        } else if let Some(n) = res.content_length() {
+            BodyReader::Length(n)
+        } else {
+            BodyReader::Close { done: false }
         }
-        let size = chunk_size(&line)?;
-        if size == 0 {
-            loop {
-                line.clear();
-                if from.read_until(b'\n', &mut line)? == 0 || line == b"\r\n" || line == b"\n" {
-                    return Ok(body);
+    }
+
+    /// The next piece of the body (at most [`PIECE`] bytes), `None` at its
+    /// end.
+    fn next(&mut self, from: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
+        match self {
+            BodyReader::Chunked { done: true, .. } | BodyReader::Close { done: true } => Ok(None),
+            BodyReader::Chunked { left, done } => {
+                if *left == 0 {
+                    let mut line = Vec::new();
+                    if from.read_until(b'\n', &mut line)? == 0 {
+                        return Err(io::ErrorKind::UnexpectedEof.into());
+                    }
+                    let size = chunk_size(&line)?;
+                    if size == 0 {
+                        // Trailers, up to the blank line.
+                        loop {
+                            line.clear();
+                            if from.read_until(b'\n', &mut line)? == 0
+                                || line == b"\r\n"
+                                || line == b"\n"
+                            {
+                                *done = true;
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    *left = size;
                 }
+                let mut piece = vec![0; (*left).min(PIECE) as usize];
+                from.read_exact(&mut piece)?;
+                *left -= piece.len() as u64;
+                if *left == 0 {
+                    let mut crlf = [0u8; 2];
+                    from.read_exact(&mut crlf)?;
+                }
+                Ok(Some(piece))
+            }
+            BodyReader::Length(left) => {
+                if *left == 0 {
+                    return Ok(None);
+                }
+                let mut piece = Vec::new();
+                from.take((*left).min(PIECE)).read_to_end(&mut piece)?;
+                if piece.is_empty() {
+                    return Err(io::ErrorKind::UnexpectedEof.into());
+                }
+                *left -= piece.len() as u64;
+                Ok(Some(piece))
+            }
+            BodyReader::Close { done } => {
+                let mut piece = Vec::new();
+                from.take(PIECE).read_to_end(&mut piece)?;
+                if piece.is_empty() {
+                    *done = true;
+                    return Ok(None);
+                }
+                Ok(Some(piece))
             }
         }
-        if body.len() as u64 + size > limit as u64 {
-            return Err(io::Error::other("body too large"));
-        }
-        let start = body.len();
-        body.resize(start + size as usize, 0);
-        from.read_exact(&mut body[start..])?;
-        let mut crlf = [0u8; 2];
-        from.read_exact(&mut crlf)?;
     }
+}
+
+/// Whether more of the response is ready within `wait` (or the app closed
+/// the connection): `false` when the app paused.
+fn arrives_within(from: &mut BufReader<TcpStream>, wait: Duration) -> io::Result<bool> {
+    if !from.buffer().is_empty() {
+        return Ok(true);
+    }
+    from.get_ref().set_read_timeout(Some(wait))?;
+    let ready = from.fill_buf().map(|_| ());
+    from.get_ref().set_read_timeout(None)?;
+    match ready {
+        Ok(()) => Ok(true),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Writes `data` as one chunk (nothing for empty data, which would end the
+/// body).
+fn write_chunk(to: &mut impl Write, data: &[u8]) -> io::Result<()> {
+    if data.is_empty() {
+        return Ok(());
+    }
+    write!(to, "{:x}\r\n", data.len())?;
+    to.write_all(data)?;
+    to.write_all(b"\r\n")
 }
 
 fn chunk_size(line: &[u8]) -> io::Result<u64> {
@@ -733,6 +832,7 @@ fn serve(
         upstream,
         peer,
         keep_alive,
+        !version.eq_ignore_ascii_case("HTTP/1.0"),
         hub.key(),
     )
 }
@@ -786,6 +886,7 @@ fn forward(
     upstream: TcpStream,
     peer: Option<SocketAddr>,
     keep_alive: bool,
+    http11: bool,
     key: &str,
 ) -> io::Result<After> {
     let upgrade = req
@@ -881,42 +982,87 @@ fn forward(
     };
 
     if !no_body && !encoded && inject::is_html(content_type) {
-        let body = if res.chunked() {
-            read_chunked(&mut up_reader, MAX_INJECT)
-        } else if let Some(n) = res.content_length() {
-            let mut body = Vec::new();
-            up_reader
-                .by_ref()
-                .take(n)
-                .read_to_end(&mut body)
-                .map(|_| body)
-        } else {
-            let mut body = Vec::new();
-            up_reader
-                .by_ref()
-                .take(MAX_INJECT as u64)
-                .read_to_end(&mut body)
-                .map(|_| body)
-        };
-        let body = body?;
-        let page = match String::from_utf8(body) {
-            Ok(html) => {
-                let nonce = res
-                    .get("content-security-policy")
-                    .and_then(inject::csp_nonce);
-                inject::inject(&html, nonce.as_deref()).into_bytes()
+        let nonce = res
+            .get("content-security-policy")
+            .and_then(inject::csp_nonce);
+        let mut body = BodyReader::new(&res);
+        let mut buffered = Vec::new();
+        // Read the page while it keeps coming, up to `MAX_INJECT`.
+        let whole = loop {
+            if buffered.len() > MAX_INJECT || !arrives_within(&mut up_reader, HTML_PAUSE)? {
+                break false;
             }
-            Err(e) => e.into_bytes(),
+            match body.next(&mut up_reader)? {
+                Some(piece) => buffered.extend_from_slice(&piece),
+                None => break true,
+            }
         };
-        let length = page.len().to_string();
-        let mut fields = vec![("content-length", length.as_str())];
-        fields.extend_from_slice(close_field);
         let mut drop = HOP_BY_HOP.to_vec();
         drop.extend(["content-length", "transfer-encoding"]);
+        if whole {
+            let page = match String::from_utf8(buffered) {
+                Ok(html) => inject::inject(&html, nonce.as_deref()).into_bytes(),
+                Err(e) => e.into_bytes(),
+            };
+            let length = page.len().to_string();
+            let mut fields = vec![("content-length", length.as_str())];
+            fields.extend_from_slice(close_field);
+            client.write_all(&res.encode(&drop, &fields))?;
+            client.write_all(&page)?;
+            client.flush()?;
+            return Ok(keep);
+        }
+        // The app streams the page: forward it as it arrives, re-chunked
+        // (or ended by closing for an HTTP/1.0 browser), with the client
+        // added before `</head>` (or after `<body>`) when that part passes,
+        // else at the end.
+        let (fields, after): (Vec<(&str, &str)>, After) = if http11 {
+            let mut fields = vec![("transfer-encoding", "chunked")];
+            fields.extend_from_slice(close_field);
+            (fields, keep)
+        } else {
+            (vec![("connection", "close")], After::Close)
+        };
         client.write_all(&res.encode(&drop, &fields))?;
-        client.write_all(&page)?;
+        let tag = inject::script_tag(nonce.as_deref());
+        let mut page = inject::is_page(&buffered);
+        let mut done = inject::loads_client(&buffered);
+        let mut piece = buffered;
+        loop {
+            let mut out = piece;
+            if !done && page {
+                if let Some(at) = inject::early_insertion_point(&out) {
+                    out.splice(at..at, tag.bytes());
+                    done = true;
+                }
+            }
+            if http11 {
+                write_chunk(client, &out)?;
+            } else {
+                client.write_all(&out)?;
+            }
+            client.flush()?;
+            match body.next(&mut up_reader)? {
+                Some(next) => {
+                    page |= inject::is_page(&next);
+                    done |= inject::loads_client(&next);
+                    piece = next;
+                }
+                None => break,
+            }
+        }
+        if !done && page {
+            if http11 {
+                write_chunk(client, tag.as_bytes())?;
+            } else {
+                client.write_all(tag.as_bytes())?;
+            }
+        }
+        if http11 {
+            client.write_all(b"0\r\n\r\n")?;
+        }
         client.flush()?;
-        return Ok(keep);
+        return Ok(after);
     }
 
     if no_body {
@@ -1028,6 +1174,18 @@ mod tests {
         );
     }
 
+    fn body_of(input: &mut Cursor<Vec<u8>>) -> io::Result<Vec<u8>> {
+        let mut body = BodyReader::Chunked {
+            left: 0,
+            done: false,
+        };
+        let mut all = Vec::new();
+        while let Some(piece) = body.next(input)? {
+            all.extend(piece);
+        }
+        Ok(all)
+    }
+
     #[test]
     fn copies_and_decodes_chunked_bodies() {
         let raw = b"4\r\nWiki\r\n6;ext=1\r\npedia \r\n0\r\nx-trailer: y\r\n\r\nNEXT";
@@ -1037,9 +1195,18 @@ mod tests {
         assert_eq!(out, &raw[..raw.len() - 4]);
 
         let mut input = Cursor::new(raw.to_vec());
-        assert_eq!(read_chunked(&mut input, 1024).unwrap(), b"Wikipedia ");
-        let mut input = Cursor::new(raw.to_vec());
-        assert!(read_chunked(&mut input, 5).is_err());
+        let mut body = BodyReader::Chunked {
+            left: 0,
+            done: false,
+        };
+        let mut pieces = Vec::new();
+        while let Some(piece) = body.next(&mut input).unwrap() {
+            pieces.push(String::from_utf8(piece).unwrap());
+        }
+        assert_eq!(pieces, ["Wiki", "pedia "]);
+        assert_eq!(input.position() as usize, raw.len() - 4);
+        let mut truncated = Cursor::new(b"4\r\nWi".to_vec());
+        assert!(body_of(&mut truncated).is_err());
         let mut truncated = Cursor::new(b"4\r\nWi".to_vec());
         assert!(copy_chunked(&mut truncated, &mut Vec::new()).is_err());
     }

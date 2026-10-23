@@ -11,6 +11,8 @@ use zapline_cli::build::Diagnostic;
 use zapline_cli::dev::proxy::{probe, read_head, Event, Head, Hub, Problem, Proxy};
 
 const TAG: &str = r#"<script src="/__zapline/client.js" defer></script>"#;
+/// MiB of filler in the big pages: more than the proxy buffers (32 MiB).
+const BIG_MIB: usize = 33;
 
 // ---- a tiny upstream app -----------------------------------------------------------------
 
@@ -53,6 +55,40 @@ fn app(conn: TcpStream, version: &str) -> std::io::Result<()> {
                 write!(out, "{:x}\r\n{part}\r\n", part.len())?;
             }
             out.write_all(b"0\r\n\r\n")
+        }
+        "/slow-page" => {
+            // A page written progressively: the head now, the rest later.
+            out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ntransfer-encoding: chunked\r\nconnection: close\r\n\r\n")?;
+            let first = "<html><head><title>slow</title></head><body>first";
+            write!(out, "{:x}\r\n{first}\r\n", first.len())?;
+            out.flush()?;
+            std::thread::sleep(Duration::from_millis(1500));
+            let rest = " then the rest</body></html>";
+            write!(out, "{:x}\r\n{rest}\r\n0\r\n\r\n", rest.len())
+        }
+        "/big-chunked" | "/big-unframed" => {
+            let chunked = path == "/big-chunked";
+            out.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\n")?;
+            out.write_all(if chunked {
+                b"transfer-encoding: chunked\r\n\r\n"
+            } else {
+                b"connection: close\r\n\r\n"
+            })?;
+            let filler = "x".repeat(1024 * 1024);
+            let parts = std::iter::once("<html><head></head><body>")
+                .chain(std::iter::repeat_n(filler.as_str(), BIG_MIB))
+                .chain(std::iter::once("</body></html>"));
+            for part in parts {
+                if chunked {
+                    write!(out, "{:x}\r\n{part}\r\n", part.len())?;
+                } else {
+                    out.write_all(part.as_bytes())?;
+                }
+            }
+            if chunked {
+                out.write_all(b"0\r\n\r\n")?;
+            }
+            Ok(())
         }
         "/json" => send(
             &mut out,
@@ -251,6 +287,56 @@ fn chunked_pages_are_decoded_and_injected() {
         head.get("content-length"),
         Some(body.len().to_string().as_str())
     );
+}
+
+#[test]
+fn streamed_pages_arrive_as_they_are_written_with_the_client() {
+    let (_hub, proxy) = proxy_to(Some(upstream("v1")));
+    let mut c = Client::connect(proxy.addr());
+    let start = Instant::now();
+    c.send("GET /slow-page HTTP/1.1\r\nhost: localhost\r\naccept: text/html\r\n\r\n");
+    let head = read_head(&mut c.reader).unwrap().unwrap();
+    assert!(head.line.starts_with("HTTP/1.1 200"), "{head:?}");
+    assert_eq!(head.get("transfer-encoding"), Some("chunked"));
+    let mut size = String::new();
+    c.reader.read_line(&mut size).unwrap();
+    let mut first = vec![0; usize::from_str_radix(size.trim(), 16).unwrap() + 2];
+    c.reader.read_exact(&mut first).unwrap();
+    assert!(
+        start.elapsed() < Duration::from_millis(1200),
+        "the start of the page waited for the rest: {:?}",
+        start.elapsed()
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&first[..first.len() - 2]),
+        format!("<html><head><title>slow</title>{TAG}</head><body>first")
+    );
+    let rest = read_body(&head, &mut c.reader).unwrap();
+    assert_eq!(
+        String::from_utf8(rest).unwrap(),
+        " then the rest</body></html>"
+    );
+    // The browser keeps its connection.
+    let (_, body) = c.get("/page", HTML);
+    assert!(body.contains(TAG), "{body}");
+}
+
+#[test]
+fn pages_larger_than_the_buffer_arrive_whole_with_the_client() {
+    let (_hub, proxy) = proxy_to(Some(upstream("v1")));
+    for path in ["/big-chunked", "/big-unframed"] {
+        let (head, body) = Client::connect(proxy.addr()).get(path, HTML);
+        assert!(head.line.starts_with("HTTP/1.1 200"), "{path}: {head:?}");
+        let expected = format!("<html><head>{TAG}</head><body>").len()
+            + BIG_MIB * 1024 * 1024
+            + "</body></html>".len();
+        assert_eq!(body.len(), expected, "{path}");
+        assert!(
+            body.starts_with(&format!("<html><head>{TAG}</head>")),
+            "{path}"
+        );
+        assert!(body.ends_with("</body></html>"), "{path}");
+    }
 }
 
 #[test]
