@@ -84,6 +84,71 @@ const SECRET_HEADERS: [&str; 7] = [
     "x-xsrf-token",
 ];
 
+/// [`REDACTED`] as it appears in a query string or urlencoded form.
+const REDACTED_FORM: &str = "%5Bredacted%5D";
+
+// ---------------------------------------------------------------------------
+// Secret fields
+
+/// A body or query field whose value is a credential: the
+/// [`is_secret_name`](crate::secret::is_secret_name) rule (`password`,
+/// `secret`, `token`, `*_hash`) plus CSRF fields and API keys.
+fn secret_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    crate::secret::is_secret_name(name)
+        || ["csrf", "xsrf", "api_key", "apikey", "api-key"]
+            .iter()
+            .any(|s| lower.contains(s))
+}
+
+fn form_key(raw: &str) -> String {
+    percent_encoding::percent_decode_str(&raw.replace('+', " "))
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// A query string or urlencoded form with the values of secret fields
+/// replaced by [`REDACTED_FORM`].
+fn redact_form(form: &str) -> String {
+    form.split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((k, v)) if !v.is_empty() && secret_field(&form_key(k)) => {
+                format!("{k}={REDACTED_FORM}")
+            }
+            _ => pair.to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// JSON with the values of secret keys (anywhere in it) replaced by
+/// [`REDACTED`]. `null` and booleans are kept: they hold no secret.
+fn redact_json(v: &mut Value) {
+    match v {
+        Value::Object(map) => {
+            for (k, item) in map.iter_mut() {
+                if secret_field(k) && !matches!(item, Value::Null | Value::Bool(_)) {
+                    *item = Value::String(REDACTED.to_owned());
+                } else {
+                    redact_json(item);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(redact_json),
+        _ => {}
+    }
+}
+
+fn is_form(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|ct| {
+        ct.split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .eq_ignore_ascii_case("application/x-www-form-urlencoded")
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The file format
 
@@ -188,6 +253,21 @@ impl Payload {
         }
     }
 
+    /// [`capture`](Self::capture), with the values of secret-looking JSON
+    /// keys and form fields (passwords, tokens, API keys) redacted.
+    pub(crate) fn capture_redacted(content_type: Option<&str>, bytes: &[u8]) -> Self {
+        let mut body = Payload::capture(content_type, bytes);
+        if let Some(v) = &mut body.json {
+            redact_json(v);
+        }
+        if is_form(content_type) {
+            if let Some(t) = &mut body.text {
+                *t = redact_form(t);
+            }
+        }
+        body
+    }
+
     /// The body as sent.
     pub(crate) fn bytes(&self) -> Vec<u8> {
         if let Some(v) = &self.json {
@@ -205,7 +285,8 @@ impl Payload {
 }
 
 impl RecordedRequest {
-    /// Record a request: the replay-worthy headers, credentials redacted.
+    /// Record a request: the replay-worthy headers, credentials redacted
+    /// (headers, and secret-looking fields of the query and body).
     pub(crate) fn new(method: &Method, uri: &Uri, headers: &HeaderMap, body: &[u8]) -> Self {
         let mut kept = BTreeMap::new();
         for (name, value) in headers {
@@ -230,9 +311,9 @@ impl RecordedRequest {
         RecordedRequest {
             method: method.as_str().to_owned(),
             path: uri.path().to_owned(),
-            query: uri.query().map(str::to_owned),
+            query: uri.query().map(redact_form),
             headers: kept,
-            body: Payload::capture(content_type, body),
+            body: Payload::capture_redacted(content_type, body),
         }
     }
 
@@ -241,6 +322,64 @@ impl RecordedRequest {
             Some(q) => format!("{}?{q}", self.path),
             None => self.path.clone(),
         }
+    }
+
+    /// The request with the redacted values of the fields in `secrets`
+    /// filled in.
+    fn with_secrets(&self, secrets: &[(String, String)]) -> RecordedRequest {
+        let mut req = self.clone();
+        if secrets.is_empty() {
+            return req;
+        }
+        let lookup = |k: &str| secrets.iter().find(|(n, _)| n == k).map(|(_, v)| v);
+        let fill_form = |form: &str| {
+            form.split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((k, REDACTED_FORM)) => match lookup(&form_key(k)) {
+                        Some(v) => format!(
+                            "{k}={}",
+                            percent_encoding::utf8_percent_encode(
+                                v,
+                                percent_encoding::NON_ALPHANUMERIC
+                            )
+                        ),
+                        None => pair.to_owned(),
+                    },
+                    _ => pair.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("&")
+        };
+        fn fill_json(v: &mut Value, lookup: &dyn Fn(&str) -> Option<String>) {
+            match v {
+                Value::Object(map) => {
+                    for (k, item) in map.iter_mut() {
+                        match (&*item, lookup(k)) {
+                            (Value::String(s), Some(secret)) if s == REDACTED => {
+                                *item = Value::String(secret);
+                            }
+                            _ => fill_json(item, lookup),
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(|i| fill_json(i, lookup)),
+                _ => {}
+            }
+        }
+        req.query = req.query.map(|q| fill_form(&q));
+        if let Some(v) = &mut req.body.json {
+            fill_json(v, &|k| lookup(k).cloned());
+        }
+        let form = req
+            .headers
+            .get("content-type")
+            .is_some_and(|ct| is_form(Some(ct)));
+        if form {
+            if let Some(t) = &mut req.body.text {
+                *t = fill_form(t);
+            }
+        }
+        req
     }
 
     /// The request with recorded ids replaced by the ones this run produced.
@@ -286,7 +425,7 @@ impl RecordedResponse {
             }
         };
         let body = match (not_recorded, body) {
-            (None, Some(b)) => Payload::capture(content_type.as_deref(), b),
+            (None, Some(b)) => Payload::capture_redacted(content_type.as_deref(), b),
             _ => Payload::default(),
         };
         RecordedResponse {
@@ -701,6 +840,11 @@ fn pair(recorded: &Value, actual: &Value, key: Option<&str>, ids: &mut IdMap) ->
             }
             (Array(nr), Array(na))
         }
+        // Secrets are redacted on both sides; a snapshot recorded before
+        // redaction (or edited by hand) still matches.
+        (Str(r), Str(a)) if r == REDACTED || a == REDACTED => {
+            (Str(REDACTED.into()), Str(REDACTED.into()))
+        }
         (Str(r), Str(a)) => {
             let r = ids.rewrite_text(r);
             if r != *a {
@@ -907,6 +1051,7 @@ pub struct Replay {
     client: TestClient,
     path: PathBuf,
     headers: Vec<(HeaderName, HeaderValue)>,
+    secrets: Vec<(String, String)>,
     update: bool,
 }
 
@@ -996,6 +1141,7 @@ impl TestClient {
             client: self.clone(),
             path: path.as_ref().to_path_buf(),
             headers: Vec::new(),
+            secrets: Vec::new(),
             update: std::env::var_os(ENV_UPDATE_SNAPSHOTS).is_some_and(|v| v == "1"),
         }
     }
@@ -1003,7 +1149,7 @@ impl TestClient {
 
 impl Replay {
     /// Send this header with every replayed request, replacing the recorded
-    /// one. Credentials are never recorded, so this is how a replay
+    /// one. Credential headers are never recorded, so this is how a replay
     /// authenticates.
     ///
     /// ```no_run
@@ -1028,6 +1174,24 @@ impl Replay {
         let name = HeaderName::try_from(name).expect("invalid header name");
         let value = HeaderValue::try_from(value).expect("invalid header value");
         self.headers.push((name, value));
+        self
+    }
+
+    /// Fill in the redacted value of the body or query field `name` (a JSON
+    /// key or form field) in every replayed request. Secret-looking fields
+    /// (`password`, `*token*`, `*secret*`, CSRF fields, API keys) are
+    /// recorded as `"[redacted]"`, so this is how a recorded login replays.
+    ///
+    /// ```no_run
+    /// # async fn t(client: zapline::test::TestClient) {
+    /// client
+    ///     .replay_snapshots("tests/snapshots")
+    ///     .secret("password", "test-password")
+    ///     .await;
+    /// # }
+    /// ```
+    pub fn secret(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        self.secrets.push((name.into(), value.into()));
         self
     }
 
@@ -1139,6 +1303,7 @@ impl Replay {
         client: &TestClient,
         req: &RecordedRequest,
     ) -> Result<RecordedResponse, String> {
+        let req = &req.with_secrets(&self.secrets);
         let method = Method::from_bytes(req.method.as_bytes())
             .map_err(|_| format!("invalid method {:?}", req.method))?;
         let uri = req.uri();

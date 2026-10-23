@@ -222,7 +222,8 @@ impl Recorder {
             html.push_str(
                 "<p class=dim>Record requests (method, path, body, response) to save them as \
                  tests that replay with <code>app.test().replay_snapshots(..)</code>. \
-                 Authorization and cookie values are never recorded.</p>",
+                 Authorization and cookie values, and password, token, secret and API key \
+                 fields of queries and bodies, are recorded as <code>[redacted]</code>.</p>",
             );
         } else {
             html.push_str("<table><tr><th>Status<th>Method<th>Path</tr>");

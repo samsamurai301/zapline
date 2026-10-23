@@ -289,7 +289,16 @@ app().test()
     .await;
 ```
 
-Bodies are recorded as sent, passwords included: record with throwaway dev accounts.
+Secret-looking fields of the query, a JSON body (at any depth) or a urlencoded form are recorded as `"[redacted]"` too, in requests and responses: names containing `password`, `secret`, `token`, `csrf`, `xsrf` or `api_key`, or ending in `_hash`. So a login form, a reset link's `?token=` and a JWT in a login response never land in a snapshot file. A redacted response value matches whatever the replay answers. To replay a recorded login, give the replay the value to send in place of each redacted field:
+
+```rust
+app().test()
+    .replay_snapshots("tests/snapshots")
+    .secret("password", "test-password")
+    .await;
+```
+
+Other parts of a body (HTML pages, multipart uploads, plain text) are recorded as they are: record with throwaway dev accounts.
 
 ### What is recorded
 
@@ -305,6 +314,7 @@ Not recorded: the console's own requests, static files (CSS, scripts, images, fo
 |---|---|
 | `.await` | Replay, and panic with every diff if anything changed |
 | `.header(name, value)` | Send this header with every request, replacing the recorded one |
+| `.secret(name, value)` | Send `value` for the redacted body or query field `name` |
 | `.update(true)` | Rewrite changed snapshots instead of failing (the default is `ZAPLINE_UPDATE_SNAPSHOTS=1`) |
 | `.report().await` | Return a `ReplayReport` (`files`, `exchanges`, `updated`, `failures`, `passed()`) instead of panicking |
 

@@ -128,7 +128,12 @@ pub mod middleware;
 mod request;
 mod response;
 mod router;
-#[cfg(any(feature = "views", feature = "postgres", feature = "sqlite"))]
+#[cfg(any(
+    feature = "views",
+    feature = "postgres",
+    feature = "sqlite",
+    feature = "json"
+))]
 mod secret;
 pub mod server;
 #[cfg(feature = "json")]

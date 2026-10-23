@@ -2115,7 +2115,16 @@ app().test()
     .await;
 ```
 
-Bodies are recorded as sent, passwords included: record with throwaway dev accounts.
+Secret-looking fields of the query, a JSON body (at any depth) or a urlencoded form are recorded as `"[redacted]"` too, in requests and responses: names containing `password`, `secret`, `token`, `csrf`, `xsrf` or `api_key`, or ending in `_hash`. So a login form, a reset link's `?token=` and a JWT in a login response never land in a snapshot file. A redacted response value matches whatever the replay answers. To replay a recorded login, give the replay the value to send in place of each redacted field:
+
+```rust
+app().test()
+    .replay_snapshots("tests/snapshots")
+    .secret("password", "test-password")
+    .await;
+```
+
+Other parts of a body (HTML pages, multipart uploads, plain text) are recorded as they are: record with throwaway dev accounts.
 
 ### What is recorded
 
@@ -2131,6 +2140,7 @@ Not recorded: the console's own requests, static files (CSS, scripts, images, fo
 |---|---|
 | `.await` | Replay, and panic with every diff if anything changed |
 | `.header(name, value)` | Send this header with every request, replacing the recorded one |
+| `.secret(name, value)` | Send `value` for the redacted body or query field `name` |
 | `.update(true)` | Rewrite changed snapshots instead of failing (the default is `ZAPLINE_UPDATE_SNAPSHOTS=1`) |
 | `.report().await` | Return a `ReplayReport` (`files`, `exchanges`, `updated`, `failures`, `passed()`) instead of panicking |
 
@@ -2200,7 +2210,7 @@ The console can record full request/response pairs and save them as [snapshot te
 
 - **Start recording** with the button, or start the app with `ZAPLINE_RECORD=1` (`zapline dev --record`). With the variable, recording starts with the app and is kept in `target/zapline/recording.jsonl`, so the restarts `zapline dev` does after each change don't lose it. Recording started from the button lives in memory.
 - **Save** with the console's form or `zapline snap <name>`: the recording goes to `tests/snapshots/<name>.json`, plus `tests/snapshots.rs` (which replays them) if the project has none. Saving empties the recording, so the next snapshot starts fresh.
-- `Authorization`, `Cookie` and API key header values are never recorded. Static files, the console's own requests and WebSocket upgrades are skipped.
+- `Authorization`, `Cookie` and API key header values are never recorded, and neither are password, token, secret, CSRF and API key fields of queries, JSON bodies and forms (they are saved as `"[redacted]"`; see [credentials](testing.md#credentials-and-cookies)). Static files, the console's own requests and WebSocket upgrades are skipped.
 
 While not recording, the console's middleware checks one flag per request and does nothing else. In release builds there is no console and no recorder at all.
 

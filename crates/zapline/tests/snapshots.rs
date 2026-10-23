@@ -251,7 +251,7 @@ async fn console_offers_to_start_recording() {
         .await
         .assert_contains("Not recording · 0 request(s) recorded.")
         .assert_contains(r#"<form method=post action="/_dev/recordings/start""#)
-        .assert_contains("Authorization and cookie values are never recorded");
+        .assert_contains("Authorization and cookie values, and password, token");
 }
 
 #[tokio::test]
@@ -592,4 +592,91 @@ async fn unreadable_snapshots_are_reported() {
         report.failures[1].contains("unsupported snapshot version 99"),
         "{report}"
     );
+}
+
+/// Passwords, tokens and API keys in queries, bodies and responses are
+/// saved as `[redacted]`; the replay matches them and fills them in.
+#[tokio::test]
+async fn secret_body_fields_are_redacted_and_filled_in_on_replay() {
+    let app = || {
+        App::new()
+            .dev_console()
+            .post("/login", |Form(f): Form<Value>| async move {
+                if f["password"] == "hunter22" {
+                    let n = fastrand::u64(..);
+                    Ok(Json(json!({
+                        "user": {"email": f["email"], "access_token": format!("eyJ{n:016x}a1")},
+                        "remember": true,
+                    })))
+                } else {
+                    Err(Error::unauthorized())
+                }
+            })
+            .post("/keys", |Json(b): Json<Value>| async move {
+                Json(json!({"name": b["name"], "api_key": format!("k{}", b["secret"])}))
+            })
+            .get("/reset", |q: Query<Value>| async move {
+                format!(
+                    "token of {} bytes",
+                    q.0["token"].as_str().unwrap_or("").len()
+                )
+            })
+    };
+    let client = app().test();
+    start(&client).await;
+    client
+        .post("/login")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body("email=ada%40x&password=hunter22&csrf_token=c5rf")
+        .send()
+        .await
+        .assert_status(200);
+    client
+        .post("/keys")
+        .json(&json!({"name": "ci", "secret": "s3cr3t-value"}))
+        .send()
+        .await
+        .assert_status(200);
+    client.get("/reset?token=r3set-me&x=1").send().await;
+    let rec = recordings(&client).await;
+    let text = rec.to_string();
+    for leak in ["hunter22", "c5rf", "eyJ", "s3cr3t-value", "r3set-me"] {
+        assert!(!text.contains(leak), "{leak} leaked: {rec:#}");
+    }
+    let ex = &rec["exchanges"];
+    assert_eq!(
+        ex[0]["request"]["text"],
+        "email=ada%40x&password=%5Bredacted%5D&csrf_token=%5Bredacted%5D"
+    );
+    assert_eq!(
+        ex[0]["response"]["json"]["user"]["access_token"],
+        "[redacted]"
+    );
+    assert_eq!(ex[0]["response"]["json"]["user"]["email"], "ada@x");
+    assert_eq!(ex[0]["response"]["json"]["remember"], true);
+    assert_eq!(
+        ex[1]["request"]["json"],
+        json!({"name": "ci", "secret": "[redacted]"})
+    );
+    assert_eq!(ex[1]["response"]["json"]["api_key"], "[redacted]");
+    assert_eq!(ex[2]["request"]["query"], "token=%5Bredacted%5D&x=1");
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "login", &rec);
+    let report = app().test().replay_snapshots(dir.path()).report().await;
+    assert!(
+        report
+            .failures
+            .iter()
+            .any(|f| f.contains("expected 200, got 401")),
+        "the password is not recorded: {report}"
+    );
+    let report = app()
+        .test()
+        .replay_snapshots(dir.path())
+        .secret("password", "hunter22")
+        .secret("token", "r3set-me")
+        .report()
+        .await;
+    assert!(report.passed(), "{report}");
 }

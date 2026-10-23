@@ -57,7 +57,7 @@ The console can record full request/response pairs and save them as [snapshot te
 
 - **Start recording** with the button, or start the app with `ZAPLINE_RECORD=1` (`zapline dev --record`). With the variable, recording starts with the app and is kept in `target/zapline/recording.jsonl`, so the restarts `zapline dev` does after each change don't lose it. Recording started from the button lives in memory.
 - **Save** with the console's form or `zapline snap <name>`: the recording goes to `tests/snapshots/<name>.json`, plus `tests/snapshots.rs` (which replays them) if the project has none. Saving empties the recording, so the next snapshot starts fresh.
-- `Authorization`, `Cookie` and API key header values are never recorded. Static files, the console's own requests and WebSocket upgrades are skipped.
+- `Authorization`, `Cookie` and API key header values are never recorded, and neither are password, token, secret, CSRF and API key fields of queries, JSON bodies and forms (they are saved as `"[redacted]"`; see [credentials](testing.md#credentials-and-cookies)). Static files, the console's own requests and WebSocket upgrades are skipped.
 
 While not recording, the console's middleware checks one flag per request and does nothing else. In release builds there is no console and no recorder at all.
 
