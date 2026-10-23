@@ -32,15 +32,20 @@
 //! template once. Values are HTML-escaped automatically in `.html`
 //! templates.
 //!
+//! `App::views(zapline::embed!("templates"))` compiles the templates into
+//! the binary (see [`embed`](crate::embed)): release builds then need no
+//! `templates/` directory next to them, and debug builds still read (and
+//! reload) the files on disk.
+//!
 //! [MiniJinja]: https://docs.rs/minijinja
 
 use std::fmt;
-use std::path::PathBuf;
 use std::sync::Arc;
 
 pub use minijinja::{context, Environment, Value};
 use serde::Serialize;
 
+use crate::embed::Dir;
 use crate::extract::FromRequestParts;
 use crate::{App, Error, Html, Request};
 
@@ -52,7 +57,7 @@ type Configure = dyn Fn(&mut Environment<'static>) + Send + Sync;
 pub struct Views(Arc<Inner>);
 
 struct Inner {
-    dir: PathBuf,
+    dir: Dir,
     configure: Option<Arc<Configure>>,
     /// `None` in reload mode: a fresh environment per render.
     cached: Option<Environment<'static>>,
@@ -68,13 +73,19 @@ impl fmt::Debug for Views {
 }
 
 impl Views {
-    /// Templates from `dir`. `reload` re-reads them on every render (the
-    /// default in debug builds).
-    pub fn new(dir: impl Into<PathBuf>, reload: bool) -> Self {
+    /// Templates from `dir` (a path, or `zapline::embed!("templates")`).
+    /// `reload` re-reads them on every render (the default in debug builds).
+    ///
+    /// ```
+    /// use zapline::view::Views;
+    ///
+    /// let views = Views::new("templates", false);
+    /// ```
+    pub fn new(dir: impl Into<Dir>, reload: bool) -> Self {
         Self::build(dir.into(), None, reload)
     }
 
-    fn build(dir: PathBuf, configure: Option<Arc<Configure>>, reload: bool) -> Self {
+    fn build(dir: Dir, configure: Option<Arc<Configure>>, reload: bool) -> Self {
         let mut inner = Inner {
             dir,
             configure,
@@ -161,7 +172,20 @@ impl Views {
 impl Inner {
     fn environment(&self) -> Environment<'static> {
         let mut env = Environment::new();
-        env.set_loader(minijinja::path_loader(self.dir.clone()));
+        if self.dir.is_embedded() {
+            let dir = self.dir.clone();
+            env.set_loader(move |name| match dir.read_to_string(name) {
+                Ok(source) => Ok(Some(source)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                Err(e) => Err(minijinja::Error::new(
+                    minijinja::ErrorKind::InvalidOperation,
+                    format!("could not read template {name}"),
+                )
+                .with_source(e)),
+            });
+        } else {
+            env.set_loader(minijinja::path_loader(self.dir.path()));
+        }
         if let Some(configure) = &self.configure {
             configure(&mut env);
         }
@@ -184,8 +208,17 @@ fn template_error(err: minijinja::Error) -> Error {
 impl App {
     /// Render HTML templates from `dir` (relative to the working directory,
     /// i.e. the project root under `cargo run`). Handlers take [`Views`].
-    pub fn views(self, dir: impl Into<PathBuf>) -> Self {
-        self.state(Views::build(dir.into(), None, cfg!(debug_assertions)))
+    ///
+    /// `dir` may be compiled into the binary with
+    /// `.views(zapline::embed!("templates"))`.
+    ///
+    /// ```
+    /// let app = zapline::App::new().views("templates");
+    /// ```
+    pub fn views(self, dir: impl Into<Dir>) -> Self {
+        let dir = dir.into();
+        let reload = reloads(&dir);
+        self.state(Views::build(dir, None, reload))
     }
 
     /// Like [`views`](Self::views), with a hook to add filters, functions
@@ -200,16 +233,19 @@ impl App {
     /// ```
     pub fn views_with(
         self,
-        dir: impl Into<PathBuf>,
+        dir: impl Into<Dir>,
         configure: impl Fn(&mut Environment<'static>) + Send + Sync + 'static,
     ) -> Self {
-        let views = Views::build(
-            dir.into(),
-            Some(Arc::new(configure)),
-            cfg!(debug_assertions),
-        );
-        self.state(views)
+        let dir = dir.into();
+        let reload = reloads(&dir);
+        self.state(Views::build(dir, Some(Arc::new(configure)), reload))
     }
+}
+
+/// Re-read templates per render in debug builds, unless they come from
+/// memory (where nothing can change).
+fn reloads(dir: &Dir) -> bool {
+    cfg!(debug_assertions) && !dir.is_embedded()
 }
 
 impl FromRequestParts for Views {

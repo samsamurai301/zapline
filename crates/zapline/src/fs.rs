@@ -26,6 +26,10 @@
 //!   `Accept-Encoding`.
 //! - `HEAD` support (headers only), exact `Content-Length`, and files
 //!   streamed in 64 KiB chunks instead of being buffered.
+//! - Directories compiled into the binary with
+//!   [`embed!`](crate::embed): `ServeDir::new(zapline::embed!("public"))`
+//!   serves from memory, with the same headers (the `ETag` is the content
+//!   hash, there is no `Last-Modified`).
 //!
 //! # Security
 //!
@@ -59,6 +63,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_util::io::ReaderStream;
 
 use crate::body::Body;
+use crate::embed::{Dir, EmbeddedFile};
 use crate::handler::{BoxFuture, Handler};
 use crate::middleware::normalize_path::TrailingSlashTrimmed;
 use crate::request::{decode, Request};
@@ -99,6 +104,8 @@ pub struct ServeDir {
 #[derive(Clone)]
 struct DirConfig {
     root: PathBuf,
+    /// Where files come from: `root` on disk, or memory.
+    dir: Dir,
     canonical_root: OnceLock<PathBuf>,
     index_file: Option<String>,
     fallback_file: Option<PathBuf>,
@@ -118,10 +125,14 @@ struct Options {
 impl ServeDir {
     /// Serve files under `root` (relative paths are resolved against the
     /// working directory). The directory may be created after startup.
-    pub fn new(root: impl Into<PathBuf>) -> Self {
+    /// `root` may also be a directory compiled into the binary:
+    /// `ServeDir::new(zapline::embed!("public"))`.
+    pub fn new(root: impl Into<Dir>) -> Self {
+        let dir: Dir = root.into();
         ServeDir {
             inner: Arc::new(DirConfig {
-                root: root.into(),
+                root: dir.path().to_path_buf(),
+                dir,
                 canonical_root: OnceLock::new(),
                 index_file: Some("index.html".to_owned()),
                 fallback_file: None,
@@ -192,7 +203,8 @@ impl ServeDir {
         self
     }
 
-    /// The configured root directory.
+    /// The configured root directory (for embedded files, the directory
+    /// they were compiled from).
     pub fn root(&self) -> &Path {
         &self.inner.root
     }
@@ -389,13 +401,21 @@ impl Encoding {
 }
 
 struct Resolved {
-    file: File,
-    meta: Metadata,
+    content: Content,
     /// The uncompressed file's path (drives the Content-Type).
     path: PathBuf,
     encoding: Option<Encoding>,
 }
 
+/// An open file on disk, or a file compiled into the binary.
+enum Content {
+    File(File, Metadata),
+    Memory(&'static EmbeddedFile),
+}
+
+// Short-lived and moved once; boxing `Found` would cost an allocation per
+// request.
+#[allow(clippy::large_enum_variant)]
 enum Lookup {
     Found(Resolved),
     RedirectSlash,
@@ -499,6 +519,93 @@ impl DirConfig {
     }
 }
 
+impl DirConfig {
+    /// [`lookup`](Self::lookup) for embedded files: no filesystem access.
+    fn lookup_memory(&self, rel: &Path, dir_needs_slash: bool, encodings: &[Encoding]) -> Lookup {
+        let key = slash_path(rel);
+        if self.dir.file(&key).is_some() {
+            return self.memory_variant(&key, encodings);
+        }
+        let Some(index) = &self.index_file else {
+            return Lookup::NotFound;
+        };
+        let index_key = if key.is_empty() {
+            index.clone()
+        } else {
+            format!("{key}/{index}")
+        };
+        if self.dir.file(&index_key).is_none() {
+            return Lookup::NotFound;
+        }
+        if dir_needs_slash {
+            return Lookup::RedirectSlash;
+        }
+        self.memory_variant(&index_key, encodings)
+    }
+
+    fn lookup_fallback_memory(&self, encodings: &[Encoding]) -> Lookup {
+        match &self.fallback_file {
+            Some(fallback) => match sanitize(&slash_path(fallback), true) {
+                Some(rel) => self.memory_variant(&slash_path(&rel), encodings),
+                None => Lookup::NotFound,
+            },
+            None => Lookup::NotFound,
+        }
+    }
+
+    /// The embedded file `key`, or its best precompressed sibling.
+    fn memory_variant(&self, key: &str, encodings: &[Encoding]) -> Lookup {
+        let found = |file, encoding| {
+            Lookup::Found(Resolved {
+                content: Content::Memory(file),
+                path: PathBuf::from(key),
+                encoding,
+            })
+        };
+        for &enc in encodings {
+            if let Some(file) = self.dir.file(&format!("{key}{}", enc.suffix())) {
+                return found(file, Some(enc));
+            }
+        }
+        match self.dir.file(key) {
+            Some(file) => found(file, None),
+            None => Lookup::NotFound,
+        }
+    }
+
+    /// Look `rel` up wherever the files are: in memory directly, on disk on
+    /// the blocking pool.
+    async fn find(self: &Arc<Self>, rel: PathBuf, slash: bool, enc: Vec<Encoding>) -> Lookup {
+        if self.dir.is_embedded() {
+            return self.lookup_memory(&rel, slash, &enc);
+        }
+        let c = self.clone();
+        blocking(move || c.lookup(&rel, slash, &enc)).await
+    }
+
+    async fn find_fallback(self: &Arc<Self>, enc: Vec<Encoding>) -> Lookup {
+        if self.dir.is_embedded() {
+            return self.lookup_fallback_memory(&enc);
+        }
+        let c = self.clone();
+        blocking(move || c.lookup_fallback(&enc)).await
+    }
+}
+
+/// `a/b.txt` from a relative path, whatever the platform's separator.
+fn slash_path(rel: &Path) -> String {
+    let mut out = String::new();
+    for c in rel.components() {
+        if let Component::Normal(s) = c {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&s.to_string_lossy());
+        }
+    }
+    out
+}
+
 fn is_hidden(c: Component<'_>) -> bool {
     matches!(c, Component::Normal(s) if s.as_encoded_bytes().starts_with(b"."))
 }
@@ -519,8 +626,7 @@ fn open_variant(path: &Path, encodings: &[Encoding], root: Option<&Path>) -> Loo
         };
         if let Some((file, meta)) = open_file(&candidate) {
             return Lookup::Found(Resolved {
-                file,
-                meta,
+                content: Content::File(file, meta),
                 path: path.to_owned(),
                 encoding: Some(enc),
             });
@@ -532,8 +638,7 @@ fn open_variant(path: &Path, encodings: &[Encoding], root: Option<&Path>) -> Loo
     };
     match file.metadata() {
         Ok(meta) if meta.is_file() => Lookup::Found(Resolved {
-            file,
-            meta,
+            content: Content::File(file, meta),
             path: path.to_owned(),
             encoding: None,
         }),
@@ -630,30 +735,29 @@ async fn serve_dir(cfg: Arc<DirConfig>, req: Request) -> Response {
         && req.extensions().get::<TrailingSlashTrimmed>().is_none();
     let encodings = cfg.opts.encodings(req.headers());
 
-    let c = cfg.clone();
-    let enc = encodings.clone();
-    let found = match blocking(move || c.lookup(&rel, dir_needs_slash, &enc)).await {
-        Lookup::NotFound if cfg.fallback_file.is_some() => {
-            let c = cfg.clone();
-            blocking(move || c.lookup_fallback(&encodings)).await
-        }
+    let found = match cfg.find(rel, dir_needs_slash, encodings.clone()).await {
+        Lookup::NotFound if cfg.fallback_file.is_some() => cfg.find_fallback(encodings).await,
         other => other,
     };
     let found = match (found, &cfg.fingerprints) {
         (Lookup::NotFound, Some(assets)) => match assets.unfingerprint(&tail, cfg.show_hidden) {
             Some((rel, hash)) => {
-                let (c, a) = (cfg.clone(), assets.clone());
                 let enc = cfg.opts.encodings(req.headers());
-                let looked = tokio::task::spawn_blocking(move || {
-                    let found = c.lookup(&rel, false, &enc);
-                    // A current fingerprint is forever; a stale one gets
-                    // today's file, but only for this visit.
-                    let current = a.hash_of(&rel).as_deref() == Some(hash.as_str());
-                    (found, current)
-                })
-                .await;
-                match looked {
-                    Ok((Lookup::Found(f), current)) => {
+                let found = cfg.find(rel.clone(), false, enc).await;
+                // A current fingerprint is forever; a stale one gets
+                // today's file, but only for this visit.
+                let current = if cfg.dir.is_embedded() {
+                    assets.hash_of(&rel).as_deref() == Some(hash.as_str())
+                } else {
+                    let a = assets.clone();
+                    tokio::task::spawn_blocking(move || {
+                        a.hash_of(&rel).as_deref() == Some(hash.as_str())
+                    })
+                    .await
+                    .unwrap_or(false)
+                };
+                match found {
+                    Lookup::Found(f) => {
                         let mut opts = cfg.opts.clone();
                         opts.cache_control = Some(HeaderValue::from_static(if current {
                             "public, max-age=31536000, immutable"
@@ -662,8 +766,7 @@ async fn serve_dir(cfg: Arc<DirConfig>, req: Request) -> Response {
                         }));
                         return respond(&req, f, &opts).await;
                     }
-                    Ok((other, _)) => other,
-                    Err(e) => Lookup::Failed(io::Error::other(e)),
+                    other => other,
                 }
             }
             None => Lookup::NotFound,
@@ -741,14 +844,21 @@ fn quality(accept: &[&str], coding: &str) -> f32 {
 
 async fn respond(req: &Request, found: Resolved, opts: &Options) -> Response {
     let Resolved {
-        file,
-        meta,
+        content,
         path,
         encoding,
     } = found;
-    let len = meta.len();
-    let mtime = meta.modified().ok().filter(|t| http_date(*t).is_some());
-    let etag = mtime.map(|t| etag(len, t, encoding));
+    let (len, mtime, etag) = match &content {
+        Content::File(_, meta) => {
+            let len = meta.len();
+            let mtime = meta.modified().ok().filter(|t| http_date(*t).is_some());
+            (len, mtime, mtime.map(|t| etag(len, t, encoding)))
+        }
+        Content::Memory(file) => {
+            let len = file.bytes.len() as u64;
+            (len, None, Some(format!("W/\"{len:x}-{}\"", file.hash)))
+        }
+    };
     let last_modified = mtime.and_then(http_date);
 
     let mut headers = HeaderMap::new();
@@ -813,12 +923,19 @@ async fn respond(req: &Request, found: Resolved, opts: &Options) -> Response {
     let body = if req.method() == Method::HEAD || count == 0 {
         Body::Empty
     } else {
-        match file_body(file, start, count).await {
-            Ok(b) => b,
-            Err(e) => {
-                return Error::internal("failed to read file")
-                    .with_source(e)
-                    .into_response()
+        match content {
+            Content::File(file, _) => match file_body(file, start, count).await {
+                Ok(b) => b,
+                Err(e) => {
+                    return Error::internal("failed to read file")
+                        .with_source(e)
+                        .into_response()
+                }
+            },
+            // Ranges were clamped to the length above.
+            Content::Memory(file) => {
+                let (a, b) = (start as usize, (start + count) as usize);
+                Body::from(Bytes::from_static(&file.bytes[a..b]))
             }
         }
     };
@@ -1151,7 +1268,7 @@ pub struct Assets(Arc<AssetsInner>);
 
 struct AssetsInner {
     prefix: String,
-    root: PathBuf,
+    dir: Dir,
     /// Relative path -> (size, mtime, hash).
     hashes: std::sync::Mutex<std::collections::HashMap<PathBuf, Fingerprint>>,
 }
@@ -1163,19 +1280,19 @@ impl fmt::Debug for Assets {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Assets")
             .field("prefix", &self.0.prefix)
-            .field("root", &self.0.root)
+            .field("dir", &self.0.dir)
             .finish()
     }
 }
 
 /// Hex digits in a fingerprint.
-const HASH_LEN: usize = 8;
+const HASH_LEN: usize = crate::embed::HASH_LEN;
 
 impl Assets {
-    fn new(prefix: &str, root: PathBuf) -> Self {
+    fn new(prefix: &str, dir: Dir) -> Self {
         Assets(Arc::new(AssetsInner {
             prefix: prefix.trim().trim_end_matches('/').to_owned(),
-            root,
+            dir,
             hashes: std::sync::Mutex::default(),
         }))
     }
@@ -1203,9 +1320,13 @@ impl Assets {
     }
 
     /// The content hash of `rel`, recomputed when its size or mtime changes
-    /// (in debug builds; release builds hash each file once).
+    /// (in debug builds; release builds hash each file once). Embedded
+    /// files carry the hash computed at compile time.
     fn hash_of(&self, rel: &Path) -> Option<String> {
-        let path = self.0.root.join(rel);
+        if self.0.dir.is_embedded() {
+            return self.0.dir.file(&slash_path(rel)).map(|f| f.hash.to_owned());
+        }
+        let path = self.0.dir.path().join(rel);
         let lock = || self.0.hashes.lock().unwrap_or_else(|e| e.into_inner());
         if !cfg!(debug_assertions) {
             if let Some((_, _, hash)) = lock().get(rel) {
@@ -1221,12 +1342,7 @@ impl Assets {
         }
         let bytes = std::fs::read(&path).ok()?;
         // FNV-1a: stable across builds and platforms, and plenty for naming.
-        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for b in &bytes {
-            h ^= u64::from(*b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-        let hash = format!("{:016x}", h)[..HASH_LEN].to_owned();
+        let hash = crate::embed::content_hash(&bytes);
         lock().insert(rel.to_owned(), (len, mtime, hash.clone()));
         Some(hash)
     }
@@ -1270,8 +1386,12 @@ impl App {
     /// ```
     /// let app = zapline::App::new().assets("/static", "static");
     /// ```
-    pub fn assets(self, prefix: &str, dir: impl Into<PathBuf>) -> Self {
-        let dir = dir.into();
+    ///
+    /// For a single binary, compile the directory in:
+    /// `.assets("/static", zapline::embed!("static"))`. URLs are the same
+    /// either way.
+    pub fn assets(self, prefix: &str, dir: impl Into<Dir>) -> Self {
+        let dir: Dir = dir.into();
         let assets = Assets::new(prefix, dir.clone());
         let mut serve = ServeDir::new(dir);
         serve.config().fingerprints = Some(assets.clone());

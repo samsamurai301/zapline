@@ -55,12 +55,16 @@
 //! them without starting the server: it runs the app with
 //! [`ENV_MIGRATE_ONLY`] set.
 //!
+//! `Database::migrations(zapline::embed!("migrations"))` compiles them into
+//! the binary (see [`embed`](crate::embed)), so the server needs no
+//! `migrations/` directory. Checksums are the same as for the files on
+//! disk, so switching either way never looks like an edited migration.
+//!
 //! [sqlx]: https://docs.rs/sqlx
 
 use std::borrow::Cow;
 use std::marker::PhantomData;
 use std::ops::Deref;
-use std::path::PathBuf;
 use std::time::Duration;
 
 pub use sqlx;
@@ -72,6 +76,7 @@ mod list;
 pub use factory::{Factory, Record};
 pub use list::{AsPool, ListBackend, ListParams, Listing, Paged, Value};
 
+use crate::embed::Dir;
 use crate::extract::FromRequestParts;
 use crate::health::HealthCheck;
 use crate::{App, Error, Request, Resources};
@@ -116,7 +121,7 @@ pub struct Database<DB: sqlx::Database = DefaultDb> {
     acquire_timeout: Duration,
     idle_timeout: Option<Duration>,
     migrate: bool,
-    migrations: PathBuf,
+    migrations: Dir,
     _db: PhantomData<fn() -> DB>,
 }
 
@@ -135,7 +140,7 @@ impl<DB: sqlx::Database> Database<DB> {
             acquire_timeout: Duration::from_secs(5),
             idle_timeout: Some(Duration::from_secs(600)),
             migrate: true,
-            migrations: PathBuf::from(DEFAULT_MIGRATIONS_DIR),
+            migrations: Dir::disk(DEFAULT_MIGRATIONS_DIR),
             _db: PhantomData,
         }
     }
@@ -166,8 +171,17 @@ impl<DB: sqlx::Database> Database<DB> {
     }
 
     /// Read migrations from `dir` instead of `./migrations`. A missing
-    /// directory means "no migrations".
-    pub fn migrations(mut self, dir: impl Into<PathBuf>) -> Self {
+    /// directory means "no migrations". `zapline::embed!("migrations")`
+    /// compiles them into the binary.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")] {
+    /// use zapline::db::Database;
+    ///
+    /// let db = Database::sqlite_memory().migrations("db/migrations");
+    /// # }
+    /// ```
+    pub fn migrations(mut self, dir: impl Into<Dir>) -> Self {
         self.migrations = dir.into();
         self
     }
@@ -273,26 +287,83 @@ impl Database<sqlx::Postgres> {
     }
 }
 
-async fn run_migrations<DB: sqlx::Database>(
-    pool: &Pool<DB>,
-    dir: &std::path::Path,
-) -> crate::Result<()>
+async fn run_migrations<DB: sqlx::Database>(pool: &Pool<DB>, dir: &Dir) -> crate::Result<()>
 where
     DB::Connection: sqlx::migrate::Migrate,
 {
-    if !dir.is_dir() {
+    if !dir.exists() {
         return Ok(());
     }
-    let migrator = sqlx::migrate::Migrator::new(dir.to_path_buf())
-        .await
-        .map_err(|e| {
-            Error::internal(format!("cannot read migrations in {}: {e}", dir.display()))
-        })?;
+    let cannot_read = |e: sqlx::migrate::MigrateError| {
+        Error::internal(format!(
+            "cannot read migrations in {}: {e}",
+            dir.path().display()
+        ))
+    };
+    let migrator = if dir.is_embedded() {
+        sqlx::migrate::Migrator::new(Embedded(dir.clone())).await
+    } else {
+        sqlx::migrate::Migrator::new(dir.path().to_path_buf()).await
+    }
+    .map_err(cannot_read)?;
     migrator
         .run(pool)
         .await
         .map_err(|e| Error::internal(format!("migration failed: {e}")))?;
     Ok(())
+}
+
+/// Migrations compiled into the binary, resolved the way sqlx resolves a
+/// directory: top-level `<version>_<description>.sql` files (`.up.sql` /
+/// `.down.sql` for reversible ones), sorted by version.
+#[derive(Debug)]
+struct Embedded(Dir);
+
+impl sqlx::migrate::MigrationSource<'static> for Embedded {
+    fn resolve(
+        self,
+    ) -> futures_core::future::BoxFuture<
+        'static,
+        Result<Vec<sqlx::migrate::Migration>, sqlx::error::BoxDynError>,
+    > {
+        Box::pin(async move { resolve_embedded(&self.0) })
+    }
+}
+
+fn resolve_embedded(dir: &Dir) -> Result<Vec<sqlx::migrate::Migration>, sqlx::error::BoxDynError> {
+    use sqlx::migrate::{Migration, MigrationType};
+
+    let mut migrations = Vec::new();
+    for name in dir.files()? {
+        // sqlx only reads the top level.
+        if name.contains('/') {
+            continue;
+        }
+        let Some((version, rest)) = name.split_once('_') else {
+            continue;
+        };
+        if !rest.ends_with(".sql") {
+            continue;
+        }
+        let version: i64 = version.parse().map_err(|_| {
+            format!(
+                "error parsing migration filename {name:?}; expected integer version prefix (e.g. `01_foo.sql`)"
+            )
+        })?;
+        let kind = MigrationType::from_filename(rest);
+        let description = rest.trim_end_matches(kind.suffix()).replace('_', " ");
+        let sql = dir.read_to_string(&name)?;
+        let no_tx = sql.starts_with("-- no-transaction");
+        migrations.push(Migration::new(
+            version,
+            Cow::Owned(description),
+            kind,
+            Cow::Owned(sql),
+            no_tx,
+        ));
+    }
+    migrations.sort_by_key(|m| m.version);
+    Ok(migrations)
 }
 
 impl App {

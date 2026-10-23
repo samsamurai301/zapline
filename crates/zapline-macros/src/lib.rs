@@ -607,6 +607,112 @@ pub fn model(attr: TokenStream, item: TokenStream) -> TokenStream {
     out.into()
 }
 
+/// Compile a directory into the binary: `zapline::embed!("templates")` is a
+/// `zapline::embed::Dir` holding every file under `templates/` (relative to
+/// the crate's `Cargo.toml`), to pass to `App::views`, `App::assets`,
+/// `ServeDir::new`, `Database::migrations` or `I18n::load`.
+///
+/// Release builds serve the embedded copy; debug builds read the directory
+/// on disk while it exists, so live reload keeps working. Hidden files are
+/// skipped. See the `zapline::embed` module.
+///
+/// ```text
+/// App::new()
+///     .views(zapline::embed!("templates"))
+///     .assets("/static", zapline::embed!("static"))
+/// ```
+#[proc_macro]
+pub fn embed(input: TokenStream) -> TokenStream {
+    let lit = parse_macro_input!(input as LitStr);
+    match embed_dir(&lit) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn embed_dir(lit: &LitStr) -> syn::Result<TokenStream2> {
+    let err = |msg: String| syn::Error::new(lit.span(), msg);
+    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| err("embed!: CARGO_MANIFEST_DIR is not set (build with cargo)".into()))?;
+    let root = std::path::Path::new(&manifest).join(lit.value());
+    if !root.is_dir() {
+        return Err(err(format!(
+            "embed!: no directory {} (paths are relative to Cargo.toml)",
+            root.display()
+        )));
+    }
+    let mut files = Vec::new();
+    embed_walk(&root, "", &mut files).map_err(|e| err(format!("embed!: {e}")))?;
+    files.sort();
+    let root_str = root
+        .to_str()
+        .ok_or_else(|| err("embed!: the directory path is not UTF-8".into()))?;
+    let mut entries = Vec::with_capacity(files.len());
+    for (rel, abs) in &files {
+        let bytes =
+            std::fs::read(abs).map_err(|e| err(format!("embed!: {}: {e}", abs.display())))?;
+        let hash = fnv_hash(&bytes);
+        let abs = abs
+            .to_str()
+            .ok_or_else(|| err(format!("embed!: {} is not UTF-8", abs.display())))?;
+        entries.push(quote! {
+            ::zapline::embed::EmbeddedFile {
+                path: #rel,
+                bytes: ::core::include_bytes!(#abs),
+                hash: #hash,
+            }
+        });
+    }
+    let n = entries.len();
+    Ok(quote! {
+        {
+            // Lets a build tool force re-expansion (new files) by changing it.
+            const _: ::core::option::Option<&str> = ::core::option_env!("ZAPLINE_EMBED_STAMP");
+            static FILES: [::zapline::embed::EmbeddedFile; #n] = [#(#entries),*];
+            ::zapline::embed::Dir::__from_embedded(#root_str, &FILES)
+        }
+    })
+}
+
+/// Every non-hidden file under `dir` as (relative `/` path, absolute path).
+fn embed_walk(
+    dir: &std::path::Path,
+    prefix: &str,
+    out: &mut Vec<(String, std::path::PathBuf)>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.starts_with('.') {
+            continue;
+        }
+        let rel = if prefix.is_empty() {
+            name.to_owned()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        let path = entry.path();
+        let meta = std::fs::metadata(&path)?;
+        if meta.is_dir() {
+            embed_walk(&path, &rel, out)?;
+        } else if meta.is_file() {
+            out.push((rel, path));
+        }
+    }
+    Ok(())
+}
+
+/// Same as `zapline::embed::content_hash`: 8 hex digits of FNV-1a.
+fn fnv_hash(bytes: &[u8]) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{h:016x}")[..8].to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +811,13 @@ mod tests {
             async fn f() {}
         };
         assert_eq!(doc_comment(&f.attrs), (None, None));
+    }
+
+    #[test]
+    fn content_hash_is_fnv1a() {
+        // FNV-1a of the empty input is the offset basis.
+        assert_eq!(fnv_hash(b""), "cbf29ce4");
+        assert_eq!(fnv_hash(b"a"), "af63dc4c");
     }
 
     #[test]

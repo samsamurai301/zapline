@@ -15,6 +15,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -172,6 +173,10 @@ impl Listen for tokio::net::UnixListener {
 pub(crate) struct Service {
     app: Arc<AppInner>,
     conn: ConnInfo,
+    /// Flagged when the first request starts, so draining can tell a
+    /// connection that never sent one (see `Watched::first_request`).
+    /// `None` without a drain grace period.
+    started: Option<Arc<AtomicBool>>,
 }
 
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
@@ -182,6 +187,11 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
     /// HTTP/1: see [`ResponseFuture::poll_now`].
     #[inline]
     fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
+        if let Some(started) = &self.started {
+            if !started.load(Ordering::Relaxed) {
+                started.store(true, Ordering::Relaxed);
+            }
+        }
         self.app
             .handle(req.map(ReqBody::Incoming), self.conn)
             .poll_now()
@@ -360,6 +370,10 @@ pub(crate) struct Proto {
     detect_timeout: Option<Duration>,
     #[cfg(feature = "tls")]
     tls: Option<Tls>,
+    /// `ServerConfig::drain_grace`: how long a TLS handshake or HTTP/2
+    /// detection may go on once draining starts.
+    #[cfg(any(feature = "tls", feature = "http2"))]
+    drain_grace: Duration,
 }
 
 impl Proto {
@@ -399,6 +413,8 @@ impl Proto {
             http2,
             #[cfg(feature = "http2")]
             detect_timeout: config.header_read_timeout,
+            #[cfg(any(feature = "tls", feature = "http2"))]
+            drain_grace: config.drain_grace,
             #[cfg(feature = "tls")]
             tls: config.tls.as_ref().map(|t| Tls {
                 acceptor: t.acceptor(config.http2),
@@ -432,7 +448,7 @@ impl Proto {
         let handshake = tokio::time::timeout(tls.handshake_timeout, tls.acceptor.accept(io));
         let stream = tokio::select! {
             biased;
-            () = slot.stopped() => return,
+            () = slot.abandoned(self.drain_grace) => return,
             r = handshake => match r {
                 Ok(Ok(stream)) => stream,
                 _ => return,
@@ -444,7 +460,10 @@ impl Proto {
                 return serve_h2(stream, service, h2, self.detect_timeout, slot).await;
             }
         }
-        Watched::new(self.h1(stream, service), slot, None).await
+        let started = service.started.clone();
+        Watched::new(self.h1(stream, service), slot, None)
+            .first_request(started)
+            .await
     }
 
     /// Detect HTTP/2 prior knowledge, then serve the right protocol.
@@ -460,7 +479,7 @@ impl Proto {
         let detect = within(self.detect_timeout, io.detect_h2());
         let (io, is_h2) = tokio::select! {
             biased;
-            () = slot.stopped() => return,
+            () = slot.abandoned(self.drain_grace) => return,
             r = detect => match r {
                 Some(Ok(v)) => v,
                 _ => return,
@@ -471,7 +490,8 @@ impl Proto {
             drop(permit);
         } else {
             // Its own task, so HTTP/1.1 runs exactly the hot-path future.
-            tokio::spawn(Watched::new(self.h1(io, service), slot, permit));
+            let started = service.started.clone();
+            tokio::spawn(Watched::new(self.h1(io, service), slot, permit).first_request(started));
         }
     }
 }
@@ -530,6 +550,8 @@ pub(crate) struct Worker {
     signal: Signal,
     max_connections: Option<usize>,
     shutdown_timeout: Duration,
+    /// `ServerConfig::drain_grace` is not zero.
+    drain_grace: bool,
 }
 
 impl Worker {
@@ -547,6 +569,7 @@ impl Worker {
             signal,
             max_connections: config.max_connections,
             shutdown_timeout: config.shutdown_timeout,
+            drain_grace: !config.drain_grace.is_zero(),
         }
     }
 }
@@ -592,7 +615,15 @@ pub(crate) async fn serve<L: Listen>(listener: L, worker: Worker) -> io::Result<
 
     // Stop accepting: close the listening socket, then wait for connections.
     drop(stop);
-    drop(listener);
+    {
+        // One at a time: with `net.ipv4.tcp_migrate_req`, Linux hands the
+        // connections still queued on a closing listener to another one on
+        // the same port, and one closing at the same instant on another
+        // worker can lose them.
+        static CLOSING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _closing = CLOSING.lock();
+        drop(listener);
+    }
     worker.signal.drain(worker.shutdown_timeout).await;
     result
 }
@@ -607,6 +638,7 @@ fn spawn_connection<I: Accepted>(
     let service = Service {
         app: worker.app.clone(),
         conn,
+        started: worker.drain_grace.then(|| Arc::new(AtomicBool::new(false))),
     };
 
     #[cfg(feature = "tls")]
@@ -624,7 +656,8 @@ fn spawn_connection<I: Accepted>(
     }
 
     // Plain HTTP/1.1, the hot path: the task is just the watched connection.
-    tokio::spawn(Watched::new(worker.proto.h1(io, service), slot, permit));
+    let started = service.started.clone();
+    tokio::spawn(Watched::new(worker.proto.h1(io, service), slot, permit).first_request(started));
 }
 
 /// Accept errors are per-connection or resource exhaustion (EMFILE, ENFILE,

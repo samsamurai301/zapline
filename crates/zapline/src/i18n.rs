@@ -41,9 +41,9 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::{self, Display, Write as _};
-use std::path::Path;
 use std::sync::Arc;
 
+use crate::embed::Dir;
 use crate::extract::FromRequestParts;
 use crate::middleware::Next;
 use crate::{App, Error, Request, Response, Result};
@@ -67,6 +67,8 @@ impl I18n {
     /// Load every `*.toml` file in `dir`; the file name (`en`, `fr`,
     /// `pt-BR`) is the language. The default language is `en` when there is
     /// one, otherwise the first file in alphabetical order.
+    /// `I18n::load(zapline::embed!("locales"))` compiles them into the
+    /// binary.
     ///
     /// # Errors
     ///
@@ -77,31 +79,29 @@ impl I18n {
     /// let i18n = zapline::i18n::I18n::load("locales")?;
     /// # Ok::<(), zapline::Error>(())
     /// ```
-    pub fn load(dir: impl AsRef<Path>) -> Result<Self> {
-        let dir = dir.as_ref();
+    pub fn load(dir: impl Into<Dir>) -> Result<Self> {
+        let dir: Dir = dir.into();
         let read_err = |e: std::io::Error| {
-            Error::internal(format!("cannot read translations in {}", dir.display())).with_source(e)
+            Error::internal(format!(
+                "cannot read translations in {}",
+                dir.path().display()
+            ))
+            .with_source(e)
         };
         let mut i18n = I18n(Arc::default());
-        let mut files: Vec<_> = std::fs::read_dir(dir)
-            .map_err(read_err)?
-            .filter_map(|entry| entry.ok().map(|e| e.path()))
-            .filter(|p| p.extension().is_some_and(|e| e == "toml"))
-            .collect();
-        files.sort();
-        for path in files {
-            let lang = path
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or_default()
-                .to_owned();
-            let text = std::fs::read_to_string(&path).map_err(read_err)?;
-            i18n = i18n.messages(&lang, &text)?;
+        // Sorted, top level only.
+        let files = dir.files().map_err(read_err)?;
+        for name in files.iter().filter(|f| !f.contains('/')) {
+            let Some(lang) = name.strip_suffix(".toml") else {
+                continue;
+            };
+            let text = dir.read_to_string(name).map_err(read_err)?;
+            i18n = i18n.messages(lang, &text)?;
         }
         if i18n.0.langs.is_empty() {
             return Err(Error::internal(format!(
                 "no translations: add files like {}/en.toml",
-                dir.display()
+                dir.path().display()
             )));
         }
         Ok(i18n)

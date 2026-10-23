@@ -8,9 +8,10 @@
 
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 
 use pin_project_lite::pin_project;
 use tokio::sync::OwnedSemaphorePermit;
@@ -30,6 +31,9 @@ pub(crate) struct Signal(Arc<Inner>);
 struct Inner {
     state: AtomicU8,
     registry: Mutex<Registry>,
+    /// How long a connection without a request yet may still send one once
+    /// draining starts (see `ServerConfig::drain_grace`).
+    grace: Duration,
 }
 
 #[derive(Default)]
@@ -41,6 +45,15 @@ struct Registry {
 }
 
 impl Signal {
+    /// A signal whose fresh connections get up to `grace` after draining
+    /// starts to send their first request.
+    pub(crate) fn new(grace: Duration) -> Self {
+        Signal(Arc::new(Inner {
+            grace,
+            ..Inner::default()
+        }))
+    }
+
     fn registry(&self) -> MutexGuard<'_, Registry> {
         self.0
             .registry
@@ -141,6 +154,23 @@ impl Slot {
             _ => Poll::Ready(()),
         })
     }
+
+    /// Resolves when a connection that is not serving requests yet (TLS
+    /// handshake, protocol detection) should give up: shutdown was forced,
+    /// or has been draining for `grace`. A client that connected just before
+    /// the drain still gets its request answered.
+    #[cfg(any(feature = "tls", feature = "http2"))]
+    pub(crate) async fn abandoned(&mut self, grace: Duration) {
+        self.stopped().await;
+        let forced = poll_fn(|cx| match self.poll_state(cx) {
+            FORCED => Poll::Ready(()),
+            _ => Poll::Pending,
+        });
+        tokio::select! {
+            () = forced => {}
+            () = tokio::time::sleep(grace) => {}
+        }
+    }
 }
 
 impl Drop for Slot {
@@ -167,11 +197,22 @@ pub(crate) trait GracefulShutdown {
 pin_project! {
     /// Drives a connection and applies shutdown: on [`DRAINING`] it asks the
     /// connection to close after in-flight requests, on [`FORCED`] it drops it.
+    ///
+    /// A connection that has not started a request yet (one accepted just
+    /// before draining) is first given the signal's grace period to send
+    /// it, instead of being closed under the client: closing it would reset
+    /// a request the client may already have sent, and clients only retry
+    /// requests on reused connections.
     pub(crate) struct Watched<C> {
         #[pin]
         conn: C,
         slot: Slot,
         draining: bool,
+        // Set by the service when the first request starts (HTTP/1.1 with a
+        // grace period only).
+        started: Option<Arc<AtomicBool>>,
+        // Armed when draining starts before the first request.
+        grace: Option<Pin<Box<tokio::time::Sleep>>>,
         // A `max_connections` permit, released with the connection.
         permit: Option<OwnedSemaphorePermit>,
     }
@@ -183,8 +224,17 @@ impl<C> Watched<C> {
             conn,
             slot,
             draining: false,
+            started: None,
+            grace: None,
             permit,
         }
+    }
+
+    /// Wait for the first request (flagged in `started`) on drain, for up
+    /// to the grace period, before closing.
+    pub(crate) fn first_request(mut self, started: Option<Arc<AtomicBool>>) -> Self {
+        self.started = started;
+        self
     }
 }
 
@@ -199,12 +249,36 @@ where
         let mut this = self.project();
         match this.slot.poll_state(cx) {
             RUNNING => {}
-            DRAINING => {
-                if !*this.draining {
-                    *this.draining = true;
-                    this.conn.as_mut().graceful_shutdown();
+            DRAINING if !*this.draining => {
+                let waiting = this
+                    .started
+                    .as_ref()
+                    .is_some_and(|s| !s.load(Ordering::Relaxed));
+                if waiting {
+                    let grace = this.slot.signal.0.grace;
+                    let timer = this
+                        .grace
+                        .get_or_insert_with(|| Box::pin(tokio::time::sleep(grace)));
+                    if timer.as_mut().poll(cx).is_pending() {
+                        // Keep serving: once a request has started, close
+                        // after it (its response says `connection: close`).
+                        if this.conn.as_mut().poll(cx).is_ready() {
+                            return Poll::Ready(());
+                        }
+                        if !this
+                            .started
+                            .as_ref()
+                            .is_some_and(|s| s.load(Ordering::Relaxed))
+                        {
+                            return Poll::Pending;
+                        }
+                    }
                 }
+                *this.grace = None;
+                *this.draining = true;
+                this.conn.as_mut().graceful_shutdown();
             }
+            DRAINING => {}
             _ => return Poll::Ready(()),
         }
         this.conn.poll(cx).map(drop)

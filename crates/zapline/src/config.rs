@@ -49,6 +49,11 @@
 //!
 //! Use [`Config::builder`] for full control (other files, prefixes, inline
 //! TOML, overrides, an injected environment for tests).
+//!
+//! For a single-binary deploy, compile `config/` in with
+//! [`ConfigBuilder::standard_in`]`(zapline::embed!("config"))`: the TOML
+//! files ship inside the executable, and environment variables still
+//! override them.
 
 mod de;
 mod dotenv;
@@ -351,8 +356,19 @@ impl From<ConfigError> for std::io::Error {
 // Builder
 
 enum Source {
-    File { path: PathBuf, required: bool },
-    Toml { name: String, text: String },
+    File {
+        path: PathBuf,
+        required: bool,
+    },
+    Toml {
+        name: String,
+        text: String,
+    },
+    /// An optional file in a (possibly embedded) directory.
+    InDir {
+        dir: crate::embed::Dir,
+        name: String,
+    },
 }
 
 type Assignment = (String, Result<Value, String>);
@@ -414,6 +430,41 @@ impl ConfigBuilder {
         }
         self.file_optional("config/default.toml")
             .file_optional("config/{profile}.toml")
+    }
+
+    /// The standard layers with `default.toml` and `{profile}.toml` read
+    /// from `dir` instead of `config/`: typically the directory compiled into
+    /// the binary, so a deploy is one file.
+    ///
+    /// ```
+    /// # #[cfg(feature = "macros")] {
+    /// use zapline::config::Config;
+    ///
+    /// // Any directory works; `src/` has no TOML files, so only the
+    /// // environment layers apply here.
+    /// let config = Config::builder()
+    ///     .standard_in(zapline::embed!("src"))
+    ///     .env_source([("APP__SERVER__PORT", "9000")])
+    ///     .build()
+    ///     .unwrap();
+    /// assert_eq!(config.get::<u16>("server.port").unwrap(), 9000);
+    /// # }
+    /// ```
+    pub fn standard_in(mut self, dir: impl Into<crate::embed::Dir>) -> Self {
+        if self.env_prefix.is_none() {
+            self.env_prefix = Some(DEFAULT_ENV_PREFIX.to_owned());
+        }
+        if self.dotenv.is_none() {
+            self.dotenv = Some(PathBuf::from(".env"));
+        }
+        let dir = dir.into();
+        for name in ["default.toml", "{profile}.toml"] {
+            self.sources.push(Source::InDir {
+                dir: dir.clone(),
+                name: name.to_owned(),
+            });
+        }
+        self
     }
 
     /// A required TOML file. `{profile}` in the path is replaced by the
@@ -558,6 +609,21 @@ impl ConfigBuilder {
                     (format!("file `{}`", path.display()), text)
                 }
                 Source::Toml { name, text } => (name, text),
+                Source::InDir { dir, name } => {
+                    let name = name.replace("{profile}", &profile);
+                    let path = dir.path().join(&name);
+                    let text = match dir.read_to_string(&name) {
+                        Ok(text) => text,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                        Err(source) => return Err(ConfigError::Io { path, source }),
+                    };
+                    let origin = if dir.is_embedded() {
+                        format!("embedded file `{}`", path.display())
+                    } else {
+                        format!("file `{}`", path.display())
+                    };
+                    (origin, text)
+                }
             };
             let table = text.parse::<Table>().map_err(|e| ConfigError::Parse {
                 origin: origin.clone(),
