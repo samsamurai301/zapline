@@ -102,6 +102,8 @@
 //! | `s3` | | S3-compatible storage for [`storage`] |
 //! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
 //! | `sqlite` | | [`db`]: SQLite pool, migrations, `Db` extractor (sqlx) |
+//! | `chrono` | | [`chrono`] re-exported, with sqlx, serde and OpenAPI support for its types |
+//! | `uuid` | | [`uuid`] re-exported, with sqlx, serde and OpenAPI support for `Uuid` |
 //! | `full` | | All of the above |
 //!
 //! Always available: routing, extractors, middleware, [`auth`] (bearer,
@@ -206,6 +208,32 @@ pub use tls::TlsConfig;
 
 pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
+
+/// Dates and times, re-exported from [chrono](https://docs.rs/chrono) with
+/// its serde, sqlx and OpenAPI support turned on, so model fields can be
+/// `NaiveDate` or `DateTime<Utc>` without adding the crate yourself.
+///
+/// ```
+/// use zapline::chrono::{DateTime, NaiveDate, Utc};
+///
+/// let day: NaiveDate = "2026-01-31".parse().unwrap();
+/// let now: DateTime<Utc> = Utc::now();
+/// assert!(now.date_naive() > day);
+/// ```
+#[cfg(feature = "chrono")]
+pub use chrono;
+
+/// UUIDs, re-exported from [uuid](https://docs.rs/uuid) with its serde,
+/// sqlx and OpenAPI support turned on (and `Uuid::new_v4`).
+///
+/// ```
+/// use zapline::uuid::Uuid;
+///
+/// let id = Uuid::new_v4();
+/// assert_eq!(id.to_string().len(), 36);
+/// ```
+#[cfg(feature = "uuid")]
+pub use uuid;
 
 #[cfg(feature = "macros")]
 pub use zapline_macros::{delete, get, head, model, options, patch, post, put, route};

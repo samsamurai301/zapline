@@ -335,6 +335,7 @@ fn fake(column: &Column) -> String {
                 now
             }
         }
+        Kind::Text if ty == "uuid" => format!("00000000-0000-4000-8000-{n:012x}"),
         Kind::Text if name.contains("email") => format!("user{n}@example.com"),
         Kind::Text if name.ends_with("url") => format!("https://example.com/{n}"),
         Kind::Text => format!("{} {n}", column.name.replace('_', " ")),
