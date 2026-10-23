@@ -21,7 +21,7 @@ full = [
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
 query = ["dep:serde_urlencoded"]
-form = ["dep:serde_urlencoded"]
+form = ["dep:serde_urlencoded", "dep:form_urlencoded"]
 openapi = ["json", "dep:schemars", "dep:zapline-codegen", "zapline-macros?/openapi"]
 validate = ["json", "dep:validator", "zapline-macros?/validate"]
 config = ["dep:toml"]
@@ -50,7 +50,7 @@ sqlite = ["dep:sqlx", "sqlx/sqlite"]
 # wired up so apps can use these types in models without new dependencies.
 chrono = ["dep:chrono", "sqlx?/chrono", "schemars?/chrono04"]
 uuid = ["dep:uuid", "sqlx?/uuid", "schemars?/uuid1"]
-views = ["dep:minijinja"]
+views = ["dep:minijinja", "dep:serde_path_to_error"]
 password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
 cache = ["json"]
@@ -86,6 +86,8 @@ httpdate = "1"
 # optional
 serde_json = { version = "1", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+form_urlencoded = { version = "1", optional = true }
+serde_path_to_error = { version = "0.1", optional = true }
 schemars = { version = "1", optional = true }
 validator = { version = "0.21", optional = true, features = ["derive"] }
 toml = { version = "1", optional = true }

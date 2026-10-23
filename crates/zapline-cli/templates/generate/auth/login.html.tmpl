@@ -7,11 +7,13 @@
 <p><a role="button" class="secondary" href="/auth/{{ slug }}">Continue with {{ label }}</a></p>
 {% endfor %}
 
-<form hx-post="/login">
+<form method="post" action="/login" hx-post="/login">
   {% block form %}
-  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
-  <label>Email <input type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></label>
-  <label>Password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="current-password"></label>
+  {% if errors._form %}<p role="alert" class="error">{{ errors._form }}</p>{% endif %}
+  <label>Email <input type="email" name="email" value="{{ old.email }}" required autocomplete="email" autofocus{% if errors.email %} aria-invalid="true"{% endif %}></label>
+  {% if errors.email %}<small class="error">Email {{ errors.email }}</small>{% endif %}
+  <label>Password <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="current-password"{% if errors.password %} aria-invalid="true"{% endif %}></label>
+  {% if errors.password %}<small class="error">Password {{ errors.password }}</small>{% endif %}
   <button>Log in</button>
   {% endblock %}
 </form>

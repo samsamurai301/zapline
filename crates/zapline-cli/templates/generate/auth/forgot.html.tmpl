@@ -3,13 +3,13 @@
 {% block content %}
 <h1>Reset your password</h1>
 
-<form hx-post="/forgot">
+<form method="post" action="/forgot" hx-post="/forgot">
   {% block form %}
   {% if sent %}
   <p role="status">If {{ email }} has an account, a reset link is on its way. It works for an hour.</p>
   {% else %}
-  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
-  <label>Email <input type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></label>
+  <label>Email <input type="email" name="email" value="{{ old.email }}" required autocomplete="email" autofocus{% if errors.email %} aria-invalid="true"{% endif %}></label>
+  {% if errors.email %}<small class="error">Email {{ errors.email }}</small>{% endif %}
   <button>Email me a link</button>
   {% endif %}
   {% endblock %}

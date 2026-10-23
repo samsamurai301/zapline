@@ -670,6 +670,100 @@ async fn memory_store_is_bounded_and_expiry_aware() {
     assert!(format!("{store:?}").contains("len: 1"));
 }
 
+// ---- flash messages ---------------------------------------------------------------
+
+fn flash_app(store: CountingStore) -> App {
+    use zapline::session::Flash;
+    App::new()
+        .cookie_key(key())
+        .wrap(SessionLayer::new(store))
+        .post("/save", |flash: Flash| async move {
+            flash.success("Saved").warning("Check the date");
+            flash.redirect("/next")
+        })
+        .post("/inline", |flash: Flash| async move {
+            flash.success("Gespeichert ✓");
+            (
+                [(
+                    header::HeaderName::from_static("hx-trigger"),
+                    HeaderValue::from_static("saved"),
+                )],
+                "<li>row</li>",
+            )
+        })
+        .get("/next", |flash: Flash| async move { Json(flash.take()) })
+        .get("/plain", || async { "no session here" })
+}
+
+#[tokio::test]
+async fn a_flash_survives_exactly_one_redirect() {
+    let store = CountingStore::default();
+    let browser = flash_app(store.clone()).test().with_cookies();
+    let res = browser.post("/save").send().await;
+    assert_eq!(res.status(), 303);
+    assert_eq!(res.header("location"), Some("/next"));
+    // A marker cookie says a message is waiting.
+    let marker = res.cookie("zapline.sid.flash").unwrap();
+    assert_eq!(marker.value(), "1");
+    assert!(marker.http_only());
+
+    let res = browser.get("/next").send().await;
+    assert_eq!(
+        res.json::<Value>(),
+        json!([
+            {"level": "success", "message": "Saved"},
+            {"level": "warning", "message": "Check the date"}
+        ])
+    );
+    assert_eq!(res.cookie("zapline.sid.flash").unwrap().max_age(), Some(0));
+    assert_eq!(browser.get("/next").send().await.json::<Value>(), json!([]));
+
+    // Routes that never touch the session never load it.
+    let (loads, _, _) = store.counts();
+    browser.get("/plain").send().await;
+    assert_eq!(store.counts().0, loads);
+}
+
+#[tokio::test]
+async fn htmx_gets_the_flash_redirected_or_as_an_event() {
+    let browser = flash_app(CountingStore::default()).test().with_cookies();
+    // Redirected: `HX-Redirect`, and the message waits for that page.
+    let res = browser
+        .post("/save")
+        .header("hx-request", "true")
+        .send()
+        .await;
+    assert_eq!(res.status(), 200);
+    assert_eq!(res.header("hx-redirect"), Some("/next"));
+    assert_eq!(res.header("hx-trigger"), None);
+    let shown: Value = browser.get("/next").send().await.json();
+    assert_eq!(shown.as_array().unwrap().len(), 2);
+
+    // Answered in place: sent now as an event, merged with the handler's own,
+    // non-ASCII escaped; nothing is left for the next page.
+    let res = browser
+        .post("/inline")
+        .header("hx-request", "true")
+        .send()
+        .await;
+    assert_eq!(res.text(), "<li>row</li>");
+    let trigger = res.header("hx-trigger").unwrap();
+    assert!(trigger.is_ascii(), "{trigger}");
+    assert_eq!(
+        serde_json::from_str::<Value>(trigger).unwrap(),
+        json!({
+            "saved": null,
+            "flash": {"messages": [{"level": "success", "message": "Gespeichert ✓"}]}
+        })
+    );
+    assert_eq!(browser.get("/next").send().await.json::<Value>(), json!([]));
+
+    // Without htmx the same handler keeps the message for the next page.
+    browser.post("/inline").send().await;
+    let shown: Value = browser.get("/next").send().await.json();
+    assert_eq!(shown[0]["message"], "Gespeichert ✓");
+}
+
 #[tokio::test]
 async fn sessions_work_over_a_real_socket() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};

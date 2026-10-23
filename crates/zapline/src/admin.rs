@@ -171,11 +171,7 @@ impl Admin {
     }
 
     fn hidden(&self, table: &str, column: &str) -> bool {
-        let lower = column.to_ascii_lowercase();
-        ["password", "secret", "token"]
-            .iter()
-            .any(|s| lower.contains(s))
-            || lower.ends_with("_hash")
+        crate::secret::is_secret_name(column)
             || self
                 .hide
                 .iter()

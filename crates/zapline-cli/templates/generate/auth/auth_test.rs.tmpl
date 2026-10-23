@@ -146,6 +146,16 @@ async fn reset_pages_work_end_to_end() {
 
     client.get("/login").send().await.assert_contains("href=\"/forgot\"");
     client.get("/forgot").send().await.assert_status(200).assert_contains("<h1>Reset your password</h1>");
+    let invalid = client
+        .post("/forgot")
+        .header("hx-request", "true")
+        .form(&[("email", "e@")])
+        .send()
+        .await;
+    invalid
+        .assert_status(422)
+        .assert_contains("Email must be a valid email address")
+        .assert_contains("value=\"e@\"");
     let sent = client
         .post("/forgot")
         .header("hx-request", "true")
@@ -155,30 +165,57 @@ async fn reset_pages_work_end_to_end() {
     sent.assert_status(200).assert_contains("a reset link is on its way");
     let token = reset_token(&client, 0).await;
 
-    client.get(&format!("/reset?token={token}")).send().await.assert_status(200).assert_contains(&token);
-    let done = client
-        .post("/reset")
+    let page = client.get(&format!("/reset?token={token}")).send().await;
+    page.assert_status(200).assert_contains(&format!("hx-post=\"/reset?token={token}\""));
+    let reset_url = format!("/reset?token={token}");
+    let short = client
+        .post(&reset_url)
         .header("hx-request", "true")
-        .form(&[("token", token.as_str()), ("password", "new password")])
+        .form(&[("password", "short")])
+        .send()
+        .await;
+    short.assert_status(422).assert_contains("Password length must be between 8 and 128");
+    assert!(!short.text().contains("value=\"short\""), "passwords are never echoed: {}", short.text());
+
+    let done = client
+        .post(&reset_url)
+        .header("hx-request", "true")
+        .form(&[("password", "new password")])
         .send()
         .await;
     done.assert_status(200).assert_header("hx-redirect", "/");
     client.get("/api/auth/me").send().await.assert_status(200);
 
     let used = client
-        .post("/reset")
+        .post(&reset_url)
         .header("hx-request", "true")
-        .form(&[("token", token.as_str()), ("password", "new password")])
+        .form(&[("password", "new password")])
         .send()
         .await;
-    used.assert_status(200).assert_contains("invalid or has expired");
+    used.assert_status(422).assert_contains("invalid or has expired");
 }
 
 #[tokio::test]
-async fn html_forms_redirect_or_show_the_error() {
+async fn html_forms_redirect_with_a_flash_or_show_the_errors() {
     let client = app(Database::sqlite_memory()).test().with_cookies();
     client.get("/signup").send().await.assert_status(200).assert_contains("<h1>Sign up</h1>");
     client.get("/login").send().await.assert_status(200).assert_contains("<h1>Log in</h1>");
+
+    // Invalid input: a 422 with only the form, a message per field, the
+    // email kept and the password never echoed back.
+    let invalid = client
+        .post("/signup")
+        .header("hx-request", "true")
+        .form(&[("email", "not-an-email"), ("password", "short")])
+        .send()
+        .await;
+    invalid
+        .assert_status(422)
+        .assert_contains("Email must be a valid email address")
+        .assert_contains("Password length must be between 8 and 128")
+        .assert_contains("value=\"not-an-email\"");
+    assert!(!invalid.text().contains("<h1>"), "htmx gets only the form: {}", invalid.text());
+    assert!(!invalid.text().contains("short"), "{}", invalid.text());
 
     let ok = client
         .post("/signup")
@@ -189,14 +226,36 @@ async fn html_forms_redirect_or_show_the_error() {
     ok.assert_status(200).assert_header("hx-redirect", "/");
     client.get("/api/auth/me").send().await.assert_status(200);
 
+    // A duplicate is reported on the email field.
+    let other = app(Database::sqlite_memory()).test().with_cookies();
+    other.post("/signup").form(&[("email", "x@example.com"), ("password", "long enough")]).send().await;
+    let dup = other
+        .post("/signup")
+        .header("hx-request", "true")
+        .form(&[("email", "X@example.com"), ("password", "long enough")])
+        .send()
+        .await;
+    dup.assert_status(422).assert_contains("Email is already registered").assert_contains("value=\"X@example.com\"");
+
     let bad = client
         .post("/login")
         .header("hx-request", "true")
         .form(&[("email", "c@example.com"), ("password", "wrong password")])
         .send()
         .await;
-    bad.assert_status(200).assert_contains("wrong email or password");
-    assert!(!bad.text().contains("<h1>"), "htmx gets only the form: {}", bad.text());
+    bad.assert_status(422).assert_contains("wrong email or password").assert_contains("value=\"c@example.com\"");
+    assert!(!bad.text().contains("wrong password\""), "{}", bad.text());
+
+    // Without htmx: a plain 303, and the next page shows the flash once.
+    let res = client
+        .post("/login")
+        .form(&[("email", "c@example.com"), ("password", "long enough")])
+        .send()
+        .await;
+    res.assert_status(303).assert_header("location", "/");
+    client.get("/login").send().await.assert_contains("You are logged in.");
+    let again = client.get("/login").send().await;
+    assert!(!again.text().contains("You are logged in."), "{}", again.text());
 }
 // html@@
 

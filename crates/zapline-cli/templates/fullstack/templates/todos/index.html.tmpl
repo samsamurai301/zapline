@@ -3,9 +3,14 @@
 {% block content %}
 <h1>Todos</h1>
 
-<form hx-post="/todos" hx-target="#todos" hx-on::after-request="if (event.detail.successful) this.reset()">
-  <input name="title" placeholder="What needs doing?" required maxlength="200" autofocus>
+{# A rejected post re-renders the `form` block here (422), not the list. #}
+<form id="todo-form" method="post" action="/todos" hx-post="/todos" hx-target="#todos"
+      hx-on::after-request="if (event.detail.xhr.status < 300) { this.reset(); this.querySelectorAll('.error').forEach((e) => e.remove()) }">
+  {% block form %}
+  <input name="title" placeholder="What needs doing?" value="{{ old.title }}" required maxlength="200" autofocus{% if errors.title %} aria-invalid="true"{% endif %}>
   <button>Add</button>
+  {% if errors.title %}<small class="error">Title {{ errors.title }}</small>{% endif %}
+  {% endblock %}
 </form>
 
 {# Live: other tabs and users see changes as they happen. #}

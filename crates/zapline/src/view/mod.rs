@@ -37,7 +37,15 @@
 //! `templates/` directory next to them, and debug builds still read (and
 //! reload) the files on disk.
 //!
+//! # Forms
+//!
+//! [`ValidForm`] validates a form post without rejecting it, so the handler
+//! can show the form again with a message next to each field and the values
+//! the user typed ([`Views::render_invalid`]). With sessions, [`Flash`]
+//! messages queued before a redirect appear in every template as `flash`.
+//!
 //! [MiniJinja]: https://docs.rs/minijinja
+//! [`Flash`]: crate::session::Flash
 
 use std::fmt;
 use std::sync::Arc;
@@ -49,12 +57,28 @@ use crate::embed::Dir;
 use crate::extract::FromRequestParts;
 use crate::{App, Error, Html, Request};
 
+#[cfg(feature = "cookies")]
+mod flash;
+mod form;
+
+#[cfg(all(feature = "form", feature = "validate"))]
+pub use form::ValidForm;
+pub use form::{FormErrors, Invalid};
+
 type Configure = dyn Fn(&mut Environment<'static>) + Send + Sync;
 
 /// The template engine, as a handler argument. Register it with
 /// [`App::views`] or [`App::views_with`].
+///
+/// Extracted in a handler, it also knows what the request said about htmx
+/// (for [`render_invalid`](Self::render_invalid)) and, with sessions, where
+/// to read `flash` from.
 #[derive(Clone)]
-pub struct Views(Arc<Inner>);
+pub struct Views {
+    inner: Arc<Inner>,
+    /// Set only when extracted for an htmx request or one with a session.
+    request: Option<Arc<RequestScope>>,
+}
 
 struct Inner {
     dir: Dir,
@@ -63,11 +87,18 @@ struct Inner {
     cached: Option<Environment<'static>>,
 }
 
+/// What a render needs from the request it answers.
+struct RequestScope {
+    hx: Option<HxRequest>,
+    #[cfg(feature = "cookies")]
+    session: Option<crate::session::Session>,
+}
+
 impl fmt::Debug for Views {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Views")
-            .field("dir", &self.0.dir)
-            .field("reload", &self.0.cached.is_none())
+            .field("dir", &self.inner.dir)
+            .field("reload", &self.inner.cached.is_none())
             .finish()
     }
 }
@@ -94,7 +125,10 @@ impl Views {
         if !reload {
             inner.cached = Some(inner.environment());
         }
-        Views(Arc::new(inner))
+        Views {
+            inner: Arc::new(inner),
+            request: None,
+        }
     }
 
     /// Render template `name` with `ctx` (anything `Serialize`, usually
@@ -151,20 +185,36 @@ impl Views {
         &self,
         extra: impl Fn(&mut Environment<'static>) + Send + Sync + 'static,
     ) -> Views {
-        let before = self.0.configure.clone();
+        let before = self.inner.configure.clone();
         let configure: Arc<Configure> = Arc::new(move |env: &mut Environment<'static>| {
             if let Some(before) = &before {
                 before(env);
             }
             extra(env);
         });
-        Self::build(self.0.dir.clone(), Some(configure), self.0.cached.is_none())
+        Self::build(
+            self.inner.dir.clone(),
+            Some(configure),
+            self.inner.cached.is_none(),
+        )
+    }
+
+    /// What htmx said about the request these views were extracted for.
+    fn hx(&self) -> Option<&HxRequest> {
+        self.request.as_ref().and_then(|r| r.hx.as_ref())
     }
 
     fn with_env<R>(&self, f: impl FnOnce(&Environment<'static>) -> R) -> R {
-        match &self.0.cached {
+        // Templates read `flash` from this request's session.
+        #[cfg(feature = "cookies")]
+        let _flash = self
+            .request
+            .as_ref()
+            .and_then(|r| r.session.clone())
+            .map(flash::enter);
+        match &self.inner.cached {
             Some(env) => f(env),
-            None => f(&self.0.environment()),
+            None => f(&self.inner.environment()),
         }
     }
 }
@@ -186,6 +236,14 @@ impl Inner {
         } else {
             env.set_loader(minijinja::path_loader(self.dir.path()));
         }
+        // Empty until `render_invalid` sets them, so a form template can use
+        // `{{ old.title }}` and `{{ errors.title }}` on its first render too.
+        let empty: std::collections::BTreeMap<String, String> = Default::default();
+        env.add_global("errors", Value::from_serialize(&empty));
+        env.add_global("old", Value::from_serialize(&empty));
+        // Lazy: reads the session only when a template uses it.
+        #[cfg(feature = "cookies")]
+        env.add_global("flash", Value::from_object(flash::FlashGlobal));
         if let Some(configure) = &self.configure {
             configure(&mut env);
         }
@@ -255,10 +313,39 @@ fn reloads(dir: &Dir) -> bool {
 
 impl FromRequestParts for Views {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
-        req.state::<Views>().cloned().ok_or_else(|| {
+        let mut views = req.state::<Views>().cloned().ok_or_else(|| {
             Error::internal("no templates registered: add `.views(\"templates\")` to the app")
                 .diagnosed("ZL0050", None)
-        })
+        })?;
+        let hx = if req.head.headers.contains_key("hx-request") {
+            Some(HxRequest::from_request_parts(req).await?)
+        } else {
+            None
+        };
+        // Only a request whose client holds a waiting flash message pays for
+        // loading the session here (the store is read once per request).
+        #[cfg(feature = "cookies")]
+        let session = match crate::session::Session::unloaded(req) {
+            Some(session) if session.flash_pending() => {
+                // A store outage just means no flash on this page; handlers
+                // that need the session get the error when they ask for it.
+                let _ = session.load().await;
+                Some(session)
+            }
+            other => other,
+        };
+        #[cfg(feature = "cookies")]
+        let any = hx.is_some() || session.is_some();
+        #[cfg(not(feature = "cookies"))]
+        let any = hx.is_some();
+        if any {
+            views.request = Some(Arc::new(RequestScope {
+                hx,
+                #[cfg(feature = "cookies")]
+                session,
+            }));
+        }
+        Ok(views)
     }
 }
 

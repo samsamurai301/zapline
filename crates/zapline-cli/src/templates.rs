@@ -141,7 +141,7 @@ impl Template {
         match self {
             Template::Minimal | Template::Api => &[],
             Template::Full => &["compression"],
-            Template::Fullstack => &["sqlite", "views", "fs"],
+            Template::Fullstack => &["sqlite", "views", "fs", "cookies"],
         }
     }
 

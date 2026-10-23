@@ -412,6 +412,8 @@ pub struct Plan<'a> {
     pub dialect: Dialect,
     /// Generate htmx pages (the project has `templates/base.html`).
     pub html: bool,
+    /// The app has sessions, so the pages can set flash messages.
+    pub flash: bool,
     /// Crate name for the test's imports, when a test can be generated.
     pub test_crate: Option<&'a str>,
     /// Migration file name (`<timestamp>_create_<plural>.sql`).
@@ -595,8 +597,11 @@ fn module(plan: &Plan<'_>) -> String {
     if plan.uses(FieldType::Uuid) {
         s.push_str("use zapline::uuid::Uuid;\n");
     }
+    if plan.html && plan.flash {
+        s.push_str("use zapline::session::Flash;\n");
+    }
     if plan.html {
-        s.push_str("use zapline::view::{context, HxRequest, Views};\n");
+        s.push_str("use zapline::view::{context, HxRequest, ValidForm, Views};\n");
     }
     s.push('\n');
 
@@ -875,11 +880,20 @@ fn html_handlers(s: &mut String, plan: &Plan<'_>, refs: &[(&Field, &Parent)]) {
     s.push_str(
         "// ---- HTML (htmx) -----------------------------------------------------------\n\n",
     );
+    s.push_str(
+        "// A rejected form comes back as a 422 with its `form` block re-rendered: a\n\
+         // message next to each field and the typed values kept.\n\n",
+    );
+    let _ = writeln!(
+        s,
+        "async fn items(db: &Db) -> Result<Vec<{p}>> {{\n    \
+         let page: Paged<{p}> = listing().page_size(200, 200).fetch(db, &ListParams::default()).await?;\n    \
+         Ok(page.items)\n}}\n"
+    );
     let _ = writeln!(
         s,
         "async fn render(views: &Views, db: &Db, hx: &HxRequest) -> Result<Html<String>> {{\n    \
-         let page: Paged<{p}> = listing().page_size(200, 200).fetch(db, &ListParams::default()).await?;\n    \
-         let items = page.items;{lets_ref}\n    \
+         let items = items(db).await?;{lets_ref}\n    \
          views.page_or_block(hx, \"{t}/index.html\", \"list\", context! {{ items{ctx} }})\n}}\n"
     );
     let _ = writeln!(
@@ -891,10 +905,15 @@ fn html_handlers(s: &mut String, plan: &Plan<'_>, refs: &[(&Field, &Parent)]) {
     );
     let _ = writeln!(
         s,
-        "/// Add {a} from the page's form.\n#[post(\"{path}\", tag = \"pages\")]\n\
-         async fn create_form(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    Valid(Form(new)): Valid<Form<New{p}>>,\n) -> Result<Html<String>> {{\n    \
-         insert(&db, &new).await?;\n    render(&views, &db, &hx).await\n}}\n",
+        "/// Add {a} from the page's form: the new list, or the form again with\n\
+         /// what is wrong.\n#[post(\"{path}\", tag = \"pages\")]\n\
+         async fn create_form(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    ValidForm(form): ValidForm<New{p}>,\n) -> Result<Response> {{\n    \
+         let new = match form {{\n        Ok(new) => new,\n        Err(invalid) => {{\n            \
+         let items = items(&db).await?;{lets_inner}\n            \
+         return views.render_invalid(\"{t}/index.html\", context! {{ items{ctx} }}, invalid);\n        }}\n    }};\n    \
+         insert(&db, &new).await?;\n    Ok(render(&views, &db, &hx).await?.into_response())\n}}\n",
         a = n.a_human,
+        lets_inner = lets_owned.replace("\n    ", "\n            "),
     );
     let _ = writeln!(
         s,
@@ -910,15 +929,30 @@ fn html_handlers(s: &mut String, plan: &Plan<'_>, refs: &[(&Field, &Parent)]) {
          #[get(\"{path}/{{id}}/edit\", tag = \"pages\")]\n\
          async fn edit_page(\n    views: Views,\n    db: Db,\n    hx: HxRequest,\n    Path(id): Path<i64>,\n) -> Result<Html<String>> {{\n    \
          let item = find(&db, id).await?;{lets_owned}\n    \
-         views.page_or_block(&hx, \"{t}/edit.html\", \"row\", context! {{ item{ctx} }})\n}}\n"
+         views.page_or_block(&hx, \"{t}/edit.html\", \"form\", context! {{ item{ctx} }})\n}}\n"
     );
+    let human = title_case(&n.human);
+    let (flash_arg, saved, flash_doc) = if plan.flash {
+        (
+            "\n    flash: Flash,",
+            format!("\n    flash.success(\"{human} saved.\");"),
+            ", with a flash message",
+        )
+    } else {
+        ("", String::new(), "")
+    };
     let _ = writeln!(
         s,
-        "/// Save the edit form; answers with the updated row, which htmx swaps in.\n\
+        "/// Save the edit form; answers with the updated row, which htmx swaps in{flash_doc},\n\
+         /// or the form row again with what is wrong.\n\
          #[put(\"{path}/{{id}}\", tag = \"pages\")]\n\
-         async fn update_form(\n    views: Views,\n    db: Db,\n    Path(id): Path<i64>,\n    Valid(Form(new)): Valid<Form<New{p}>>,\n) -> Result<Html<String>> {{\n    \
-         let item = update_row(&db, id, &new).await?;{lets_owned}\n    \
-         views.render(\"{t}/_row.html\", context! {{ item{ctx} }})\n}}\n"
+         async fn update_form(\n    views: Views,{flash_arg}\n    db: Db,\n    Path(id): Path<i64>,\n    ValidForm(form): ValidForm<New{p}>,\n) -> Result<Response> {{\n    \
+         let new = match form {{\n        Ok(new) => new,\n        Err(invalid) => {{\n            \
+         let item = find(&db, id).await?;{lets_inner}\n            \
+         return views.render_invalid(\"{t}/edit.html\", context! {{ item{ctx} }}, invalid);\n        }}\n    }};\n    \
+         let item = update_row(&db, id, &new).await?;{lets_owned}{saved}\n    \
+         Ok(views.render(\"{t}/_row.html\", context! {{ item{ctx} }})?.into_response())\n}}\n",
+        lets_inner = lets_owned.replace("\n    ", "\n            "),
     );
     let _ = writeln!(
         s,
@@ -929,80 +963,83 @@ fn html_handlers(s: &mut String, plan: &Plan<'_>, refs: &[(&Field, &Parent)]) {
     );
 }
 
-/// The form control for `f`. With `item`, it starts with that row's value
-/// (`{{ item.title }}`); without, it is empty.
+/// The form control for `f`, with its error message after it. It shows
+/// what the user typed after a rejected post (`{{ old.title }}`); with
+/// `item`, it otherwise starts with that row's value (`{{ item.title }}`).
 fn input(f: &Field, item: Option<&str>) -> String {
     let required = if f.optional { "" } else { " required" };
     let name = &f.name;
     let label = f.label();
-    // `value="..."`, empty for a missing optional value.
+    let old = format!("old.{name}");
     let field = item.map(|i| format!("{i}.{name}")).unwrap_or_default();
-    // `value="{{ <shown> }}"` (empty for a missing optional value), where
-    // `shown` is how `field` is written in the input.
-    let value_as = |shown: &str| match item {
-        None => String::new(),
-        Some(_) if f.optional => {
-            format!(" value=\"{{{{ {shown} if {field} is not none }}}}\"")
-        }
-        Some(_) => format!(" value=\"{{{{ {shown} }}}}\""),
+    // The value to show, where `shown` is how `field` is written in the
+    // input. `old` is empty (falsy) until a post is rejected.
+    let value = |shown: &str| match item {
+        None => old.clone(),
+        Some(_) if f.optional => format!("{old} if old else ({shown} if {field} is not none)"),
+        Some(_) => format!("{old} if old else {shown}"),
     };
-    match f.ty {
+    let value_attr = |shown: &str| format!(" value=\"{{{{ {} }}}}\"", value(shown));
+    let invalid = format!("{{% if errors.{name} %}} aria-invalid=\"true\"{{% endif %}}");
+    let control = match f.ty {
         FieldType::String => format!(
-            "<input name=\"{name}\" placeholder=\"{label}\" maxlength=\"200\"{}{required}>",
-            value_as(&field)
+            "<input name=\"{name}\" placeholder=\"{label}\" maxlength=\"200\"{}{required}{invalid}>",
+            value_attr(&field)
         ),
-        FieldType::Text => {
-            let body = match item {
-                None => String::new(),
-                Some(_) if f.optional => {
-                    format!("{{{{ {field} if {field} is not none }}}}")
-                }
-                Some(_) => format!("{{{{ {field} }}}}"),
-            };
-            format!("<textarea name=\"{name}\" placeholder=\"{label}\"{required}>{body}</textarea>")
-        }
+        FieldType::Text => format!(
+            "<textarea name=\"{name}\" placeholder=\"{label}\"{required}{invalid}>{{{{ {} }}}}</textarea>",
+            value(&field)
+        ),
         FieldType::Int => format!(
-            "<input name=\"{name}\" type=\"number\" step=\"1\" placeholder=\"{label}\"{}{required}>",
-            value_as(&field)
+            "<input name=\"{name}\" type=\"number\" step=\"1\" placeholder=\"{label}\"{}{required}{invalid}>",
+            value_attr(&field)
         ),
         FieldType::Float => format!(
-            "<input name=\"{name}\" type=\"number\" step=\"any\" placeholder=\"{label}\"{}{required}>",
-            value_as(&field)
+            "<input name=\"{name}\" type=\"number\" step=\"any\" placeholder=\"{label}\"{}{required}{invalid}>",
+            value_attr(&field)
         ),
         FieldType::Bool => {
             let checked = match item {
-                Some(_) => format!("{{{{ ' checked' if {field} }}}}"),
-                None => String::new(),
+                Some(_) => format!("{old} if old else {field}"),
+                None => old.clone(),
             };
-            format!("<label><input name=\"{name}\" type=\"checkbox\"{checked}> {label}</label>")
+            format!(
+                "<label><input name=\"{name}\" type=\"checkbox\"{{{{ ' checked' if ({checked}) }}}}> {label}</label>"
+            )
         }
         FieldType::Date => format!(
-            "<input name=\"{name}\" type=\"date\" aria-label=\"{label}\"{}{required}>",
-            value_as(&field)
+            "<input name=\"{name}\" type=\"date\" aria-label=\"{label}\"{}{required}{invalid}>",
+            value_attr(&field)
         ),
         // Browsers want `2026-01-31T09:30`; the JSON form is `2026-01-31T09:30:00Z`.
         FieldType::DateTime => format!(
-            "<input name=\"{name}\" type=\"datetime-local\" aria-label=\"{label} (UTC)\"{}{required}>",
-            value_as(&format!("{field}[:16]"))
+            "<input name=\"{name}\" type=\"datetime-local\" aria-label=\"{label} (UTC)\"{}{required}{invalid}>",
+            value_attr(&format!("{field}[:16]"))
         ),
         FieldType::Uuid => format!(
-            "<input name=\"{name}\" placeholder=\"{label}\" pattern=\"[0-9a-fA-F-]{{32,36}}\"{}{required}>",
-            value_as(&field)
+            "<input name=\"{name}\" placeholder=\"{label}\" pattern=\"[0-9a-fA-F-]{{32,36}}\"{}{required}{invalid}>",
+            value_attr(&field)
         ),
         FieldType::References => {
             let parent = f.parent.as_ref().map(|p| p.names.singular.as_str()).unwrap_or("");
+            // Submitted values are strings; ids are numbers.
             let selected = match item {
-                Some(_) => format!("{{{{ ' selected' if c.id == {field} }}}}"),
-                None => String::new(),
+                Some(_) => format!(
+                    "{{{{ ' selected' if ((c.id|string) == {old} if old else c.id == {field}) }}}}"
+                ),
+                None => format!("{{{{ ' selected' if (c.id|string) == {old} }}}}"),
             };
             format!(
-                "<select name=\"{name}\" aria-label=\"{label}\"{required}>\
+                "<select name=\"{name}\" aria-label=\"{label}\"{required}{invalid}>\
                  <option value=\"\">{label}…</option>\
                  {{% for c in {parent}_choices %}}<option value=\"{{{{ c.id }}}}\"{selected}>{{{{ c.label }}}}</option>{{% endfor %}}\
                  </select>"
             )
         }
-    }
+    };
+    format!(
+        "{control}{{% if errors.{name} %}}<small class=\"error\">{label} {{{{ errors.{name} }}}}</small>{{% endif %}}"
+    )
 }
 
 /// How `item.<field>` is shown in a table cell or on the show page.
@@ -1048,6 +1085,12 @@ fn thead(plan: &Plan<'_>) -> String {
     s
 }
 
+/// `id` of the create form, so a rejected post is swapped into the form
+/// rather than into the list it targets.
+fn form_id(plan: &Plan<'_>) -> String {
+    format!("{}-form", plan.names.singular.replace('_', "-"))
+}
+
 fn index_template(plan: &Plan<'_>) -> String {
     let n = plan.names;
     let title = title_case(&n.plural_human);
@@ -1056,16 +1099,19 @@ fn index_template(plan: &Plan<'_>) -> String {
     let _ = writeln!(s, "{{% block title %}}{title}{{% endblock %}}");
     s.push_str("{% block content %}\n");
     let _ = writeln!(s, "<h1>{title}</h1>\n");
+    s.push_str("{# A rejected post re-renders the `form` block here (422), not the list. #}\n");
     let _ = writeln!(
         s,
-        "<form hx-post=\"{p}\" hx-target=\"#{t}\" hx-on::after-request=\"if (event.detail.successful) this.reset()\">",
+        "<form id=\"{id}\" method=\"post\" action=\"{p}\" hx-post=\"{p}\" hx-target=\"#{t}\"\n      \
+         hx-on::after-request=\"if (event.detail.xhr.status < 300) {{ this.reset(); this.querySelectorAll('.error').forEach((e) => e.remove()) }}\">\n  {{% block form %}}",
+        id = form_id(plan),
         p = n.path,
         t = n.plural
     );
     for f in plan.fields {
         let _ = writeln!(s, "  {}", input(f, None));
     }
-    s.push_str("  <button>Add</button>\n</form>\n\n");
+    s.push_str("  <button>Add</button>\n  {% endblock %}\n</form>\n\n");
     s.push_str("<table>\n");
     s.push_str(&thead(plan));
     let _ = writeln!(s, "  <tbody id=\"{}\">", n.plural);
@@ -1148,7 +1194,8 @@ fn show_template(plan: &Plan<'_>) -> String {
 }
 
 /// The edit form as a table row (htmx swaps it in place of the row being
-/// edited), on a page of its own for direct visits.
+/// edited), on a page of its own for direct visits. A rejected save
+/// re-renders the `form` block: the row with a message per field.
 fn edit_template(plan: &Plan<'_>) -> String {
     let n = plan.names;
     let mut s = String::new();
@@ -1162,7 +1209,7 @@ fn edit_template(plan: &Plan<'_>) -> String {
     let _ = writeln!(s, "<h1>Edit {} {{{{ item.id }}}}</h1>\n", n.human);
     s.push_str("<table>\n");
     s.push_str(&thead(plan));
-    s.push_str("  <tbody>\n  {% block row %}\n");
+    s.push_str("  <tbody>\n  {% block form %}\n");
     let _ = writeln!(
         s,
         "  <tr id=\"{}-{{{{ item.id }}}}\">",
@@ -1366,16 +1413,85 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
              assert!(row.trim_start().starts_with(\"<tr\") && !row.contains(\"<html\"), \"{{row}}\");\n\n    \
              // Saving answers with the updated display row.\n    \
              let res = client\n        .put(&format!(\"{p}/{{id}}\"))\n        .header(\"HX-Request\", \"true\")\n        .form(&[{form}])\n        .send()\n        .await;\n    \
-             assert_eq!(res.status(), 200, \"{{}}\", res.text());\n    \
+             assert_eq!(res.status(), 200, \"{{}}\", res.text());{flash_check}\n    \
              let row = res.text();\n    \
              assert!(row.contains(\"hx-get\"), \"{{row}}\");{shown_check}\n\n    \
              let res = client.get(\"{p}/999999\").send().await;\n    \
              assert_eq!(res.status(), 404);\n}}\n",
             p = n.path,
             form = form.join(", "),
+            flash_check = if plan.flash {
+                format!(
+                    "\n    // Answered in place, so the flash message comes as an htmx event.\n    \
+                     let trigger = res.header(\"hx-trigger\").unwrap_or_default();\n    \
+                     assert!(trigger.contains(\"{} saved.\"), \"{{trigger}}\");",
+                    title_case(&n.human)
+                )
+            } else {
+                String::new()
+            },
         );
+        if let Some((field, bad, message)) = breakable(plan) {
+            let broken: Vec<String> = plan
+                .fields
+                .iter()
+                .map(|f| {
+                    if f.name == field.name {
+                        format!("(\"{}\", \"{bad}\".to_string())", f.name)
+                    } else {
+                        format!("(\"{}\", {})", f.name, f.changed_form())
+                    }
+                })
+                .collect();
+            let _ = writeln!(
+                s,
+                "#[tokio::test]\nasync fn rejected_forms_come_back_with_errors() {{\n{setup}\n    \
+                 // The create form: swapped into the form, not the list it targets.\n    \
+                 let res = client\n        .post(\"{p}\")\n        .header(\"HX-Request\", \"true\")\n        \
+                 .header(\"HX-Trigger\", \"{id}\")\n        .header(\"HX-Target\", \"{t}\")\n        \
+                 .form(&[{broken}])\n        .send()\n        .await;\n    \
+                 assert_eq!(res.status(), 422);\n    \
+                 assert_eq!(res.header(\"hx-retarget\"), Some(\"#{id}\"));\n    \
+                 let form = res.text();\n    \
+                 assert!(form.contains(\"{message}\"), \"{{form}}\");\n    \
+                 assert!(form.contains(\"value=\\\"{bad}\\\"\"), \"{{form}}\");\n    \
+                 assert!(!form.contains(\"<table>\"), \"{{form}}\");\n    \
+                 let list: Value = client.get(\"{api}\").send().await.json();\n    \
+                 assert_eq!(list[\"total\"], 0);\n\n    \
+                 // The edit row: the row again, with the message.\n{create}\n    \
+                 let res = client\n        .put(&format!(\"{p}/{{id}}\"))\n        .header(\"HX-Request\", \"true\")\n        \
+                 .form(&[{broken}])\n        .send()\n        .await;\n    \
+                 assert_eq!(res.status(), 422);\n    \
+                 let row = res.text();\n    \
+                 assert!(row.trim_start().starts_with(\"<tr\") && row.contains(\"{message}\"), \"{{row}}\");\n}}\n",
+                p = n.path,
+                t = n.plural,
+                id = form_id(plan),
+                broken = broken.join(", "),
+            );
+        }
     }
     s.trim_end().to_string() + "\n"
+}
+
+/// A field to get wrong in a form post, the bad value and the message the
+/// page then shows.
+fn breakable<'a>(plan: &Plan<'a>) -> Option<(&'a Field, &'static str, String)> {
+    let required_string = plan
+        .fields
+        .iter()
+        .find(|f| f.ty == FieldType::String && !f.optional);
+    if let Some(f) = required_string {
+        return Some((
+            f,
+            "",
+            format!("{} length must be between 1 and 200", f.label()),
+        ));
+    }
+    plan.fields
+        .iter()
+        .find(|f| matches!(f.ty, FieldType::Int | FieldType::Float))
+        .map(|f| (f, "abc", format!("{} must be a number", f.label())))
 }
 
 /// The label column of a table from its `CREATE TABLE` in `sql`: the first
@@ -1476,6 +1592,7 @@ mod tests {
             fields,
             dialect: Dialect::Sqlite,
             html,
+            flash: html,
             test_crate: Some("demo"),
             migration_name: "1_create_blog_posts.sql".into(),
         }
@@ -1730,11 +1847,15 @@ mod tests {
         assert!(module.contains("list_for_author,"));
 
         let index = index_template(&plan);
-        assert!(index.contains("<select name=\"author_id\" aria-label=\"Author\" required>"));
-        assert!(index.contains("{% for c in author_choices %}<option value=\"{{ c.id }}\">"));
+        assert!(index.contains(
+            "<select name=\"author_id\" aria-label=\"Author\" required{% if errors.author_id %}"
+        ));
+        assert!(index.contains("{% for c in author_choices %}<option value=\"{{ c.id }}\"{{ ' selected' if (c.id|string) == old.author_id }}>"));
         assert!(index.contains("{% include \"posts/_row.html\" %}"));
         let edit = edit_template(&plan);
-        assert!(edit.contains("{{ ' selected' if c.id == item.author_id }}"));
+        assert!(edit.contains(
+            "{{ ' selected' if ((c.id|string) == old.author_id if old else c.id == item.author_id) }}"
+        ));
         assert!(edit.contains("hx-put=\"/posts/{{ item.id }}\" hx-include=\"closest tr\""));
         // Rows show the author's label, linked to the author's page.
         let row = row_template(&plan);
@@ -1769,16 +1890,25 @@ mod tests {
         let f = |spec: &str| Field::parse(spec).unwrap();
         assert!(input(&f("d:date"), None).contains("type=\"date\""));
         assert!(input(&f("t:datetime"), None).contains("type=\"datetime-local\""));
-        assert_eq!(
-            input(&f("t:datetime?"), Some("item")),
+        assert!(input(&f("t:datetime?"), Some("item")).starts_with(
             "<input name=\"t\" type=\"datetime-local\" aria-label=\"T (UTC)\" \
-             value=\"{{ item.t[:16] if item.t is not none }}\">"
-        );
-        assert!(input(&f("n:int"), Some("item")).contains("value=\"{{ item.n }}\" required"));
-        assert!(input(&f("b:bool"), Some("item")).contains("{{ ' checked' if item.b }}"));
+             value=\"{{ old.t if old else (item.t[:16] if item.t is not none) }}\"\
+             {% if errors.t %} aria-invalid=\"true\"{% endif %}>"
+        ));
+        assert!(input(&f("n:int"), Some("item"))
+            .contains("value=\"{{ old.n if old else item.n }}\" required"));
+        assert!(input(&f("b:bool"), Some("item"))
+            .contains("{{ ' checked' if (old.b if old else item.b) }}"));
+        assert!(input(&f("body:text"), Some("item")).starts_with(
+            "<textarea name=\"body\" placeholder=\"Body\" required\
+             {% if errors.body %} aria-invalid=\"true\"{% endif %}>{{ old.body if old else item.body }}</textarea>"
+        ));
+        // A rejected create form keeps what was typed and says what is wrong.
         assert_eq!(
-            input(&f("body:text"), Some("item")),
-            "<textarea name=\"body\" placeholder=\"Body\" required>{{ item.body }}</textarea>"
+            input(&f("title"), None),
+            "<input name=\"title\" placeholder=\"Title\" maxlength=\"200\" value=\"{{ old.title }}\" required\
+             {% if errors.title %} aria-invalid=\"true\"{% endif %}>\
+             {% if errors.title %}<small class=\"error\">Title {{ errors.title }}</small>{% endif %}"
         );
         assert!(input(&f("k:uuid"), None).contains("pattern="));
     }
@@ -1800,6 +1930,42 @@ mod tests {
             ".form(&[(\"title\", \"Changed\".to_string()), (\"views\", \"7\".to_string())])"
         ));
         assert!(!test.contains("Factory"));
+    }
+
+    #[test]
+    fn rejected_forms_show_errors_and_saves_flash() {
+        let names = names();
+        let fields =
+            parse_fields(&["title".into(), "done:bool".into(), "score:float?".into()]).unwrap();
+        let mut plan = plan(&names, &fields, true);
+        let index = index_template(&plan);
+        assert!(
+            index.contains("<form id=\"blog-post-form\" method=\"post\""),
+            "{index}"
+        );
+        assert!(index.contains("{% block form %}"));
+        let edit = edit_template(&plan);
+        assert!(edit.contains("{% block form %}"), "{edit}");
+        assert!(edit.contains(
+            "value=\"{{ old.score if old else (item.score if item.score is not none) }}\""
+        ));
+
+        let src = module(&plan);
+        assert!(src.contains("ValidForm(form): ValidForm<NewBlogPost>"));
+        assert!(src.contains("views.render_invalid(\"blog_posts/index.html\""));
+        assert!(src.contains("views.render_invalid(\"blog_posts/edit.html\""));
+        assert!(src.contains("views.page_or_block(&hx, \"blog_posts/edit.html\", \"form\""));
+        assert!(src.contains("flash.success(\"Blog post saved.\");"));
+        let test = test(&plan, "demo");
+        assert!(test.contains("async fn rejected_forms_come_back_with_errors()"));
+        assert!(test.contains("Title length must be between 1 and 200"));
+        assert!(test.contains("Blog post saved."));
+
+        // Without sessions: no flash.
+        plan.flash = false;
+        let src = module(&plan);
+        assert!(!src.contains("Flash"), "{src}");
+        assert!(!super::test(&plan, "demo").contains("saved."));
     }
 
     #[test]

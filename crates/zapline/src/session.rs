@@ -35,9 +35,12 @@
 //!     .run("0.0.0.0:8080")
 //!     .unwrap();
 //! ```
+//!
+//! [`Flash`] keeps one-time messages ("Post saved") in the session for the
+//! next page; with the `views` feature every template sees them as `flash`.
 
 use std::collections::{BTreeSet, HashMap};
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::future::{ready, Future};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -46,7 +49,7 @@ use std::time::{Duration, SystemTime};
 use http::header::{COOKIE, SET_COOKIE};
 use http::{HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::auth::CsrfBinding;
@@ -416,6 +419,15 @@ struct State {
     /// The request's CSRF token, bound to this session: rotated on commit
     /// when the session id changes.
     csrf: Option<CsrfBinding>,
+    /// The client sent the flash marker cookie: a flash message is waiting.
+    flash_marker: bool,
+    /// A flash message was queued during this request.
+    flash_added: bool,
+    /// The request came from htmx (recorded by the `Flash` extractor).
+    htmx: bool,
+    /// Flash messages consumed in this request (by a template or
+    /// `Flash::take`), so every read in the request sees the same list.
+    flash_taken: Option<Vec<FlashMessage>>,
 }
 
 /// The current session, from [`SessionLayer`]. Cheap to clone; all clones
@@ -450,6 +462,8 @@ struct Plan {
     remove_cookie: bool,
     /// The session id the client presents after this response.
     next_id: Option<String>,
+    /// Set (`true`) or clear (`false`) the flash marker cookie.
+    flash_marker: Option<bool>,
 }
 
 impl Session {
@@ -491,6 +505,7 @@ impl Session {
         if !st.parsed {
             let cookies = std::mem::take(&mut st.cookies);
             st.cookie_id = self.read_cookie(&cookies);
+            st.flash_marker = has_cookie(&cookies, &self.flash_cookie_name());
             st.parsed = true;
         }
     }
@@ -502,7 +517,7 @@ impl Session {
     /// Load from the store (once). A store error fails this and every later
     /// load in the request with `503`: the session is never mistaken for a
     /// missing one, which would start a new session over the client's.
-    async fn load(&self) -> Result<()> {
+    pub(crate) async fn load(&self) -> Result<()> {
         let id = {
             let mut st = self.state();
             if st.loaded {
@@ -657,6 +672,10 @@ impl Session {
         if !st.loaded || st.load_error.is_some() {
             return Ok(plan);
         }
+        let flash_pending = st.data.contains_key(FLASH_KEY);
+        if flash_pending != st.flash_marker {
+            plan.flash_marker = Some(flash_pending);
+        }
         let persist = (st.modified || st.refresh) && !(st.id.is_none() && st.data.is_empty());
         if persist {
             if st.regenerate || st.id.is_none() {
@@ -686,6 +705,7 @@ impl Session {
 
     /// Persist changes and set or clear the cookie.
     async fn commit(&self, res: &mut Response) -> Result<()> {
+        self.flash_to_htmx(res);
         let plan = self.plan()?;
         let store = &self.inner.store;
         if let Some((id, record)) = &plan.save {
@@ -702,6 +722,18 @@ impl Session {
         if let Some(value) = cookie.and_then(|c| HeaderValue::try_from(c).ok()) {
             res.headers_mut().append(SET_COOKIE, value);
         }
+        if let Some(pending) = plan.flash_marker {
+            let mut c = self.base_cookie(self.flash_cookie_name(), "1".into());
+            if pending {
+                let secs = i64::try_from(self.inner.config.ttl.as_secs()).unwrap_or(i64::MAX);
+                c.set_max_age(cookie::time::Duration::seconds(secs));
+            } else {
+                c.make_removal();
+            }
+            if let Ok(value) = HeaderValue::try_from(c.encoded().to_string()) {
+                res.headers_mut().append(SET_COOKIE, value);
+            }
+        }
         let csrf = self.state().csrf.take();
         if let Some(csrf) = csrf {
             csrf.commit(plan.next_id.as_deref(), res)?;
@@ -709,9 +741,60 @@ impl Session {
         Ok(())
     }
 
-    fn base_cookie(&self, value: String) -> Cookie<'static> {
+    /// Name of the unsigned marker cookie that says a flash message is
+    /// waiting. It lets templates skip loading the session otherwise; a
+    /// forged one only costs a session load.
+    fn flash_cookie_name(&self) -> String {
+        format!("{}.flash", self.inner.config.cookie_name)
+    }
+
+    /// For an htmx request that queued flash messages and is answered in
+    /// place (not redirected), hand them to the page now as an
+    /// `HX-Trigger: {"flash": {"messages": [...]}}` event instead of keeping
+    /// them for a next page that never comes.
+    fn flash_to_htmx(&self, res: &mut Response) {
+        let navigates = res.status().is_redirection()
+            || ["hx-redirect", "hx-location", "hx-refresh"]
+                .iter()
+                .any(|h| res.headers().contains_key(*h));
+        let messages = {
+            let mut st = self.state();
+            if !(st.htmx && st.flash_added && st.loaded) || navigates {
+                return;
+            }
+            match st.data.remove(FLASH_KEY) {
+                Some(messages) => {
+                    st.modified = true;
+                    messages
+                }
+                None => return,
+            }
+        };
+        let mut events = Map::new();
+        if let Some(existing) = res.headers().get(HX_TRIGGER).and_then(|v| v.to_str().ok()) {
+            match serde_json::from_str::<Value>(existing) {
+                Ok(Value::Object(map)) => events = map,
+                _ => {
+                    for name in existing.split(',').map(str::trim) {
+                        if !name.is_empty() {
+                            events.insert(name.to_owned(), Value::Null);
+                        }
+                    }
+                }
+            }
+        }
+        let mut detail = Map::new();
+        detail.insert("messages".into(), messages);
+        events.insert("flash".into(), Value::Object(detail));
+        let json = ascii_json(&Value::Object(events).to_string());
+        if let Ok(value) = HeaderValue::try_from(json) {
+            res.headers_mut().insert(HX_TRIGGER, value);
+        }
+    }
+
+    fn base_cookie(&self, name: String, value: String) -> Cookie<'static> {
         let cfg = &self.inner.config;
-        let mut c = Cookie::new(cfg.cookie_name.clone(), value);
+        let mut c = Cookie::new(name, value);
         c.set_path(cfg.path.clone());
         if let Some(d) = &cfg.domain {
             c.set_domain(d.clone());
@@ -725,7 +808,7 @@ impl Session {
     /// `Set-Cookie` value carrying the signed id.
     fn cookie(&self, id: &str) -> String {
         let mut jar = cookie::CookieJar::new();
-        let mut c = self.base_cookie(id.to_owned());
+        let mut c = self.base_cookie(self.inner.config.cookie_name.clone(), id.to_owned());
         let secs = i64::try_from(self.inner.config.ttl.as_secs()).unwrap_or(i64::MAX);
         c.set_max_age(cookie::time::Duration::seconds(secs));
         jar.signed_mut(&self.inner.key).add(c);
@@ -736,7 +819,7 @@ impl Session {
     }
 
     fn removal_cookie(&self) -> String {
-        let mut c = self.base_cookie(String::new());
+        let mut c = self.base_cookie(self.inner.config.cookie_name.clone(), String::new());
         c.make_removal();
         c.encoded().to_string()
     }
@@ -762,4 +845,294 @@ impl FromRequestParts for Session {
     async fn from_request_parts(req: &mut Request) -> Result<Self> {
         Session::current(req).await
     }
+}
+
+// ---------------------------------------------------------------------------
+// Flash messages
+
+/// Session key holding the queued flash messages.
+const FLASH_KEY: &str = "_flash";
+const HX_TRIGGER: &str = "hx-trigger";
+
+/// How a [`FlashMessage`] should look: templates usually turn it into a
+/// CSS class (`flash-{{ m.level }}`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FlashLevel {
+    /// Something worked: "Post saved".
+    Success,
+    /// Something failed: "Could not send the email".
+    Error,
+    /// Neutral news: "You have 3 new messages".
+    Info,
+    /// Needs attention: "Your trial ends tomorrow".
+    Warning,
+}
+
+impl FlashLevel {
+    /// `"success"`, `"error"`, `"info"` or `"warning"`.
+    ///
+    /// ```
+    /// # use zapline::session::FlashLevel;
+    /// assert_eq!(FlashLevel::Success.as_str(), "success");
+    /// ```
+    pub fn as_str(self) -> &'static str {
+        match self {
+            FlashLevel::Success => "success",
+            FlashLevel::Error => "error",
+            FlashLevel::Info => "info",
+            FlashLevel::Warning => "warning",
+        }
+    }
+}
+
+/// One message queued with [`Flash`]. Serializes as
+/// `{"level": "success", "message": "Post saved"}`.
+///
+/// ```
+/// # use zapline::session::{FlashLevel, FlashMessage};
+/// let m = FlashMessage { level: FlashLevel::Info, message: "Welcome back".into() };
+/// assert_eq!(m.level.as_str(), "info");
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlashMessage {
+    /// Its kind.
+    pub level: FlashLevel,
+    /// The text, shown as is (HTML-escaped by templates).
+    pub message: String,
+}
+
+/// One-time messages for the next page ("Post saved", "Wrong password"),
+/// kept in the [`Session`]: queue one before redirecting, and the page the
+/// browser lands on shows it once.
+///
+/// With the `views` feature every template sees the waiting messages as
+/// `flash` (reading them there uses them up), with no setup:
+///
+/// ```jinja
+/// {% for m in flash %}<p class="flash flash-{{ m.level }}">{{ m.message }}</p>{% endfor %}
+/// ```
+///
+/// Messages stay queued until something reads them: a template that uses
+/// `flash`, or [`take`](Self::take). For an htmx request answered in place
+/// (no redirect), messages queued during it are sent right away instead,
+/// as an `HX-Trigger: {"flash": {"messages": [...]}}` event the page can
+/// show as toasts. Needs [`SessionLayer`]; extraction fails like
+/// [`Session`]'s otherwise.
+///
+/// ```
+/// use zapline::prelude::*;
+/// use zapline::session::Flash;
+///
+/// async fn publish(flash: Flash, Path(id): Path<i64>) -> Response {
+///     // ... publish post `id` ...
+///     flash.success("Post published");
+///     // `303 See Other`, or `HX-Redirect` for htmx.
+///     flash.redirect(&format!("/posts/{id}"))
+/// }
+/// # let _ = App::new().post("/posts/{id}/publish", publish);
+/// ```
+#[derive(Clone, Debug)]
+pub struct Flash {
+    session: Session,
+    htmx: bool,
+}
+
+impl Flash {
+    /// Queue a success message.
+    ///
+    /// ```
+    /// # async fn h(flash: zapline::session::Flash) {
+    /// flash.success("Saved").info("Changes go live in a minute");
+    /// # }
+    /// ```
+    pub fn success(&self, message: impl Into<String>) -> &Self {
+        self.push(FlashLevel::Success, message)
+    }
+
+    /// Queue an error message.
+    ///
+    /// ```
+    /// # async fn h(flash: zapline::session::Flash) {
+    /// flash.error("Could not send the invitation");
+    /// # }
+    /// ```
+    pub fn error(&self, message: impl Into<String>) -> &Self {
+        self.push(FlashLevel::Error, message)
+    }
+
+    /// Queue an informational message.
+    ///
+    /// ```
+    /// # async fn h(flash: zapline::session::Flash) {
+    /// flash.info("You have 3 new messages");
+    /// # }
+    /// ```
+    pub fn info(&self, message: impl Into<String>) -> &Self {
+        self.push(FlashLevel::Info, message)
+    }
+
+    /// Queue a warning.
+    ///
+    /// ```
+    /// # async fn h(flash: zapline::session::Flash) {
+    /// flash.warning("Your trial ends tomorrow");
+    /// # }
+    /// ```
+    pub fn warning(&self, message: impl Into<String>) -> &Self {
+        self.push(FlashLevel::Warning, message)
+    }
+
+    /// Queue a message of any level.
+    ///
+    /// ```
+    /// # use zapline::session::FlashLevel;
+    /// # async fn h(flash: zapline::session::Flash) {
+    /// flash.push(FlashLevel::Info, "Signed in");
+    /// # }
+    /// ```
+    pub fn push(&self, level: FlashLevel, message: impl Into<String>) -> &Self {
+        self.session.push_flash(FlashMessage {
+            level,
+            message: message.into(),
+        });
+        self
+    }
+
+    /// The waiting messages, used up: later requests won't see them. Every
+    /// call in the same request returns the same list. Templates do this
+    /// for you through `flash`.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # use zapline::session::{Flash, FlashMessage};
+    /// async fn notices(flash: Flash) -> Json<Vec<FlashMessage>> {
+    ///     Json(flash.take())
+    /// }
+    /// # let _ = App::new().get("/notices", notices);
+    /// ```
+    pub fn take(&self) -> Vec<FlashMessage> {
+        self.session.take_flash()
+    }
+
+    /// Go to `to` after a form post: `303 See Other` for a plain browser
+    /// request; for htmx, `HX-Redirect`, so htmx loads the whole page
+    /// (where the flash shows) instead of swapping it into the form's
+    /// target.
+    ///
+    /// ```
+    /// # async fn h(flash: zapline::session::Flash) -> zapline::Response {
+    /// flash.success("Welcome!").redirect("/")
+    /// # }
+    /// ```
+    pub fn redirect(&self, to: &str) -> Response {
+        if !self.htmx {
+            return crate::Redirect::to(to).into_response();
+        }
+        match HeaderValue::try_from(to) {
+            Ok(location) => {
+                let mut res = ().into_response();
+                res.headers_mut().insert("hx-redirect", location);
+                res
+            }
+            Err(_) => Error::internal("invalid redirect location")
+                .with_code("invalid_redirect")
+                .into_response(),
+        }
+    }
+}
+
+impl FromRequestParts for Flash {
+    async fn from_request_parts(req: &mut Request) -> Result<Self> {
+        let htmx = req
+            .headers()
+            .get("hx-request")
+            .is_some_and(|v| v.as_bytes() == b"true");
+        let session = Session::current(req).await?;
+        if htmx {
+            session.state().htmx = true;
+        }
+        Ok(Flash { session, htmx })
+    }
+}
+
+impl Session {
+    /// Whether a flash message may be waiting, without touching the store:
+    /// the marker cookie before loading, the data afterwards.
+    #[cfg(feature = "views")]
+    pub(crate) fn flash_pending(&self) -> bool {
+        let st = self.state();
+        if st.parsed {
+            st.flash_marker || st.data.contains_key(FLASH_KEY) || st.flash_taken.is_some()
+        } else {
+            has_cookie(&st.cookies, &self.flash_cookie_name())
+        }
+    }
+
+    fn push_flash(&self, message: FlashMessage) {
+        let mut entry = Map::new();
+        entry.insert("level".into(), Value::from(message.level.as_str()));
+        entry.insert("message".into(), Value::from(message.message));
+        let mut st = self.state();
+        let queue = st
+            .data
+            .entry(FLASH_KEY)
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if !queue.is_array() {
+            *queue = Value::Array(Vec::new());
+        }
+        if let Value::Array(list) = queue {
+            list.push(Value::Object(entry));
+        }
+        st.modified = true;
+        st.flash_added = true;
+    }
+
+    /// Use up the waiting flash messages (see [`Flash::take`]).
+    pub(crate) fn take_flash(&self) -> Vec<FlashMessage> {
+        let mut st = self.state();
+        let fresh: Vec<FlashMessage> = match st.data.remove(FLASH_KEY) {
+            Some(Value::Array(list)) => {
+                st.modified = true;
+                list.into_iter()
+                    .filter_map(|v| FlashMessage::deserialize(v).ok())
+                    .collect()
+            }
+            Some(_) => {
+                st.modified = true;
+                Vec::new()
+            }
+            None => Vec::new(),
+        };
+        let taken = st.flash_taken.get_or_insert_with(Vec::new);
+        taken.extend(fresh);
+        taken.clone()
+    }
+}
+
+/// Whether raw `Cookie` headers carry a cookie called `name`.
+fn has_cookie(headers: &[HeaderValue], name: &str) -> bool {
+    headers
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .any(|pair| pair.split('=').next().map(str::trim) == Some(name))
+}
+
+/// `json` with every non-ASCII character as a `\uXXXX` escape: browsers
+/// read header values as Latin-1, so raw UTF-8 would turn into mojibake.
+/// Non-ASCII only occurs inside JSON strings, where escapes are valid.
+fn ascii_json(json: &str) -> String {
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut buf = [0u16; 2];
+            for unit in c.encode_utf16(&mut buf) {
+                let _ = write!(out, "\\u{unit:04x}");
+            }
+        }
+    }
+    out
 }

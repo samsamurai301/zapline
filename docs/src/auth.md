@@ -48,7 +48,7 @@ zapline g auth
 |---|---|
 | `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
 | `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
-| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
 | `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
 It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.

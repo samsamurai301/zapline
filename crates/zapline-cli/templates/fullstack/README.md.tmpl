@@ -36,6 +36,15 @@ in debug builds.
 Release builds compile `templates/`, `static/` and `migrations/` into the
 binary (`zapline::embed!`): the executable is the whole app.
 
+## Forms and flash messages
+
+Form handlers take `ValidForm<T>`: a rejected post comes back as a 422 with
+the form re-rendered, a message next to each field (`{{ errors.title }}`) and
+the typed values kept (`{{ old.title }}`). After a successful post,
+`flash.success("Saved")` and `flash.redirect(..)` show a one-time message on
+the next page (`flash` in `templates/base.html`). Flash messages live in the
+session, so production needs `SESSION_SECRET` (see `.env.example`).
+
 ## Common tasks
 
 ```sh
@@ -72,5 +81,9 @@ Settings live in `/etc/@@name@@/env` on the server; logs in
 
 ```sh
 docker build -t @@name@@ .
-docker run --rm -p 8080:8080 -v @@name@@-data:/home/app/data @@name@@
+docker run --rm -p 8080:8080 -e SESSION_SECRET="$(openssl rand -base64 48)" \
+  -v @@name@@-data:/home/app/data @@name@@
 ```
+
+In production keep `SESSION_SECRET` the same across restarts: a new one
+ends every session.
