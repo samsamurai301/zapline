@@ -35,9 +35,11 @@ in debug builds.
 ## Common tasks
 
 ```sh
-zapline db new add_due_date          # new migration in migrations/
+zapline g resource author name                       # table, JSON API, pages, tests
+zapline g resource post title body:text due:date author:references
+zapline g migration add_due_date_to_todos 'due_date:date?'   # ALTER TABLE from the name
+zapline db new backfill_todos        # an empty migration in migrations/
 zapline db migrate                   # apply migrations without starting the server
-zapline generate resource project    # CRUD module + tests, registered for you
 zapline routes                       # the route table
 ```
 

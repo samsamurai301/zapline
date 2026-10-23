@@ -189,6 +189,60 @@ fn generated_resources_handlers_and_middleware_compile_and_pass() {
     }
 }
 
+/// The database-backed generator on SQLite: dates, references (foreign key,
+/// nested list, `<select>`), timestamps, PATCH, show/edit pages, plus a
+/// `generate migration` that adds a column. The generated tests must pass.
+#[test]
+#[ignore = "slow: compiles zapline with sqlite, views and chrono"]
+fn sql_resources_with_references_compile_and_pass() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = generate(tmp.path(), "scaffold-sql", "fullstack");
+    expect_success(&run_in(&project, &["g", "resource", "author", "name"]));
+    let log = expect_success(&run_in(
+        &project,
+        &[
+            "g",
+            "resource",
+            "post",
+            "title",
+            "body:text",
+            "published_on:date",
+            "author:references",
+        ],
+    ));
+    assert!(log.contains("Created templates/posts/edit.html"), "{log}");
+    assert!(!log.contains("no migration creates"), "{log}");
+    let log = expect_success(&run_in(
+        &project,
+        &[
+            "g",
+            "migration",
+            "add_rating_to_authors",
+            "rating:int",
+            "starts_at:datetime?",
+        ],
+    ));
+    assert!(log.contains("_add_rating_to_authors.sql"), "{log}");
+    let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains("\"chrono\""), "{manifest}");
+
+    expect_cargo_ok(&project, &["check", "--all-targets"]);
+    let tests = check_like_ci(&project);
+    for name in [
+        "crud_round_trip",
+        "patch_changes_only_the_given_fields",
+        "show_and_edit_pages",
+        "listed_under_their_author",
+    ] {
+        assert!(
+            tests.contains(&format!("test {name} ... ok")),
+            "{name} did not pass:\n{tests}"
+        );
+    }
+    assert!(tests.contains("tests/posts.rs"), "{tests}");
+    assert!(tests.contains("tests/authors.rs"), "{tests}");
+}
+
 /// `zapline routes` and `zapline openapi` against a real app built on zapline
 /// (not the dependency-free fake the fast tests use).
 #[test]

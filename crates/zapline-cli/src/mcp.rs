@@ -130,13 +130,21 @@ fn tool_list() -> Value {
         },
         {
             "name": "generate_resource",
-            "description": "Generate a CRUD resource: routes, tests and registration. In a project with migrations/ it is SQL-backed (migration, JSON API, htmx page if templates/base.html exists).",
+            "description": "Generate a CRUD resource: routes, tests and registration. In a project with migrations/ it is SQL-backed: migration with created_at/updated_at, JSON API with PATCH, and index/show/edit htmx pages if templates/base.html exists.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
                 "name": { "type": "string", "description": "Singular, e.g. product" },
-                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type with type string|text|int|float|bool, `?` suffix for optional, e.g. [\"name\", \"price:float\", \"notes:text?\"]" },
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type with type string|text|int|float|bool|date|datetime|uuid|references, `?` suffix for optional, e.g. [\"name\", \"price:float\", \"notes:text?\", \"author:references\"]. `author:references` adds author_id (foreign key to authors), a filter and GET /api/authors/{id}/<plural>." },
                 "plural": { "type": "string" },
                 "memory": { "type": "boolean", "description": "In-memory store even if the project has a database" },
                 "force": { "type": "boolean", "description": "Overwrite existing files" }
+            }}
+        },
+        {
+            "name": "generate_migration",
+            "description": "Write a SQL migration for the project's database. add_<cols>_to_<table> adds columns (ALTER TABLE ADD COLUMN), remove_<cols>_from_<table> drops them, create_<table> creates a table with id, the fields and timestamps. Without fields the column comes from the name.",
+            "inputSchema": { "type": "object", "required": ["name"], "properties": {
+                "name": { "type": "string", "description": "e.g. add_published_at_to_posts" },
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type as for generate_resource, e.g. [\"published_at:datetime?\"]" }
             }}
         },
         {
@@ -228,6 +236,19 @@ fn tool_list() -> Value {
     ])
 }
 
+/// The strings in the array argument `key` (empty when missing).
+fn string_list(args: &Value, key: &str) -> Vec<String> {
+    args.get(key)
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// `tools/call`: tool failures are results with `isError`, so the model sees them.
 fn call(params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
@@ -267,16 +288,7 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             ))
         }
         "generate_resource" => {
-            let fields: Vec<String> = args
-                .get("fields")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
+            let fields = string_list(args, "fields");
             let name = s("name").context("`name` is required")?;
             let report = generate::resource_with_fields(
                 here,
@@ -287,6 +299,11 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
                 flag("force"),
             )?;
             Ok(report_text(&report))
+        }
+        "generate_migration" => {
+            let name = s("name").context("`name` is required")?;
+            let fields = string_list(args, "fields");
+            Ok(report_text(&generate::migration(here, name, &fields)?))
         }
         "generate_handler" => {
             let method = match s("method") {
@@ -492,6 +509,9 @@ fn sections<'a>(page: &Page<'a>) -> Vec<Section<'a>> {
 /// Most text returned for one query.
 const DOCS_BUDGET: usize = 9_000;
 
+/// How long the "Also relevant" list after an answer may get, in bytes.
+const ALSO_BUDGET: usize = 160;
+
 fn page_list(pages: &[Page<'_>]) -> String {
     let names: Vec<String> = pages
         .iter()
@@ -583,7 +603,11 @@ pub fn docs(topic: Option<&str>) -> String {
                 out.push_str(&block);
             }
         } else if more.len() < 6 {
-            more.push(format!("{} › {}", s.title, s.heading));
+            let item = format!("{} › {}", s.title, s.heading);
+            let line: usize = more.iter().map(|m: &String| m.len() + 2).sum();
+            if line + item.len() <= ALSO_BUDGET {
+                more.push(item);
+            }
         }
     }
     if !more.is_empty() {

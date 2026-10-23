@@ -573,3 +573,34 @@ fn generate_job_registers_it_in_the_app() {
     let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
     assert!(log.contains("no migrations/ directory"), "{log}");
 }
+
+#[test]
+fn generate_migration_writes_sql_from_its_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "blog", "fullstack");
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "add_due_to_todos", "due:date?"],
+    ));
+    assert!(log.contains("Created migrations/"), "{log}");
+    assert!(log.contains("_add_due_to_todos.sql"), "{log}");
+    let file = fs::read_dir(root.join("migrations"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_add_due_to_todos.sql"))
+        .unwrap();
+    assert!(fs::read_to_string(file)
+        .unwrap()
+        .contains("ALTER TABLE todos ADD COLUMN due TEXT;"));
+    assert!(fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .contains("\"chrono\""));
+
+    let log = expect_failure(&run_in(
+        &root,
+        &["g", "migration", "add_due_to_todos", "due:date"],
+    ));
+    assert!(log.contains("`due:date?`"), "{log}");
+    let help = stdout(&run_in(&root, &["g", "migration", "--help"]));
+    assert!(help.contains("add_<cols>_to_<table>"), "{help}");
+}

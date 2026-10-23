@@ -15,7 +15,8 @@ zapline dev
 | Command | What it does |
 |---|---|
 | `zapline new <name> [-t minimal\|api\|full] [--path DIR] [--zapline-path PATH] [--no-git]` | Scaffold a project |
-| `zapline generate resource <name> [--plural WORD]` (alias `g`) | Model, CRUD handlers, in-memory store and tests, mounted automatically |
+| `zapline generate resource <name> [field:type ...] [--plural WORD]` (alias `g`) | Model, CRUD handlers and tests, mounted automatically. With a database: migration with timestamps and foreign keys, JSON API with `PATCH`, index/show/edit htmx pages |
+| `zapline generate migration <name> [field:type ...]` | `add_<col>_to_<table>`, `remove_<col>_from_<table>` or `create_<table>` SQL for SQLite or Postgres |
 | `zapline generate handler <name> [-m get] [-p /path]` | One route in `src/routes/<name>.rs` |
 | `zapline generate middleware <name>` | A middleware function in `src/middleware/<name>.rs` |
 | `zapline dev [--bin X] [--release] [-- <app args>]` | Rebuild and restart on file changes |

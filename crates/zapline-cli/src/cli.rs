@@ -246,21 +246,29 @@ the module is declared and mounted automatically; otherwise you get instructions
 The name can be singular or plural and in any case style: post, Posts, blog-post, BlogPosts.
 
 In a project with a migrations/ directory (the fullstack template), the resource is
-database-backed: a SQL migration, sqlx queries, a JSON API, an htmx page when
-templates/base.html exists, and tests. Field types: string, text, int, float, bool;
-append `?` for optional.
+database-backed: a SQL migration (with created_at/updated_at), sqlx queries, a JSON API
+(list, get, create, PUT, PATCH, delete), htmx pages when templates/base.html exists
+(index, show, edit) and tests. Field types: string, text, int, float, bool, date,
+datetime, uuid and references; append `?` for optional.
+
+`author:references` adds `author_id`, a foreign key to `authors(id)` with an index, a
+`?author_id=` filter, `GET /api/authors/{id}/posts`, and a <select> of authors in forms.
 
 Examples:
   zapline generate resource post
   zapline g resource post title body:text published:bool
   zapline g resource product name price:float stock:int notes:text?
+  zapline g resource event title starts_at:datetime day:date token:uuid
+  zapline g resource author name
+  zapline g resource post title body:text published_on:date author:references
   zapline g resource blog-post
   zapline g resource person --plural people")]
     Resource {
         /// Resource name, e.g. `post` or `blog-post`
         name: String,
         /// Columns for a database-backed resource: `title`, `body:text`, `views:int`,
-        /// `price:float`, `done:bool`; add `?` for optional (`bio:text?`)
+        /// `price:float`, `done:bool`, `due:date`, `at:datetime`, `key:uuid`,
+        /// `author:references`; add `?` for optional (`bio:text?`)
         #[arg(value_name = "FIELD:TYPE")]
         fields: Vec<String>,
         /// Plural form, for irregular nouns the built-in rules get wrong
@@ -269,6 +277,32 @@ Examples:
         /// Use an in-memory store even in a project with a database
         #[arg(long)]
         memory: bool,
+    },
+
+    /// A SQL migration: add or remove columns, or create a table
+    #[command(after_long_help = "\
+Writes migrations/<timestamp>_<name>.sql for the project's database (SQLite or Postgres).
+The name decides what it does:
+  add_<cols>_to_<table>        ALTER TABLE <table> ADD COLUMN for each field
+  remove_<cols>_from_<table>   ALTER TABLE <table> DROP COLUMN for each field
+  create_<table>               CREATE TABLE with id, the fields, created_at and updated_at
+Without fields, the column comes from the name (`add_email_to_users` adds `email` text).
+Any other name with fields creates that table; without fields you get an empty file.
+Field types are the ones `generate resource` takes. A required column added to an existing
+table gets a default ('' or 0); dates, uuids and references must be optional (`?`) there.
+
+Examples:
+  zapline g migration add_published_at_to_posts published_at:datetime?
+  zapline g migration add_email_to_users
+  zapline g migration add_category_to_posts category:references?
+  zapline g migration remove_legacy_flag_from_posts
+  zapline g migration create_tags name slug")]
+    Migration {
+        /// Migration name, e.g. `add_email_to_users`
+        name: String,
+        /// Columns: `name:type`, as for `generate resource`
+        #[arg(value_name = "FIELD:TYPE")]
+        fields: Vec<String>,
     },
 
     /// A single route handler in src/routes/<name>.rs

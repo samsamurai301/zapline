@@ -625,3 +625,321 @@ fn generated_files_are_formatted_for_long_names_too() {
         assert_rustfmt_clean(rel, &read(&root, rel));
     }
 }
+
+// ---- database-backed resources and migrations ------------------------------------
+
+/// The one migration whose name ends with `suffix`.
+fn migration_text(root: &Path, suffix: &str) -> String {
+    let dir = root.join("migrations");
+    let name = fs::read_dir(&dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .find(|n| n.ends_with(suffix))
+        .unwrap_or_else(|| panic!("no migration ending in {suffix}"));
+    fs::read_to_string(dir.join(name)).unwrap()
+}
+
+#[test]
+fn sql_resource_writes_pages_timestamps_and_enables_chrono() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    let report = resource_with_fields(
+        &root,
+        "event",
+        None,
+        &["title".into(), "day:date".into(), "token:uuid".into()],
+        false,
+        false,
+    )
+    .unwrap();
+    let created = names(&report.created);
+    assert!(
+        created.iter().any(|p| p.ends_with("_create_events.sql")),
+        "{created:?}"
+    );
+    for rel in [
+        "src/routes/events.rs",
+        "templates/events/index.html",
+        "templates/events/_row.html",
+        "templates/events/show.html",
+        "templates/events/edit.html",
+        "tests/events.rs",
+    ] {
+        assert!(created.contains(&rel.to_string()), "{rel} in {created:?}");
+    }
+    assert!(names(&report.modified).contains(&"Cargo.toml".to_string()));
+    let manifest = read(&root, "Cargo.toml");
+    assert!(
+        manifest.contains("\"chrono\"") && manifest.contains("\"uuid\""),
+        "{manifest}"
+    );
+    let sql = migration_text(&root, "_create_events.sql");
+    assert!(sql.contains("day TEXT NOT NULL"), "{sql}");
+    assert!(sql.contains("token BLOB NOT NULL"), "{sql}");
+    assert!(
+        sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+        "{sql}"
+    );
+
+    // Generating another resource leaves the features alone.
+    let report = resource_with_fields(&root, "tag", None, &["name".into()], false, false).unwrap();
+    assert!(!names(&report.modified).contains(&"Cargo.toml".to_string()));
+}
+
+#[test]
+fn references_use_the_parent_label_and_note_a_missing_parent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+
+    // No `authors` table yet.
+    let report = resource_with_fields(
+        &root,
+        "post",
+        None,
+        &["title".into(), "author:references".into()],
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("no migration creates the `authors` table")),
+        "{:?}",
+        report.notes
+    );
+    let module = read(&root, "src/routes/posts.rs");
+    assert!(
+        module.contains("CAST(id AS TEXT) AS label FROM authors"),
+        "{module}"
+    );
+
+    // With the parent generated first, forms show its name and rows link to it.
+    resource_with_fields(&root, "author", None, &["name".into()], false, false).unwrap();
+    let report = resource_with_fields(
+        &root,
+        "post",
+        None,
+        &["title".into(), "author:references".into()],
+        false,
+        true,
+    )
+    .unwrap();
+    assert!(!report
+        .notes
+        .iter()
+        .any(|n| n.contains("no migration creates")));
+    let module = read(&root, "src/routes/posts.rs");
+    assert!(module.contains("CAST(name AS TEXT) AS label FROM authors ORDER BY name"));
+    assert!(module.contains("#[get(\"/api/authors/{id}/posts\", tag = \"posts\")]"));
+    assert!(read(&root, "templates/posts/_row.html")
+        .contains("<a href=\"/authors/{{ item.author_id }}\">"));
+    // --force rewrote the same migration rather than adding a second one.
+    let count = fs::read_dir(root.join("migrations"))
+        .unwrap()
+        .filter(|e| {
+            e.as_ref()
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .ends_with("_create_posts.sql")
+        })
+        .count();
+    assert_eq!(count, 1);
+
+    let err = resource_with_fields(
+        &root,
+        "author",
+        None,
+        &["author:references".into()],
+        false,
+        true,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("refer to itself"), "{err}");
+}
+
+#[test]
+fn migration_adds_columns_to_an_existing_table() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    resource_with_fields(&root, "post", None, &["title".into()], false, false).unwrap();
+    resource_with_fields(&root, "category", None, &["name".into()], false, false).unwrap();
+
+    let report = migration(
+        &root,
+        "add_published_at_to_posts",
+        &[
+            "published_at:datetime?".into(),
+            "views:int".into(),
+            "category:references?".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(report.created.len(), 1);
+    assert!(display(&report.created[0]).ends_with("_add_published_at_to_posts.sql"));
+    let sql = migration_text(&root, "_add_published_at_to_posts.sql");
+    assert_eq!(
+        sql,
+        "-- Created by `zapline generate migration add_published_at_to_posts`.\n\
+         ALTER TABLE posts ADD COLUMN published_at TEXT;\n\
+         ALTER TABLE posts ADD COLUMN views BIGINT NOT NULL DEFAULT 0;\n\
+         ALTER TABLE posts ADD COLUMN category_id BIGINT REFERENCES categories(id) ON DELETE SET NULL;\n\
+         CREATE INDEX posts_category_id_idx ON posts (category_id);\n"
+    );
+    // The model doesn't change by itself: the note says what to add.
+    let note = report
+        .notes
+        .iter()
+        .find(|n| n.contains("src/routes/posts.rs"))
+        .expect("a note about the model");
+    assert!(
+        note.contains("pub published_at: Option<DateTime<Utc>>,"),
+        "{note}"
+    );
+    assert!(note.contains("pub category_id: Option<i64>,"), "{note}");
+
+    // The column can come from the name alone.
+    migration(&root, "add_subtitle_to_posts", &[]).unwrap();
+    assert!(migration_text(&root, "_add_subtitle_to_posts.sql")
+        .contains("ALTER TABLE posts ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';"));
+
+    // A required date has no value for existing rows.
+    let err = migration(&root, "add_due_to_posts", &["due:date".into()])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("`due:date?`"), "{err}");
+
+    // An unknown table gets a note.
+    let report = migration(&root, "add_x_to_nopes", &[]).unwrap();
+    assert!(report
+        .notes
+        .iter()
+        .any(|n| n.contains("no migration creates the `nopes` table")));
+}
+
+#[test]
+fn migration_creates_and_drops() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    let report = migration(
+        &root,
+        "CreateTags",
+        &["name".into(), "color:string?".into()],
+    )
+    .unwrap();
+    let sql = migration_text(&root, "_create_tags.sql");
+    assert!(
+        sql.starts_with(
+            "-- Created by `zapline generate migration create_tags`.\nCREATE TABLE tags (\n    \
+             id INTEGER PRIMARY KEY AUTOINCREMENT,\n    name TEXT NOT NULL,\n    color TEXT,\n"
+        ),
+        "{sql}"
+    );
+    assert!(sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"));
+    assert!(report.modified.is_empty());
+
+    migration(&root, "remove_color_from_tags", &[]).unwrap();
+    assert!(migration_text(&root, "_remove_color_from_tags.sql")
+        .ends_with("ALTER TABLE tags DROP COLUMN color;\n"));
+
+    // Any other name: a table if there are fields, an empty file if not.
+    migration(&root, "audit_log", &["event".into(), "at:datetime".into()]).unwrap();
+    assert!(migration_text(&root, "_audit_log.sql").contains("CREATE TABLE audit_log ("));
+    assert!(read(&root, "Cargo.toml").contains("\"chrono\""));
+    migration(&root, "backfill_slugs", &[]).unwrap();
+    assert!(migration_text(&root, "_backfill_slugs.sql").ends_with("-- Write your SQL here.\n"));
+}
+
+#[test]
+fn migration_follows_the_project_dialect() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    let manifest = read(&root, "Cargo.toml").replace("\"sqlite\"", "\"postgres\"");
+    fs::write(root.join("Cargo.toml"), manifest).unwrap();
+    migration(
+        &root,
+        "create_events",
+        &["day:date".into(), "at:datetime".into(), "token:uuid".into()],
+    )
+    .unwrap();
+    let sql = migration_text(&root, "_create_events.sql");
+    for col in [
+        "id BIGSERIAL PRIMARY KEY",
+        "day DATE NOT NULL",
+        "at TIMESTAMPTZ NOT NULL",
+        "token UUID NOT NULL",
+        "created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP",
+    ] {
+        assert!(sql.contains(col), "{col} in {sql}");
+    }
+    let manifest = read(&root, "Cargo.toml");
+    assert!(
+        manifest.contains("\"uuid\"") && manifest.contains("\"chrono\""),
+        "{manifest}"
+    );
+
+    let api = scaffold(&tmp.path().join("api"), Template::Api);
+    let err = migration(&api, "create_x", &[]).unwrap_err().to_string();
+    assert!(err.contains("no migrations/ directory"), "{err}");
+}
+
+#[test]
+fn zapline_features_are_added_once_in_every_manifest_style() {
+    let patch = |m: &str| add_zapline_features(m, &["chrono", "uuid"]);
+    assert_eq!(
+        patch("[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\"] }\n")
+            .unwrap(),
+        "[dependencies]\nzapline = { version = \"0.1\", features = [\"chrono\", \"uuid\", \"sqlite\"] }\n"
+    );
+    assert_eq!(
+        patch("zapline = { path = \"../z\" }\n").unwrap(),
+        "zapline = { path = \"../z\", features = [\"chrono\", \"uuid\"] }\n"
+    );
+    assert_eq!(
+        patch("zapline = \"0.1\"\n").unwrap(),
+        "zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n"
+    );
+    assert_eq!(
+        patch("zapline = { version = \"0.1\", features = [] }\n").unwrap(),
+        "zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n"
+    );
+    assert_eq!(
+        patch("zapline = { version = \"0.1\", features = [\"uuid\", \"chrono\"] }\n"),
+        None
+    );
+    assert_eq!(patch("[dependencies]\nserde = \"1\"\n"), None);
+}
+
+#[test]
+fn generated_sql_resources_are_rustfmt_clean() {
+    if !rustfmt_available() {
+        eprintln!("rustfmt not installed; skipping");
+        return;
+    }
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    resource_with_fields(&root, "author", None, &["name".into()], false, false).unwrap();
+    resource_with_fields(
+        &root,
+        "post",
+        None,
+        &[
+            "title".into(),
+            "body:text".into(),
+            "published_on:date".into(),
+            "starts_at:datetime?".into(),
+            "token:uuid?".into(),
+            "author:references".into(),
+        ],
+        false,
+        false,
+    )
+    .unwrap();
+    for rel in ["src/routes/posts.rs", "tests/posts.rs"] {
+        assert_rustfmt_clean(rel, &read(&root, rel));
+    }
+}

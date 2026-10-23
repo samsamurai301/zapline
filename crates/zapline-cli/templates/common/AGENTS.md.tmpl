@@ -15,6 +15,8 @@ zapline dev                         # run with live reload on :8080
 zapline routes --json               # machine-readable route table
 zapline openapi -o openapi.json     # the API contract, generated from code
 zapline generate resource <name>    # new CRUD module + tests, auto-registered
+                                    # with a database: `post title due:date author:references`
+zapline generate migration add_x_to_posts x:int   # ALTER TABLE / CREATE TABLE from the name
 zapline generate handler <name> --method get
 zapline generate auth               # accounts + password reset (needs a database)
 zapline generate job <name>         # durable background job (needs a database)

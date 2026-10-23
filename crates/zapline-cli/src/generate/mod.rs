@@ -262,6 +262,85 @@ fn apply(
     Ok(new_module_file)
 }
 
+/// The SQL dialect of a project: Postgres when its manifest enables only
+/// zapline's `postgres` feature, otherwise SQLite.
+pub fn dialect_of(manifest: &str) -> db_resource::Dialect {
+    if manifest.contains("\"postgres\"") && !manifest.contains("\"sqlite\"") {
+        db_resource::Dialect::Postgres
+    } else {
+        db_resource::Dialect::Sqlite
+    }
+}
+
+/// `manifest` with `features` added to the `zapline = { .. }` dependency
+/// line, or `None` when nothing changed (they are all there already, or
+/// there is no such line to edit).
+pub fn add_zapline_features(manifest: &str, features: &[&str]) -> Option<String> {
+    let line = manifest.lines().find(|l| {
+        l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline=")
+    })?;
+    let missing: Vec<String> = features
+        .iter()
+        .filter(|f| !line.contains(&format!("\"{f}\"")))
+        .map(|f| format!("\"{f}\""))
+        .collect();
+    if missing.is_empty() {
+        return None;
+    }
+    let mut new_line = line.to_string();
+    let added = missing.join(", ");
+    if let Some(pos) = new_line.find("features = [") {
+        let at = pos + "features = [".len();
+        let sep = if new_line[at..].trim_start().starts_with(']') {
+            ""
+        } else {
+            ", "
+        };
+        new_line.insert_str(at, &format!("{added}{sep}"));
+    } else if let Some(pos) = new_line.rfind('}') {
+        let before = new_line[..pos].trim_end().len();
+        new_line.replace_range(before..pos, &format!(", features = [{added}] "));
+    } else {
+        // `zapline = "0.1"`.
+        let (key, version) = new_line.split_once('=')?;
+        new_line = format!(
+            "{}= {{ version = {}, features = [{added}] }}",
+            key,
+            version.trim()
+        );
+    }
+    Some(manifest.replacen(line, &new_line, 1))
+}
+
+/// Turns on the zapline features generated code needs in the project's
+/// manifest, or leaves a note saying how.
+fn enable_zapline_features(
+    project: &Project,
+    features: &[&str],
+    report: &mut Report,
+) -> Result<()> {
+    let path = project.root.join("Cargo.toml");
+    let manifest =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    if let Some(patched) = add_zapline_features(&manifest, features) {
+        fs::write(&path, patched).with_context(|| format!("cannot write {}", path.display()))?;
+        report.modified.push(PathBuf::from("Cargo.toml"));
+    } else if features
+        .iter()
+        .any(|f| !manifest.contains(&format!("\"{f}\"")))
+    {
+        report.notes.push(format!(
+            "the generated code needs zapline's {} feature(s); enable them in Cargo.toml",
+            features
+                .iter()
+                .map(|f| format!("`{f}`"))
+                .collect::<Vec<_>>()
+                .join(" and ")
+        ));
+    }
+    Ok(())
+}
+
 // ---- resource ---------------------------------------------------------------------
 
 /// Renders the resource module (and its test, when `with_test`).
@@ -330,14 +409,25 @@ fn sql_resource(
     force: bool,
 ) -> Result<Report> {
     let names = ResourceNames::parse(name, plural)?;
-    let fields = db_resource::parse_fields(fields)?;
+    let mut fields = db_resource::parse_fields(fields)?;
     let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
-    let dialect = if manifest.contains("\"postgres\"") && !manifest.contains("\"sqlite\"") {
-        db_resource::Dialect::Postgres
-    } else {
-        db_resource::Dialect::Sqlite
-    };
+    let dialect = dialect_of(&manifest);
     let html = project.root.join("templates/base.html").is_file();
+    let mut report = Report::default();
+    for field in &mut fields {
+        let Some(parent) = field.parent.as_mut() else {
+            continue;
+        };
+        if parent.names.plural == names.plural {
+            bail!(
+                "`{}` would make {} refer to itself, which the generator does not support; \
+                 add the column with `zapline g migration` and write the query yourself",
+                field.name,
+                names.plural
+            );
+        }
+        resolve_parent(project, parent, &mut report);
+    }
     let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
     let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");
     let krate = crate_name_of(project);
@@ -358,11 +448,11 @@ fn sql_resource(
     };
     let files = db_resource::files(&plan);
 
-    let mut report = Report::default();
     let edit = plan_route_registration(project, &names.plural)?;
     if apply(project, files, edit, force, &mut report)? {
         report.notes.push(new_routes_module_note(project));
     }
+    enable_zapline_features(project, &needed_features(&fields, true), &mut report)?;
     if !testable {
         report.notes.push(
             "no test was generated: tests build the app with `app(Database::sqlite_memory())`, \
@@ -384,6 +474,276 @@ fn sql_resource(
     if let Some(note) = missing_dependency_note(project) {
         report.notes.push(note);
     }
+    Ok(report)
+}
+
+/// The zapline features code for `fields` needs: `chrono` for dates and
+/// times (and for the `created_at`/`updated_at` of generated models), `uuid`.
+fn needed_features(fields: &[db_resource::Field], timestamps: bool) -> Vec<&'static str> {
+    use db_resource::FieldType;
+    let mut out = Vec::new();
+    if timestamps
+        || fields
+            .iter()
+            .any(|f| matches!(f.ty, FieldType::Date | FieldType::DateTime))
+    {
+        out.push("chrono");
+    }
+    if fields.iter().any(|f| f.ty == FieldType::Uuid) {
+        out.push("uuid");
+    }
+    out
+}
+
+/// The `(file name, SQL)` of every migration, in order.
+fn migrations(project: &Project) -> Vec<(String, String)> {
+    let dir = project.root.join(crate::db::MIGRATIONS_DIR);
+    let mut out: Vec<(String, String)> = fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "sql"))
+        .filter_map(|e| {
+            let sql = fs::read_to_string(e.path()).ok()?;
+            Some((e.file_name().to_string_lossy().into_owned(), sql))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The migration that creates `table`, if any.
+fn creating_migration(project: &Project, table: &str) -> Option<(String, String)> {
+    let needle = format!("CREATE TABLE {}", table.to_ascii_uppercase());
+    migrations(project).into_iter().find(|(_, sql)| {
+        let upper = sql.to_ascii_uppercase();
+        [" (", "(", "\n"]
+            .iter()
+            .any(|end| upper.contains(&format!("{needle}{end}")))
+            || upper.contains(&format!(
+                "CREATE TABLE IF NOT EXISTS {} ",
+                table.to_ascii_uppercase()
+            ))
+    })
+}
+
+/// Fills in what the project knows about a `references` field's table: the
+/// column to show in `<select>`s and whether it has pages to link to.
+fn resolve_parent(project: &Project, parent: &mut db_resource::Parent, report: &mut Report) {
+    let table = &parent.names.plural;
+    match creating_migration(project, table) {
+        Some((_, sql)) => parent.label = db_resource::label_column(&sql, table),
+        None => report.notes.push(format!(
+            "no migration creates the `{table}` table this resource refers to; generate it first, e.g.\n\
+             \x20 zapline g resource {} name\n\
+             then regenerate this resource with --force so its migration runs after the new one \
+             (Postgres refuses a foreign key to a table that doesn't exist yet)",
+            parent.names.singular
+        )),
+    }
+    let module = project
+        .root
+        .join(format!("src/routes/{}.rs", parent.names.plural));
+    parent.page = fs::read_to_string(module)
+        .map(|src| {
+            src.contains(&format!(
+                "#[get(\"{}/{{id}}\", tag = \"pages\")]",
+                parent.names.path
+            ))
+        })
+        .unwrap_or(false);
+}
+
+/// What `zapline generate migration` writes for a name.
+#[derive(Debug, PartialEq, Eq)]
+enum MigrationKind {
+    /// `add_<columns>_to_<table>`.
+    AddColumns { table: String, columns: String },
+    /// `remove_<columns>_from_<table>`.
+    RemoveColumns { table: String, columns: String },
+    /// `create_<table>`, or any other name with fields.
+    CreateTable { table: String },
+    /// Anything else: an empty migration to fill in.
+    Blank,
+}
+
+fn migration_kind(slug: &str, has_fields: bool) -> MigrationKind {
+    let split = |rest: &str, sep: &str| -> Option<(String, String)> {
+        let (cols, table) = rest.rsplit_once(sep)?;
+        (!cols.is_empty() && !table.is_empty()).then(|| (cols.to_string(), table.to_string()))
+    };
+    if let Some((columns, table)) = slug.strip_prefix("add_").and_then(|r| split(r, "_to_")) {
+        return MigrationKind::AddColumns { table, columns };
+    }
+    if let Some((columns, table)) = slug
+        .strip_prefix("remove_")
+        .and_then(|r| split(r, "_from_"))
+    {
+        return MigrationKind::RemoveColumns { table, columns };
+    }
+    if let Some(table) = slug.strip_prefix("create_").filter(|t| !t.is_empty()) {
+        return MigrationKind::CreateTable {
+            table: table.to_string(),
+        };
+    }
+    if has_fields {
+        MigrationKind::CreateTable {
+            table: slug.to_string(),
+        }
+    } else {
+        MigrationKind::Blank
+    }
+}
+
+/// The SQL of a migration; `fields` are already parsed.
+fn migration_sql(
+    kind: &MigrationKind,
+    fields: &[db_resource::Field],
+    dialect: db_resource::Dialect,
+) -> Result<String> {
+    use db_resource::FieldType;
+    Ok(match kind {
+        MigrationKind::AddColumns { table, .. } => {
+            let mut sql = String::new();
+            for f in fields {
+                let default = match (f.optional, f.ty) {
+                    (true, _) | (false, FieldType::Bool) => "",
+                    // Existing rows need a value for a required column.
+                    (false, FieldType::String | FieldType::Text) => " DEFAULT ''",
+                    (false, FieldType::Int | FieldType::Float) => " DEFAULT 0",
+                    (false, _) => bail!(
+                        "`{}` can't be added as a required column: rows that already exist have no value for it\n\
+                         hint: add it as optional (`{}:{}?`), fill it in, then make it required in a later migration",
+                        f.name,
+                        f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
+                        type_name(f.ty)
+                    ),
+                };
+                sql.push_str(&format!(
+                    "ALTER TABLE {table} ADD COLUMN {}{default};\n",
+                    f.column_sql(dialect)
+                ));
+                if f.parent.is_some() {
+                    sql.push_str(&db_resource::index_sql(table, &f.name));
+                }
+            }
+            sql
+        }
+        MigrationKind::RemoveColumns { table, .. } => fields
+            .iter()
+            .map(|f| format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name))
+            .collect(),
+        MigrationKind::CreateTable { table } => {
+            db_resource::create_table_sql(table, fields, dialect)
+        }
+        MigrationKind::Blank => String::from("-- Write your SQL here.\n"),
+    })
+}
+
+fn type_name(ty: db_resource::FieldType) -> &'static str {
+    use db_resource::FieldType;
+    match ty {
+        FieldType::String => "string",
+        FieldType::Text => "text",
+        FieldType::Int => "int",
+        FieldType::Float => "float",
+        FieldType::Bool => "bool",
+        FieldType::Date => "date",
+        FieldType::DateTime => "datetime",
+        FieldType::Uuid => "uuid",
+        FieldType::References => "references",
+    }
+}
+
+/// `zapline generate migration <name> [field:type ...]`: `add_<col>_to_<table>`
+/// adds columns, `remove_<col>_from_<table>` drops them, `create_<table>`
+/// (or any other name with fields) creates a table like `generate resource`
+/// does; anything else is an empty migration.
+pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
+    let project = Project::discover(dir)?;
+    if !project.root.join(crate::db::MIGRATIONS_DIR).is_dir() {
+        bail!(
+            "this project has no migrations/ directory\n\
+             hint: create one with `zapline db new init` (and enable zapline's `sqlite` or `postgres` feature), \
+             or start from `zapline new <name> --template fullstack`"
+        );
+    }
+    let slug = snake_case(name);
+    let mut parsed = db_resource::parse_field_list(fields)?;
+    let kind = migration_kind(&slug, !parsed.is_empty());
+    // `add_email_to_users` alone adds a text column `email`.
+    if let MigrationKind::AddColumns { columns, .. }
+    | MigrationKind::RemoveColumns { columns, .. } = &kind
+    {
+        if parsed.is_empty() {
+            parsed = vec![db_resource::Field::parse(columns)?];
+        }
+    }
+    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
+    let dialect = dialect_of(&manifest);
+    let mut report = Report::default();
+    for field in &mut parsed {
+        if let Some(parent) = field.parent.as_mut() {
+            resolve_parent(&project, parent, &mut report);
+        }
+    }
+    let sql = migration_sql(&kind, &parsed, dialect)?;
+
+    match &kind {
+        MigrationKind::AddColumns { table, .. } | MigrationKind::RemoveColumns { table, .. } => {
+            if creating_migration(&project, table).is_none() {
+                report.notes.push(format!(
+                    "no migration creates the `{table}` table; check the name (tables are plural, like `posts`)"
+                ));
+            }
+            let module = PathBuf::from(format!("src/routes/{table}.rs"));
+            if project.root.join(&module).is_file() {
+                let what = match kind {
+                    MigrationKind::AddColumns { .. } => {
+                        let lines: Vec<String> = parsed
+                            .iter()
+                            .map(|f| format!("\x20 pub {}: {},", f.name, f.rust_type()))
+                            .collect();
+                        format!(
+                            "{} does not know about the new column(s) yet; add them to its model (and its New/Update structs):\n{}\n\
+                             and to the column lists of its queries and its `listing()`",
+                            display(&module),
+                            lines.join("\n")
+                        )
+                    }
+                    _ => format!(
+                        "{} still reads the removed column(s); take them out of its structs and queries",
+                        display(&module)
+                    ),
+                };
+                report.notes.push(what);
+            }
+        }
+        MigrationKind::CreateTable { .. } | MigrationKind::Blank => {}
+    }
+    if !matches!(kind, MigrationKind::RemoveColumns { .. }) {
+        // What Rust code reading these columns will need.
+        let features = needed_features(&parsed, false);
+        if !features.is_empty() {
+            enable_zapline_features(&project, &features, &mut report)?;
+        }
+    }
+
+    let file = crate::db::new_migration_name(&project.root, &slug)?;
+    let rel = PathBuf::from(crate::db::MIGRATIONS_DIR).join(&file);
+    let contents = format!("-- Created by `zapline generate migration {slug}`.\n{sql}");
+    write_files(
+        &project.root,
+        &[OutputFile {
+            path: rel.clone(),
+            contents,
+        }],
+        false,
+    )?;
+    report.created.push(rel);
+    report
+        .notes
+        .push("the migration runs when the app starts (or run `zapline db migrate`)".to_string());
     Ok(report)
 }
 

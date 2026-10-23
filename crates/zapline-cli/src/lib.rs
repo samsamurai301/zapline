@@ -138,6 +138,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                     memory,
                     g.force,
                 )?,
+                GenerateKind::Migration { name, fields } => {
+                    generate::migration(here, &name, &fields)?
+                }
                 GenerateKind::Handler { name, method, path } => {
                     generate::handler(here, &name, method, path.as_deref(), g.force)?
                 }
