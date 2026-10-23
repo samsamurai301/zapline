@@ -60,7 +60,7 @@ Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature
 | Module | Feature | Contents |
 |---|---|---|
 | `app`, `router`, `request`, `response`, `extract`, `handler`, `body`, `error`, `lifecycle`, `test` | core | The framework core |
-| `server`, `tls` | core, `tls`, `http2` | Thread-per-core server, graceful shutdown, TLS, HTTP/2 |
+| `server`, `tls`, `http3` | core, `tls`, `http2`, `http3` | Thread-per-core server, graceful shutdown, TLS, HTTP/2 (with RFC 8441 WebSockets), experimental HTTP/3 over QUIC (`server/h3.rs`) |
 | `middleware/*` | core, `compression` | Logger, CORS, Timeout, DefaultHeaders, compression, rate limiting, request IDs, security headers, catch-panic, concurrency limit, path normalization |
 | `openapi/*`, `validate`, `__private` | `openapi`, `validate`, `macros` | OpenAPI 3.1 generation, docs UIs, the `/_zapline/api.js` client, `Valid<T>` |
 | `ws`, `sse`, `fs`, `multipart` | `ws`, —, `fs`, `multipart` | Realtime and content |

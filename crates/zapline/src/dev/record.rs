@@ -361,15 +361,17 @@ async fn capture_body(req: &mut Request) -> crate::Result<Option<Bytes>> {
             req.body = Some(ReqBody::Full(b));
             Ok(fits.then_some(copy))
         }
-        Some(ReqBody::Incoming(inc)) => {
-            let fits = http_body::Body::size_hint(&inc)
+        // A streamed body (HTTP/1.1, HTTP/2 or HTTP/3).
+        Some(body) => {
+            let fits = body
+                .size_hint()
                 .upper()
                 .is_some_and(|n| n <= BODY_CAP as u64);
             if !fits {
-                req.body = Some(ReqBody::Incoming(inc));
+                req.body = Some(body);
                 return Ok(None);
             }
-            let b = ReqBody::Incoming(inc).collect_limited(BODY_CAP).await?;
+            let b = body.collect_limited(BODY_CAP).await?;
             req.body = Some(ReqBody::Full(b.clone()));
             Ok(Some(b))
         }

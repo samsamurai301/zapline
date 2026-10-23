@@ -32,4 +32,4 @@ Run `./scripts/check.sh` to verify everything locally.
 2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. Prepare a TechEmpower Framework Benchmarks submission (needs the database tests: single query, multiple queries, fortunes, updates).
 3. **Distributed stores:** pluggable rate-limit and session stores (Redis).
 4. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
-5. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.
+5. **Protocols:** done: WebSockets over HTTP/2 (RFC 8441) and experimental HTTP/3 (`http3` feature, quinn + h3, `Alt-Svc`). Next: WebSockets over HTTP/3 (RFC 9220), WebTransport, 0-RTT, and taking HTTP/3 out of experimental once `h3` reaches a stable release.

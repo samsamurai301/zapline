@@ -26,6 +26,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `tracing` | yes | `zapline::telemetry`: `Telemetry`, `init()` and `Trace` ([Observability](observability.md)). With it, framework logs (failed requests, panics, jobs) go through `tracing`; without it they go to stderr. | | `tracing`, `tracing-subscriber` (`env-filter`, `fmt`, `json`) |
 | `http2` | `full` | HTTP/2 support on the server ([Server](server.md)) | | `hyper/http2`, `hyper-util` (`http2`, `server-auto`) |
 | `tls` | `full` | `zapline::tls`: TLS with rustls ([Server](server.md)) | | `tokio-rustls` (`ring`, `tls12`) |
+| `http3` | | **Experimental.** `zapline::http3`: HTTP/3 over QUIC next to HTTPS, advertised with `Alt-Svc` ([Server](server.md#http3-experimental)) | `tls` | `quinn` (`rustls-ring`), `h3`, `h3-quinn` |
 | `ws` | `full` | `zapline::ws`: WebSockets ([WebSockets](websockets.md)) | | `tokio-tungstenite` (`handshake`) |
 | `fs` | `full` | `zapline::fs`: `ServeDir`, `ServeFile` and `App::static_files` ([Static files](files.md)) | | `mime_guess`, `tokio-util` (`io`) |
 | `multipart` | `full` | `zapline::multipart`: the `Multipart` extractor ([Uploads](files.md#uploads-with-multipart)) | | `multer` |

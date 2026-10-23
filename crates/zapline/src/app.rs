@@ -345,7 +345,7 @@ impl App {
         let mut app = self;
         let options = crate::server::take_options(&mut app);
         crate::server::check_config(&app.config)?;
-        crate::server::serve(app.prepare(), listener, options.shutdown).await
+        crate::server::serve(app.prepare(), listener, options).await
     }
 
     /// An in-process client for tests; no sockets involved. Startup hooks run

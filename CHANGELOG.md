@@ -87,6 +87,8 @@ The first public release.
 - Thread-per-core runtimes with `SO_REUSEPORT`, or a work-stealing runtime.
 - Graceful shutdown on SIGINT/SIGTERM with a drain timeout. Custom shutdown triggers.
 - HTTP/2 (h2c and ALPN), TLS via rustls, Unix domain sockets, connection limits and header limits.
+- Experimental HTTP/3 over QUIC (feature `http3`, not in `full`): `App::tls(..).http3(Http3Config::new())` serves the same router on a UDP port next to HTTPS (quinn + h3), with streamed request and response bodies, trailers, `GOAWAY` on graceful shutdown, and `max_connections`, `max_header_size`, `header_read_timeout` and the TLS handshake timeout applied. HTTP/1.1 and HTTP/2 responses advertise it with `Alt-Svc` (a middleware installed only when HTTP/3 is configured). Works with `App::run` and `App::serve`; `App::run_unix` with HTTP/3 is refused.
+- WebSockets over HTTP/2 (RFC 8441): the HTTP/2 server advertises extended `CONNECT`, and the same `WebSocketUpgrade` handler serves `:protocol = websocket` streams (answered with `200`). They take part in the upgrade accounting (`max_connections` / `max_upgraded`, `1001` close frames on shutdown).
 - Upgraded WebSockets count against `max_connections`, or a separate `ServerConfig::max_upgraded` (excess upgrades get a 503 `ws_too_many_connections` with `Retry-After: 1`). Graceful shutdown waits for open sockets: each sends a 1001 close frame on its next read or write, upgrades during shutdown get a 503 `ws_shutting_down`, and callbacks still running at `shutdown_timeout` are dropped. The hyper 1.12 `pipeline_flush` bug that drops 400/431 responses for malformed heads is documented with an upstream issue draft (`docs/src/upstream-issues.md`) and a canary test.
 
 ### API documentation and validation

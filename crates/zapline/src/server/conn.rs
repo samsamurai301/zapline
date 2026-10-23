@@ -249,6 +249,9 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for H2Service
         use std::sync::atomic::Ordering::Relaxed;
         self.1.requests.fetch_add(1, Relaxed);
         self.1.in_flight.fetch_add(1, Relaxed);
+        // WebSockets over HTTP/2 (RFC 8441) arrive as extended CONNECT.
+        #[cfg(feature = "ws")]
+        let req = crate::ws::from_extended_connect(req);
         Tracked(
             self.0.app.handle(req.map(ReqBody::Incoming), self.0.conn),
             self.1.clone(),
@@ -439,6 +442,10 @@ impl Proto {
             if let Some(n) = config.http2_max_concurrent_streams {
                 h2.max_concurrent_streams(n);
             }
+            // SETTINGS_ENABLE_CONNECT_PROTOCOL: lets clients open
+            // WebSockets over HTTP/2 (RFC 8441).
+            #[cfg(feature = "ws")]
+            h2.enable_connect_protocol();
             h2
         });
 
