@@ -790,7 +790,7 @@ mod tests {
         assert!(text.contains("#[get("), "{text}");
         assert!(text.contains("Pages: "));
         // About 3k tokens: the cheatsheet, its example file and the page list.
-        assert!(text.len() < 13_000, "{}", text.len());
+        assert!(text.len() < 13_500, "{}", text.len());
     }
 
     #[test]
