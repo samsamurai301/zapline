@@ -18,7 +18,7 @@ zapline dev
 | `zapline generate resource <name> [--plural WORD]` (alias `g`) | Model, CRUD handlers, in-memory store and tests, mounted automatically |
 | `zapline generate handler <name> [-m get] [-p /path]` | One route in `src/routes/<name>.rs` |
 | `zapline generate middleware <name>` | A middleware function in `src/middleware/<name>.rs` |
-| `zapline dev [--bin X] [--release] [-- <app args>]` | Rebuild and restart on file changes |
+| `zapline dev [--bin X] [--release] [--no-proxy] [-- <app args>]` | Live reload: browser refresh and CSS hot swap without a restart, zero-downtime rebuilds, compile errors in the browser |
 | `zapline routes [--bin X] [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json] [--bin X]` | Export the OpenAPI document |
 | `zapline doctor` | Check rustc/cargo (>= 1.88), rustfmt, clippy, git, docker, wrk |
