@@ -341,8 +341,8 @@ async fn default_cookie_name_has_the_host_prefix() {
 async fn signed_tokens_reject_planted_values() {
     let c = signed_app(Csrf::new());
     let (token, cookie) = token(&c).await;
-    // random || HMAC-SHA256, base64url.
-    assert_eq!(token.len(), 86);
+    // random || binding tag || HMAC-SHA256, base64url.
+    assert_eq!(token.len(), 107);
     assert!(token
         .bytes()
         .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_'));
@@ -361,7 +361,7 @@ async fn signed_tokens_reject_planted_values() {
     // The attacker plants a cookie with a value of its choosing and submits
     // the same value: unsigned, forged or signed with another key.
     let unsigned = "A".repeat(43);
-    let mut forged = token[..43].to_owned();
+    let mut forged = token[..64].to_owned();
     forged.push_str(&"A".repeat(43));
     let mut tampered = token.clone().into_bytes();
     tampered[60] = if tampered[60] == b'A' { b'B' } else { b'A' };
@@ -384,7 +384,7 @@ async fn signed_tokens_reject_planted_values() {
         .send()
         .await;
     let fresh = r.text();
-    assert_eq!(fresh.len(), 86);
+    assert_eq!(fresh.len(), 107);
     assert!(csrf_cookie(&r)
         .unwrap()
         .starts_with(&format!("{COOKIE}={fresh}")));
@@ -401,7 +401,7 @@ async fn layer_key_signs_without_an_app_key() {
     let key = Key::from(&[9u8; 64]);
     let c = app(Csrf::new().key(key.clone()));
     let (token, cookie) = token(&c).await;
-    assert_eq!(token.len(), 86);
+    assert_eq!(token.len(), 107);
     assert_eq!(submit(&c, &cookie, &token).await, 200);
 
     // Unsigned tokens are refused once a key is in play...

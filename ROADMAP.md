@@ -6,11 +6,11 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 
 | Area | State |
 |---|---|
-| Core: routing, extractors, errors, middleware, lifecycle, plugins, test client | done |
+| Core: routing, extractors, errors, middleware, lifecycle, plugins, test client (browser-like cookie jar and origins) | done |
 | Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits | done |
 | OpenAPI 3.1 and docs UIs, validation | done |
 | DI, layered config, background tasks, cron schedules, durable and cluster-wide cron jobs, job metrics | done |
-| Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed) | done |
+| Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed, session-bound) | done |
 | Middleware suite: CORS, compression, rate limit, request IDs, security headers, timeouts, catch-panic, load shedding, path normalization | done |
 | Realtime and content: WebSockets, SSE, streaming, static files, multipart | done |
 | Observability: tracing, Prometheus metrics, health | done |
@@ -24,8 +24,6 @@ Run `./scripts/check.sh` to verify everything locally.
 
 - **WebSocket connections and `max_connections`/drain.** Upgraded connections release their connection slot at upgrade, and the shutdown drain doesn't track them. Fixing this means wrapping every connection's IO type. That needs a careful, measured change: an earlier change of that kind cost about 2% of instructions per request by blocking LTO inlining. Documented in `docs/src/server.md`.
 - **hyper 1.12 + `pipeline_flush`.** Malformed or oversized request heads close the connection without the 400/431 response. This is an upstream issue; `ServerConfig::pipeline_flush = false` works around it. Report it upstream and re-test on new hyper releases.
-- **CSRF tokens aren't bound to a session.** They are signed when a key is set, and the `__Host-` cookie prefix prevents injection by sibling domains. Binding tokens to the session id when `SessionLayer` is present would add defense in depth.
-- **The test cookie jar** ignores `Domain`, `Secure` and `SameSite`.
 - **OpenAPI:** credential schemes are matched by kind only. A custom `ApiKeyConfig` header name isn't visible at build time, so declare `api_key_auth(name, header)` explicitly.
 
 ## Next milestones

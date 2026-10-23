@@ -1774,7 +1774,7 @@ client.post("/users").json(&new_user).send().await
 
 ## Cookies and sessions
 
-`app.test()` is stateless: each request carries only the headers you set. `.with_cookies()` gives the client a cookie store, shared by its clones, that works like a browser's: it keeps every `Set-Cookie` (honoring `Path`, `Max-Age` and `Expires`, and deleting cookies set to expire) and sends matching cookies back in one `Cookie` header. That makes login flows one line per step:
+`app.test()` is stateless: each request carries only the headers you set. `.with_cookies()` gives the client a cookie store, shared by its clones, that works like a browser's: it keeps every `Set-Cookie` it is allowed to and sends the matching cookies back in one `Cookie` header. That makes login flows one line per step:
 
 ```rust
 let browser = app().test().with_cookies();
@@ -1784,7 +1784,58 @@ browser.post("/logout").send().await;
 assert_eq!(browser.cookie("zapline.sid"), None);
 ```
 
-Every request counts as same-site and secure, so `Secure` session cookies are sent too. Calling `.with_cookies()` again starts a separate store, e.g. for a second user.
+Calling `.with_cookies()` again starts a separate store, e.g. for a second user. The store applies the rules browsers do (RFC 6265 and 6265bis):
+
+| Attribute | In the test store |
+|---|---|
+| `Domain` | Without it, a cookie is host-only. With it, the cookie also goes to subdomains. A `Domain` the host doesn't belong to, or a public suffix (`com`, `co.uk`), is rejected. |
+| `Path` | Prefix match, defaulting to the request's directory. Longer paths are sent first. |
+| `Secure` | Stored and sent only on secure requests: `https`, or a loopback host such as the default `http://localhost`. A plain-`http` response can't overwrite a `Secure` cookie. |
+| `SameSite` | Applied to requests another page starts (below). `Strict` stays home on cross-site requests; `Lax` (also the default) goes only with safe top-level navigations; `None` always, and needs `Secure`. |
+| `Max-Age`, `Expires` | `Max-Age` wins. Expired cookies are deleted and never sent. |
+| `HttpOnly` | Kept, and hidden from `document_cookie`. |
+| `__Secure-`, `__Host-` | `__Secure-` needs `Secure`; `__Host-` also needs `Path=/` and no `Domain`. |
+
+Cookies you set with `.header("cookie", ..)` are sent first and win over stored ones with the same name.
+
+### Origins and cross-site requests
+
+Relative URIs go to `http://localhost` unless you pick the site with `.base_url("https://app.example.com")`: requests then get a `Host` header, and `https` makes them secure (`ConnInfo::secure`). Absolute URIs (`client.get("https://api.example.com/x")`) use their own origin.
+
+`.from_origin(url)` sends a request as if a page on `url` started it with a link or a form, and `.fetch_from(url)` as a `fetch` with credentials. They add the `Origin` and `Sec-Fetch-Site`/`Sec-Fetch-Mode` headers a browser would, and the store applies `SameSite`. Sites are compared like browsers do, by scheme and registrable domain, using a short built-in list of multi-label public suffixes (`co.uk`, `github.io`, ...) instead of the full Public Suffix List. So you can test CSRF defenses against what a browser would really send:
+
+```rust
+let browser = app().test().with_cookies().base_url("https://app.example.com");
+browser.post("/login").json(&credentials).send().await.assert_status(200);
+
+// A form on another site: the Lax session cookie stays home, and
+// `SameOrigin` refuses the request.
+browser.post("/transfer").from_origin("https://evil.example").send().await.assert_status(403);
+// A sibling subdomain is the same site, and the cookie goes along.
+browser.post("/transfer").from_origin("https://blog.example.com").send().await;
+```
+
+To look inside the store:
+
+| Method | Returns |
+|---|---|
+| `cookie(name)` | The value of a stored, unexpired cookie |
+| `cookies()` | Every stored cookie with its attributes (`domain`, `host_only`, `path`, `secure`, `http_only`, `same_site`, `expires`) |
+| `document_cookie(url)` | What `document.cookie` would return on that page: matching cookies that aren't `HttpOnly` |
+| `set_cookie(url, set_cookie)` | Stores a `Set-Cookie` as if that page sent it, with every rule applied, and returns whether it was accepted. Use it to simulate another site planting a cookie. |
+| `clear_cookies()` | Empties the store |
+
+```rust
+// JavaScript can read the CSRF token but never the session id.
+let js = browser.document_cookie("https://app.example.com/");
+assert!(js.contains("__Host-zapline.csrf=") && !js.contains("zapline.sid"));
+
+// evil.example.com can plant a cookie for all of example.com, but not a __Host- one.
+assert!(browser.set_cookie("https://evil.example.com/", "csrf=x; Domain=example.com"));
+assert!(!browser.set_cookie("https://evil.example.com/", "__Host-csrf=x; Domain=example.com; Path=/; Secure"));
+```
+
+Not modelled: redirects are not followed, there is no per-domain cookie limit or eviction, and the Chrome "Lax+POST" two-minute exception for cookies without a `SameSite` attribute is not applied.
 
 ## Fuzz every route
 
@@ -5425,7 +5476,7 @@ fn app() -> App {
 
 ### Testing sessions
 
-The test client does not keep cookies. Pass the `Set-Cookie` value back yourself:
+`.with_cookies()` gives the test client a browser-like cookie store, so a login flow is one line per step (see [Testing](testing.md#cookies-and-sessions)):
 
 ```rust
 use zapline::cookies::Key;
@@ -5447,15 +5498,19 @@ fn app() -> App {
 
 #[tokio::test]
 async fn session_survives_a_round_trip() {
-    let client = app().test();
+    let browser = app().test().with_cookies().base_url("https://app.example.com");
 
-    let res = client.post("/login").send().await;
-    let cookie = res.header("set-cookie").unwrap().split(';').next().unwrap().to_owned();
+    browser.post("/login").send().await.assert_status(200);
+    browser.get("/me").send().await.assert_text("user 42");
 
-    let res = client.get("/me").header("cookie", cookie).send().await;
-    assert_eq!(res.text(), "user 42");
+    let sid = browser.cookies().into_iter().find(|c| c.name == "zapline.sid").unwrap();
+    assert!(sid.secure && sid.http_only && sid.host_only);
+    // Scripts on the page can't read the session id.
+    assert_eq!(browser.document_cookie("https://app.example.com/"), "");
 }
 ```
+
+The store enforces `Secure` like a browser: `Secure` session cookies work over `https` base URLs and on the default `http://localhost`, but not on another plain-`http` host.
 
 ## CSRF
 
@@ -5484,13 +5539,14 @@ It also stops sibling subdomains (`Sec-Fetch-Site: same-site`), which `SameSite=
 
 `Csrf` is signed double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`__Host-zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
 
-**Register a cookie key** with `App::cookie_key` (or give one to `.key(..)`); it is strongly recommended. Tokens are then signed: 32 random bytes followed by their HMAC-SHA256 under the key, base64url-encoded (86 characters), and only tokens this server minted are accepted. Without a key, tokens are plain random values (43 characters) and anything well-formed is accepted.
+**Register a cookie key** with `App::cookie_key` (or give one to `.key(..)`); it is strongly recommended. Tokens are then signed: 32 random bytes and a 16-byte session binding tag (below), followed by their HMAC-SHA256 under the key, base64url-encoded (107 characters), and only tokens this server minted are accepted. Without a key (and without `SessionLayer`, whose key is used otherwise), tokens are plain random values (43 characters) and anything well-formed is accepted.
 
 Signing matters because `SameSite` doesn't stop a sibling subdomain. A page on `evil.example.com` (or a compromised `blog.example.com`) is same-site with `app.example.com`, so it can set `zapline.csrf=<chosen>; Domain=example.com; Path=/transfer`. Browsers send that cookie first, and the attacker submits the same chosen value. Three things stop this:
 
 - **Signed tokens.** A planted value of the attacker's choosing doesn't verify, so it is ignored.
 - **The `__Host-` prefix.** Browsers refuse a `__Host-` cookie unless it is `Secure`, has `Path=/` and no `Domain`, so other hosts can't set it at all. The default name has it whenever the cookie is `Secure` (the default). With `.secure(false)`, for development over plain HTTP, the default name is `zapline.csrf`, because browsers would drop a `__Host-` cookie without `Secure`.
-- **Several token cookies must agree.** If a request carries two different valid tokens, unsafe requests are rejected whichever one is submitted. A signed token isn't tied to a user, so this is what stops an attacker who plants a token the server minted for them next to the victim's (and the `__Host-` prefix stops the planting itself).
+- **Several token cookies must agree.** If a request carries two different valid tokens, unsafe requests are rejected whichever one is submitted. This stops an attacker who plants a token the server minted for them next to the victim's (and the `__Host-` prefix stops the planting itself).
+- **Tokens are bound to the session** when `SessionLayer` is installed, so a token the server minted for the attacker fails with the victim's session even when it is the only one the request carries.
 
 Install it as global middleware and render the token with the `CsrfToken` extractor:
 
@@ -5516,6 +5572,38 @@ fn app() -> App {
         .wrap(Csrf::new().exempt("/webhooks/*"))
         .get("/form", form)
         .post("/transfer", transfer)
+}
+```
+
+#### Bound to the session
+
+With `SessionLayer` installed, `Csrf` binds every token to the session. The tag inside the token is an HMAC of the session id the client presents (or of "no session" for anonymous visitors), so:
+
+- **A token minted for one session fails for every other one.** An attacker who gets a valid token for their own session and plants it in the victim's browser (a sibling subdomain can set a cookie without the `__Host-` prefix, or push the victim's cookie out of the jar) gets `403 csrf_failed`. The tag reveals nothing about the session id.
+- **Tokens rotate with the session id.** When a request starts a session, calls `regenerate()` (do it on login) or `destroy()` (logout), its response carries a new token cookie bound to the new id, and the old token stops working. A session that is only saved or extended keeps its token.
+- **No store access.** Binding reads the signed session cookie only, so routes that never extract `Session` still don't touch the session store.
+
+Both wrap orders work. With `SessionLayer` first, `Csrf` binds the token itself; with `Csrf` first (or `SessionLayer` on a route group), the session layer binds it when it runs, and handlers inside it see the bound token through `CsrfToken`. Routes outside a session group use unbound tokens, which a session group replaces with bound ones on its first safe request (a `GET` of its form), so a form posted to the group must be rendered by it. Without a `Csrf` key or an app key, the session's key signs the tokens.
+
+```rust
+use zapline::auth::{Csrf, CsrfToken};
+use zapline::cookies::Key;
+use zapline::prelude::*;
+use zapline::session::{MemoryStore, Session, SessionLayer};
+
+async fn login(session: Session) -> Result<Redirect> {
+    session.regenerate();             // new id: the CSRF token rotates too
+    session.insert("user", "ada")?;
+    Ok(Redirect::to("/"))             // the next page renders the new token
+}
+
+fn app() -> App {
+    App::new()
+        .cookie_key(Key::generate())
+        .wrap(SessionLayer::new(MemoryStore::new()))
+        .wrap(Csrf::new())
+        .get("/", |t: CsrfToken| async move { Html(format!("<form method=post action=/login>{}</form>", t.hidden_input())) })
+        .post("/login", login)
 }
 ```
 
@@ -5547,6 +5635,7 @@ Things to know:
 - **APIs that authenticate with an `Authorization` header don't need CSRF.** Browsers don't attach that header on their own. Apply `Csrf` only to the cookie-authenticated part of the app, for instance with `.exempt("/api/*")`, or use `Routes::wrap` on the group.
 - Exempt paths still receive a token cookie, and they are matched against the request path (before routing).
 - Changing the key (or adding one) invalidates existing tokens. Clients get a fresh token on their next safe request, and forms rendered before the change fail once with `403`.
+- With sessions, the token rotates when the session id changes (login, logout). Answer a login form with a redirect (Post/Redirect/Get) so the next page renders the new token; JavaScript that reads the cookie before each request always has the current one.
 - Defense in depth: keep the session cookie `SameSite=Lax` (the default) or `Strict`, in addition to the token.
 
 
@@ -6017,7 +6106,7 @@ Why this order:
 6. **`Compression` innermost of the global layers.** It compresses what handlers produce, and the small error bodies from the layers above skip the work. The CPU it spends is covered by the limits and the timeout.
 7. **`RateLimit` as `wrap_route`.** Only route middleware can see per-route policies like `.rate_limit(5, MINUTE)`. The cost is that unmatched requests (404s) aren't rate-limited; they allocate nothing and are cheap, and `ConcurrencyLimit` still covers floods. Use `App::wrap(RateLimit::..)` instead if you need to limit 404s, and accept that policies are ignored there.
 
-Authentication and authorization go closer to the handlers still, on route groups. See [Authentication & authorization](auth.md) for why role checks must run after routing. Add [`Csrf`](sessions.md#csrf) globally if your app serves cookie-authenticated forms, with a cookie key registered (`App::cookie_key`) so its tokens are signed. And pair this stack with `Metrics` and `Health` from [Observability](observability.md), remembering that `wrap_route` middleware also covers their routes (exempt `/healthz` and friends, as above).
+Authentication and authorization go closer to the handlers still, on route groups. See [Authentication & authorization](auth.md) for why role checks must run after routing. Add [`Csrf`](sessions.md#csrf) globally if your app serves cookie-authenticated forms, with a cookie key registered (`App::cookie_key`) so its tokens are signed. With `SessionLayer` installed, its tokens are also [bound to the session](sessions.md#bound-to-the-session) and rotate on login and logout. Test the whole stack against real cross-site requests with the test client's `from_origin` ([Testing](testing.md#origins-and-cross-site-requests)). And pair this stack with `Metrics` and `Health` from [Observability](observability.md), remembering that `wrap_route` middleware also covers their routes (exempt `/healthz` and friends, as above).
 
 
 ---

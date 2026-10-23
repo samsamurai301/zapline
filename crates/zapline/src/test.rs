@@ -18,7 +18,13 @@
 //!   raw [`body`](TestRequest::body).
 //! - **Cookies**: [`App::test`](crate::App::test) is stateless;
 //!   [`TestClient::with_cookies`] keeps cookies across requests like a
-//!   browser, for login and session flows.
+//!   browser (`Domain`, `Path`, `Secure`, `SameSite`, expiry, `HttpOnly`
+//!   and cookie prefixes), for login and session flows.
+//! - **Origins**: [`TestClient::base_url`] picks the site the app is served
+//!   on; [`TestRequest::from_origin`] and [`TestRequest::fetch_from`] send
+//!   a request as if another page started it, with the `Origin` and
+//!   `Sec-Fetch-*` headers and `SameSite` rules a browser applies, to test
+//!   CSRF defenses against real cross-site requests.
 //! - **Assertions**: [`TestResponse::assert_status`] and
 //!   [`assert_header`](TestResponse::assert_header) chain, and their panic
 //!   messages include the response body.
@@ -56,7 +62,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
-use http::header::{CONTENT_TYPE, COOKIE, SET_COOKIE};
+use http::header::{CONTENT_TYPE, COOKIE, HOST, SET_COOKIE};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use http_body_util::BodyExt;
 
@@ -94,6 +100,8 @@ struct Inner {
 pub struct TestClient {
     inner: Arc<Inner>,
     cookies: Option<Arc<Mutex<CookieStore>>>,
+    /// Where relative request URIs go ([`base_url`](Self::base_url)).
+    base: Option<Origin>,
 }
 
 impl TestClient {
@@ -106,6 +114,7 @@ impl TestClient {
                 table,
             }),
             cookies: None,
+            base: None,
         }
     }
 
@@ -113,12 +122,33 @@ impl TestClient {
     /// like a browser, it stores every `Set-Cookie` it receives and sends
     /// matching cookies back in one `Cookie` header.
     ///
-    /// The store honors `Path` (prefix matching, defaulting to the request's
-    /// directory), `Max-Age` and `Expires`; a cookie with `Max-Age=0` or a
-    /// past `Expires` is deleted. All requests count as same-site and
-    /// secure, so `Domain`, `Secure` and `SameSite` are ignored. Cookies set
-    /// explicitly with [`TestRequest::header`] are sent first and take
-    /// precedence over stored ones with the same name.
+    /// The store follows RFC 6265 and the browser rules of RFC 6265bis:
+    ///
+    /// - **`Domain`**: without it a cookie is host-only; with it, it is sent
+    ///   to that domain and its subdomains. A `Domain` the request's host
+    ///   doesn't belong to, or a public suffix (`com`, `co.uk`), is
+    ///   rejected.
+    /// - **`Path`**: prefix matching, defaulting to the request's directory.
+    /// - **`Secure`**: stored and sent only over secure requests: `https`,
+    ///   or a loopback host such as the default `http://localhost` (as
+    ///   browsers treat it). An insecure request can't overwrite a `Secure`
+    ///   cookie.
+    /// - **`SameSite`**: requests built with [`TestRequest::from_origin`] or
+    ///   [`TestRequest::fetch_from`] are started by another page; when it is
+    ///   cross-site, `Strict` cookies stay home and `Lax` ones (the default)
+    ///   go only with safe top-level navigations. `SameSite=None` requires
+    ///   `Secure`. Other requests are typed into the address bar: same-site.
+    /// - **`Max-Age`/`Expires`**: `Max-Age` wins; a cookie set to expire is
+    ///   deleted, and expired cookies are never sent.
+    /// - **`HttpOnly`**: stored ([`cookies`](Self::cookies)) and hidden from
+    ///   [`document_cookie`](Self::document_cookie).
+    /// - **Prefixes**: `__Secure-` needs `Secure`; `__Host-` also needs
+    ///   `Path=/` and no `Domain`.
+    ///
+    /// Sites are compared by registrable domain, using a small built-in
+    /// list of public suffixes instead of the full Public Suffix List.
+    /// Cookies set explicitly with [`TestRequest::header`] are sent first
+    /// and take precedence over stored ones with the same name.
     ///
     /// Each call starts a new store, so two calls give two independent
     /// "browsers" on the same app.
@@ -147,8 +177,166 @@ impl TestClient {
         store
             .cookies
             .iter()
-            .find(|c| c.name == name && !c.expired(now))
-            .map(|c| c.value.clone())
+            .find(|c| c.cookie.name == name && !c.expired(now))
+            .map(|c| c.cookie.value.clone())
+    }
+
+    /// Every unexpired stored cookie with its attributes, oldest first
+    /// (empty without [`with_cookies`](Self::with_cookies)).
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// use zapline::test::CookieSameSite;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let app = App::new().get("/", || async {
+    ///     ([(header::SET_COOKIE, HeaderValue::from_static("theme=dark; SameSite=Strict"))], "")
+    /// });
+    /// let browser = app.test().with_cookies();
+    /// browser.get("/").send().await;
+    /// assert_eq!(browser.cookies()[0].same_site, Some(CookieSameSite::Strict));
+    /// # }
+    /// ```
+    pub fn cookies(&self) -> Vec<JarCookie> {
+        let Some(store) = &self.cookies else {
+            return Vec::new();
+        };
+        let now = SystemTime::now();
+        store
+            .lock()
+            .unwrap()
+            .cookies
+            .iter()
+            .filter(|c| !c.expired(now))
+            .map(|c| c.cookie.clone())
+            .collect()
+    }
+
+    /// What `document.cookie` returns to a script on the page at `url` (an
+    /// absolute URL): the matching cookies that are not `HttpOnly`, as
+    /// `a=1; b=2`. Use it to check what JavaScript can read, e.g. a CSRF
+    /// token but never the session id.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let app = App::new().get("/", || async {
+    ///     let mut res = "".into_response();
+    ///     let h = res.headers_mut();
+    ///     h.append(header::SET_COOKIE, HeaderValue::from_static("sid=s3cret; HttpOnly"));
+    ///     h.append(header::SET_COOKIE, HeaderValue::from_static("csrf=t0ken"));
+    ///     res
+    /// });
+    /// let browser = app.test().with_cookies();
+    /// browser.get("/").send().await;
+    /// assert_eq!(browser.document_cookie("http://localhost/"), "csrf=t0ken");
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    /// If `url` is not an absolute `http(s)` URL.
+    #[track_caller]
+    pub fn document_cookie(&self, url: &str) -> String {
+        let (origin, path) = page(url);
+        let Some(store) = &self.cookies else {
+            return String::new();
+        };
+        let cx = Context {
+            target: &origin,
+            path: &path,
+            same_site: true,
+            navigation: true,
+            safe_method: true,
+        };
+        let mut store = store.lock().unwrap();
+        let pairs: Vec<String> = store
+            .matching(&cx, true)
+            .into_iter()
+            .map(|c| format!("{}={}", c.name, c.value))
+            .collect();
+        pairs.join("; ")
+    }
+
+    /// Store `set_cookie` (a `Set-Cookie` value) as if the page at `url` (an
+    /// absolute URL) had sent it, with every rule of the store applied.
+    /// Returns whether it was accepted. Use it to simulate cookies other
+    /// sites set, such as a sibling subdomain planting one for the parent
+    /// domain.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let browser = App::new().test().with_cookies();
+    /// // evil.example.com can set a cookie for all of example.com...
+    /// assert!(browser.set_cookie("https://evil.example.com/", "x=1; Domain=example.com"));
+    /// // ...but not a `__Host-` one, nor one for another site.
+    /// assert!(!browser.set_cookie(
+    ///     "https://evil.example.com/",
+    ///     "__Host-x=1; Domain=example.com; Path=/; Secure"
+    /// ));
+    /// assert!(!browser.set_cookie("https://evil.example.com/", "y=1; Domain=bank.com"));
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    /// If the client keeps no cookies ([`with_cookies`](Self::with_cookies))
+    /// or `url` is not an absolute `http(s)` URL.
+    #[track_caller]
+    pub fn set_cookie(&self, url: &str, set_cookie: &str) -> bool {
+        let (origin, path) = page(url);
+        let store = self
+            .cookies
+            .as_ref()
+            .expect("set_cookie needs a cookie store: call `.with_cookies()` first");
+        let cx = Context {
+            target: &origin,
+            path: &path,
+            same_site: true,
+            navigation: true,
+            safe_method: true,
+        };
+        store.lock().unwrap().set(&cx, set_cookie)
+    }
+
+    /// Forget every stored cookie (like clearing the browser's cookies).
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let browser = App::new().test().with_cookies();
+    /// browser.set_cookie("http://localhost/", "a=1");
+    /// browser.clear_cookies();
+    /// assert!(browser.cookies().is_empty());
+    /// # }
+    /// ```
+    pub fn clear_cookies(&self) {
+        if let Some(store) = &self.cookies {
+            store.lock().unwrap().cookies.clear();
+        }
+    }
+
+    /// Send relative request URIs (`/login`) to this origin instead of
+    /// `http://localhost`: the cookie store keys cookies on its host and
+    /// scheme, requests get a `Host` header, and `https` requests count as
+    /// secure ([`ConnInfo::secure`](crate::ConnInfo::secure)).
+    /// Absolute request URIs always use their own origin.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let app = App::new().get("/", |conn: ConnInfo, headers: HeaderMap| async move {
+    ///     format!("{} {:?}", conn.secure, headers.get(header::HOST).unwrap())
+    /// });
+    /// let client = app.test().base_url("https://app.example.com");
+    /// assert_eq!(client.get("/").send().await.text(), r#"true "app.example.com""#);
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    /// If `url` is not an absolute `http(s)` URL.
+    #[track_caller]
+    pub fn base_url(mut self, url: &str) -> Self {
+        self.base = Some(page(url).0);
+        self
     }
 
     /// Run startup hooks now (they otherwise run on the first request).
@@ -216,6 +404,7 @@ impl TestClient {
                 local_addr: None,
                 secure: false,
             },
+            initiator: None,
         }
     }
     pub fn get(&self, uri: &str) -> TestRequest {
@@ -241,6 +430,7 @@ pub struct TestRequest {
     pub(crate) builder: http::request::Builder,
     pub(crate) body: Bytes,
     pub(crate) conn: ConnInfo,
+    initiator: Option<Initiator>,
 }
 
 impl TestRequest {
@@ -258,6 +448,70 @@ impl TestRequest {
     /// `Authorization: Bearer <token>`.
     pub fn bearer(self, token: &str) -> Self {
         self.header(http::header::AUTHORIZATION, format!("Bearer {token}"))
+    }
+
+    /// Send the request as a browser does when a page on `origin` starts a
+    /// top-level navigation: following a link or submitting a form. The
+    /// request gets the `Sec-Fetch-Site` and `Sec-Fetch-Mode: navigate`
+    /// headers, plus `Origin` unless the method is `GET` or `HEAD`, and the
+    /// cookie store applies `SameSite` when `origin` is cross-site (see
+    /// [`TestClient::with_cookies`]). Headers set explicitly win.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// use zapline::middleware::SameOrigin;
+    ///
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let client = App::new()
+    ///     .wrap(SameOrigin::new())
+    ///     .post("/transfer", || async { "sent" })
+    ///     .test()
+    ///     .base_url("https://bank.example");
+    /// // A form on another site posting to the bank is refused.
+    /// let res = client.post("/transfer").from_origin("https://evil.example").send().await;
+    /// assert_eq!(res.status(), 403);
+    /// // The bank's own form works.
+    /// let res = client.post("/transfer").from_origin("https://bank.example").send().await;
+    /// assert_eq!(res.status(), 200);
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    /// If `origin` is not an absolute `http(s)` URL.
+    #[track_caller]
+    pub fn from_origin(mut self, origin: &str) -> Self {
+        self.initiator = Some(Initiator {
+            origin: page(origin).0,
+            navigation: true,
+        });
+        self
+    }
+
+    /// Send the request as a `fetch(.., { credentials: "include" })` from a
+    /// script on `origin`: like [`from_origin`](Self::from_origin), but
+    /// with `Sec-Fetch-Mode: cors`, an `Origin` header on every cross-origin
+    /// request, and cross-site requests carry only `SameSite=None` cookies.
+    ///
+    /// ```
+    /// # use zapline::prelude::*;
+    /// # #[tokio::main(flavor = "current_thread")] async fn main() {
+    /// let client = App::new()
+    ///     .get("/", |h: HeaderMap| async move { format!("{:?}", h.get("origin")) })
+    ///     .test();
+    /// let res = client.get("/").fetch_from("https://other.example").send().await;
+    /// assert_eq!(res.text(), r#"Some("https://other.example")"#);
+    /// # }
+    /// ```
+    ///
+    /// # Panics
+    /// If `origin` is not an absolute `http(s)` URL.
+    #[track_caller]
+    pub fn fetch_from(mut self, origin: &str) -> Self {
+        self.initiator = Some(Initiator {
+            origin: page(origin).0,
+            navigation: false,
+        });
+        self
     }
 
     /// Pretend the request came from this peer address.
@@ -355,22 +609,60 @@ impl TestRequest {
             .builder
             .body(ReqBody::Full(self.body))
             .expect("invalid test request");
-        let jar = self.client.cookies.as_ref().map(|jar| {
-            let path = req.uri().path().to_owned();
+        let base = self.client.base.as_ref();
+        let target = match Origin::from_uri(req.uri()) {
+            Some(origin) => origin,
+            None => {
+                if let Some(base) = base {
+                    if !req.headers().contains_key(HOST) {
+                        if let Ok(v) = HeaderValue::try_from(base.authority()) {
+                            req.headers_mut().insert(HOST, v);
+                        }
+                    }
+                }
+                let https = base.is_some_and(|b| b.https);
+                req.headers()
+                    .get(HOST)
+                    .and_then(|h| Origin::from_host(h, https))
+                    .or_else(|| base.cloned())
+                    .unwrap_or_else(Origin::localhost)
+            }
+        };
+        let mut conn = self.conn;
+        conn.secure |= target.https;
+        let safe_method = matches!(
+            *req.method(),
+            Method::GET | Method::HEAD | Method::OPTIONS | Method::TRACE
+        );
+        let (same_site, navigation) = match &self.initiator {
+            Some(init) => {
+                fetch_metadata(init, &target, req.method().clone(), req.headers_mut());
+                (init.origin.same_site(&target), init.navigation)
+            }
+            None => (true, true),
+        };
+        let path = req.uri().path().to_owned();
+        let cx = Context {
+            target: &target,
+            path: &path,
+            same_site,
+            navigation,
+            safe_method,
+        };
+        if let Some(jar) = &self.client.cookies {
             jar.lock()
                 .unwrap()
-                .add_cookie_header(&path, req.headers_mut());
-            (jar, path)
-        });
+                .add_cookie_header(&cx, req.headers_mut());
+        }
         let started = self.client.started().await;
         let res = started
             .app
-            .handle(req, self.conn)
+            .handle(req, conn)
             .await
             .unwrap_or_else(|e| match e {});
         let (parts, body) = res.into_parts();
-        if let Some((jar, path)) = jar {
-            jar.lock().unwrap().store(&path, &parts.headers);
+        if let Some(jar) = &self.client.cookies {
+            jar.lock().unwrap().store(&cx, &parts.headers);
         }
         let streaming = parts
             .headers
@@ -668,79 +960,440 @@ enum Expiry {
     Session,
 }
 
-/// What [`TestClient::with_cookies`] keeps: cookies by (name, path).
+/// The fetch metadata headers a browser adds to a request `init` starts
+/// (explicit ones win).
+fn fetch_metadata(init: &Initiator, target: &Origin, method: Method, headers: &mut HeaderMap) {
+    let site = if init.origin.same_origin(target) {
+        "same-origin"
+    } else if init.origin.same_site(target) {
+        "same-site"
+    } else {
+        "cross-site"
+    };
+    let mode = if init.navigation { "navigate" } else { "cors" };
+    let sends_origin = !matches!(method, Method::GET | Method::HEAD)
+        || (!init.navigation && site != "same-origin");
+    let mut add = |name: &'static str, value: String| {
+        if let Ok(v) = HeaderValue::try_from(value) {
+            headers.entry(HeaderName::from_static(name)).or_insert(v);
+        }
+    };
+    add("sec-fetch-site", site.to_owned());
+    add("sec-fetch-mode", mode.to_owned());
+    if sends_origin {
+        add("origin", init.origin.serialize());
+    }
+}
+
+/// A cookie held by a [`TestClient::with_cookies`] store, as
+/// [`TestClient::cookies`] lists it.
+///
+/// ```
+/// # use zapline::prelude::*;
+/// # #[tokio::main(flavor = "current_thread")] async fn main() {
+/// let app = App::new().get("/", || async {
+///     ([(header::SET_COOKIE, HeaderValue::from_static("sid=abc; Path=/; Secure; HttpOnly"))], "")
+/// });
+/// let browser = app.test().with_cookies();
+/// browser.get("/").send().await;
+/// let sid = &browser.cookies()[0];
+/// assert_eq!((sid.name.as_str(), sid.domain.as_str()), ("sid", "localhost"));
+/// assert!(sid.host_only && sid.secure && sid.http_only);
+/// # }
+/// ```
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct JarCookie {
+    pub name: String,
+    /// The value exactly as sent (still percent-encoded, if it was).
+    pub value: String,
+    /// The host that set it (when [`host_only`](Self::host_only)) or its
+    /// `Domain` attribute, lowercased and without a leading dot.
+    pub domain: String,
+    /// Sent only to [`domain`](Self::domain) itself, not its subdomains
+    /// (the cookie had no `Domain` attribute).
+    pub host_only: bool,
+    pub path: String,
+    /// Sent only over secure requests (`https`, or a loopback host).
+    pub secure: bool,
+    /// Hidden from scripts ([`TestClient::document_cookie`]).
+    pub http_only: bool,
+    /// The `SameSite` attribute; `None` when absent, which browsers treat
+    /// as `Lax`.
+    pub same_site: Option<CookieSameSite>,
+    /// When it expires; `None` for a session cookie.
+    pub expires: Option<SystemTime>,
+}
+
+/// A cookie's `SameSite` attribute, see [`JarCookie::same_site`].
+///
+/// ```
+/// use zapline::test::CookieSameSite;
+/// assert_ne!(CookieSameSite::Lax, CookieSameSite::Strict);
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CookieSameSite {
+    /// Never sent on cross-site requests.
+    Strict,
+    /// Sent on cross-site requests only for top-level navigations with a
+    /// safe method (following a link, a `GET` form).
+    Lax,
+    /// Always sent (browsers require `Secure` with it).
+    None,
+}
+
+/// Who starts a request ([`TestRequest::from_origin`],
+/// [`TestRequest::fetch_from`]).
+#[derive(Clone, Debug)]
+struct Initiator {
+    origin: Origin,
+    navigation: bool,
+}
+
+/// Scheme, host and port of a URL: what cookies and sites are keyed on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Origin {
+    https: bool,
+    /// Lowercase; IPv6 addresses without brackets.
+    host: String,
+    port: Option<u16>,
+}
+
+impl Origin {
+    fn localhost() -> Self {
+        Origin {
+            https: false,
+            host: "localhost".into(),
+            port: None,
+        }
+    }
+
+    fn from_uri(uri: &http::Uri) -> Option<Self> {
+        let https = match uri.scheme_str()?.to_ascii_lowercase().as_str() {
+            "https" | "wss" => true,
+            "http" | "ws" => false,
+            _ => return None,
+        };
+        let host = uri.host()?;
+        Some(Origin {
+            https,
+            host: unbracket(host).to_ascii_lowercase(),
+            port: uri.port_u16(),
+        })
+    }
+
+    /// The origin named by a `Host` header, with the base URL's scheme.
+    fn from_host(host: &HeaderValue, https: bool) -> Option<Self> {
+        let authority: http::uri::Authority = host.to_str().ok()?.parse().ok()?;
+        Some(Origin {
+            https,
+            host: unbracket(authority.host()).to_ascii_lowercase(),
+            port: authority.port_u16(),
+        })
+    }
+
+    fn port(&self) -> u16 {
+        self.port.unwrap_or(if self.https { 443 } else { 80 })
+    }
+
+    fn same_origin(&self, other: &Origin) -> bool {
+        self.https == other.https && self.host == other.host && self.port() == other.port()
+    }
+
+    /// Schemeful same-site, as current browsers define it for cookies.
+    fn same_site(&self, other: &Origin) -> bool {
+        self.https == other.https
+            && registrable_domain(&self.host) == registrable_domain(&other.host)
+    }
+
+    /// A secure context: `https`, or a loopback host (browsers treat
+    /// `http://localhost` as secure, so `Secure` cookies work there).
+    fn is_secure(&self) -> bool {
+        self.https
+            || self.host == "localhost"
+            || self.host.ends_with(".localhost")
+            || self
+                .host
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+    }
+
+    /// The `host[:port]` authority (`[..]` around IPv6).
+    fn authority(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        match self.port {
+            Some(p) => format!("{host}:{p}"),
+            None => host,
+        }
+    }
+
+    /// As browsers send it in the `Origin` header.
+    fn serialize(&self) -> String {
+        let scheme = if self.https { "https" } else { "http" };
+        format!("{scheme}://{}", self.authority())
+    }
+}
+
+fn unbracket(host: &str) -> &str {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+fn is_ip(host: &str) -> bool {
+    host.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Public suffixes with more than one label that the store knows about.
+/// Single labels (`com`, `localhost`) are always public suffixes. This is a
+/// small stand-in for the Public Suffix List browsers ship.
+const MULTI_LABEL_SUFFIXES: &[&str] = &[
+    "co.uk",
+    "org.uk",
+    "ac.uk",
+    "gov.uk",
+    "com.au",
+    "net.au",
+    "org.au",
+    "co.jp",
+    "co.nz",
+    "com.br",
+    "co.in",
+    "github.io",
+    "herokuapp.com",
+    "vercel.app",
+    "netlify.app",
+    "pages.dev",
+];
+
+fn is_public_suffix(domain: &str) -> bool {
+    !domain.contains('.') || MULTI_LABEL_SUFFIXES.contains(&domain)
+}
+
+/// The registrable domain (the "site") of `host`: its public suffix plus
+/// one label. IP addresses and single-label hosts are their own site.
+fn registrable_domain(host: &str) -> &str {
+    if is_ip(host) {
+        return host;
+    }
+    let mut end = host.len();
+    loop {
+        let start = host[..end].rfind('.').map_or(0, |i| i + 1);
+        let candidate = &host[start..];
+        if !is_public_suffix(candidate) || start == 0 {
+            return candidate;
+        }
+        end = start - 1;
+    }
+}
+
+/// RFC 6265 domain matching: `a.example.com` matches `example.com`; IP
+/// addresses match only themselves.
+fn domain_matches(host: &str, domain: &str) -> bool {
+    host == domain
+        || (!is_ip(host)
+            && host
+                .strip_suffix(domain)
+                .is_some_and(|rest| rest.ends_with('.')))
+}
+
+/// Where a request goes and who started it, for cookie decisions.
+struct Context<'a> {
+    target: &'a Origin,
+    path: &'a str,
+    /// Started by the user or a same-site page.
+    same_site: bool,
+    /// A top-level navigation (link, form submission), not a `fetch`.
+    navigation: bool,
+    safe_method: bool,
+}
+
+/// What [`TestClient::with_cookies`] keeps.
 #[derive(Default)]
 struct CookieStore {
     cookies: Vec<StoredCookie>,
+    /// Creation counter: equal-length paths are sent oldest first.
+    next: u64,
 }
 
 struct StoredCookie {
-    name: String,
-    value: String,
-    path: String,
-    expires: Option<SystemTime>,
+    cookie: JarCookie,
+    created: u64,
 }
 
 impl StoredCookie {
     fn expired(&self, now: SystemTime) -> bool {
-        self.expires.is_some_and(|at| at <= now)
+        self.cookie.expires.is_some_and(|at| at <= now)
+    }
+
+    /// Whether a request in `cx` carries this cookie.
+    fn sent_with(&self, cx: &Context) -> bool {
+        let c = &self.cookie;
+        let host = &cx.target.host;
+        let domain_ok = if c.host_only {
+            *host == c.domain
+        } else {
+            domain_matches(host, &c.domain)
+        };
+        domain_ok
+            && path_matches(cx.path, &c.path)
+            && (!c.secure || cx.target.is_secure())
+            && (cx.same_site
+                || match c.same_site {
+                    Some(CookieSameSite::None) => true,
+                    Some(CookieSameSite::Strict) => false,
+                    Some(CookieSameSite::Lax) | None => cx.navigation && cx.safe_method,
+                })
     }
 }
 
+/// Bytes allowed in a cookie's name plus value (as browsers enforce).
+const MAX_COOKIE_SIZE: usize = 4096;
+
 impl CookieStore {
     /// Apply a response's `Set-Cookie` headers.
-    fn store(&mut self, request_path: &str, headers: &HeaderMap) {
-        let now = SystemTime::now();
+    fn store(&mut self, cx: &Context, headers: &HeaderMap) {
         for set in headers.get_all(SET_COOKIE) {
-            let Some(c) = set.to_str().ok().and_then(SetCookie::parse) else {
-                continue;
-            };
-            let path = match c.path() {
-                Some(p) if p.starts_with('/') => p.to_owned(),
-                _ => default_path(request_path).to_owned(),
-            };
-            let slot = self
-                .cookies
-                .iter()
-                .position(|s| s.name == c.name() && s.path == path);
-            let expires = match c.expiry(now) {
-                Expiry::Expired => {
-                    if let Some(i) = slot {
-                        self.cookies.remove(i);
-                    }
-                    continue;
-                }
-                Expiry::At(at) => Some(at),
-                Expiry::Session => None,
-            };
-            let cookie = StoredCookie {
-                name: c.name().to_owned(),
-                value: c.value().to_owned(),
-                path,
-                expires,
-            };
-            match slot {
-                Some(i) => self.cookies[i] = cookie,
-                None => self.cookies.push(cookie),
+            if let Ok(set) = set.to_str() {
+                self.set(cx, set);
             }
         }
     }
 
-    /// Send the cookies matching `request_path`, longest path first, in a
-    /// single `Cookie` header after any the test set explicitly.
-    fn add_cookie_header(&mut self, request_path: &str, headers: &mut HeaderMap) {
+    /// Process one `Set-Cookie` the way browsers do (RFC 6265 section 5.3,
+    /// with the `SameSite`, `Secure` and prefix rules of RFC 6265bis).
+    /// Returns whether the store accepted it.
+    fn set(&mut self, cx: &Context, header: &str) -> bool {
+        let now = SystemTime::now();
+        let Some(c) = SetCookie::parse(header) else {
+            return false;
+        };
+        if c.name().len() + c.value().len() > MAX_COOKIE_SIZE {
+            return false;
+        }
+        let host = &cx.target.host;
+        let (domain, host_only) = match c.domain().map(|d| d.trim_start_matches('.')) {
+            Some(d) if !d.is_empty() => {
+                let d = d.to_ascii_lowercase();
+                if d == *host {
+                    (d, false)
+                } else if is_public_suffix(&d) || !domain_matches(host, &d) {
+                    // A cookie for `com`, or for another site entirely.
+                    return false;
+                } else {
+                    (d, false)
+                }
+            }
+            _ => (host.clone(), true),
+        };
+        let path = match c.path() {
+            Some(p) if p.starts_with('/') => p.to_owned(),
+            _ => default_path(cx.path).to_owned(),
+        };
+        let secure = c.secure();
+        let secure_origin = cx.target.is_secure();
+        if secure && !secure_origin {
+            return false;
+        }
+        let same_site = c
+            .same_site()
+            .and_then(|v| match v.to_ascii_lowercase().as_str() {
+                "strict" => Some(CookieSameSite::Strict),
+                "lax" => Some(CookieSameSite::Lax),
+                "none" => Some(CookieSameSite::None),
+                _ => None,
+            });
+        if same_site == Some(CookieSameSite::None) && !secure {
+            return false;
+        }
+        // Cross-site subresources can't set same-site cookies; cross-site
+        // top-level navigations can.
+        if !cx.same_site && same_site != Some(CookieSameSite::None) && !cx.navigation {
+            return false;
+        }
+        let name = c.name();
+        if starts_with_ignore_case(name, "__Secure-") && !secure {
+            return false;
+        }
+        if starts_with_ignore_case(name, "__Host-")
+            && !(secure && host_only && c.path() == Some("/"))
+        {
+            return false;
+        }
+        // An insecure origin can't overwrite (or shadow) a `Secure` cookie.
+        if !secure_origin
+            && self.cookies.iter().any(|s| {
+                s.cookie.secure
+                    && s.cookie.name == name
+                    && (domain_matches(&s.cookie.domain, &domain)
+                        || domain_matches(&domain, &s.cookie.domain))
+                    && path_matches(&path, &s.cookie.path)
+            })
+        {
+            return false;
+        }
+        let slot = self.cookies.iter().position(|s| {
+            s.cookie.name == name && s.cookie.domain == domain && s.cookie.path == path
+        });
+        let expires = match c.expiry(now) {
+            Expiry::Expired => {
+                if let Some(i) = slot {
+                    self.cookies.remove(i);
+                }
+                return true;
+            }
+            Expiry::At(at) => Some(at),
+            Expiry::Session => None,
+        };
+        let cookie = JarCookie {
+            name: name.to_owned(),
+            value: c.value().to_owned(),
+            domain,
+            host_only,
+            path,
+            secure,
+            http_only: c.http_only(),
+            same_site,
+            expires,
+        };
+        match slot {
+            Some(i) => self.cookies[i].cookie = cookie,
+            None => {
+                self.next += 1;
+                self.cookies.push(StoredCookie {
+                    cookie,
+                    created: self.next,
+                });
+            }
+        }
+        true
+    }
+
+    /// The unexpired cookies a request in `cx` carries: longest path first,
+    /// then oldest first (RFC 6265 section 5.4).
+    fn matching(&mut self, cx: &Context, scripts: bool) -> Vec<&JarCookie> {
         let now = SystemTime::now();
         self.cookies.retain(|c| !c.expired(now));
         let mut matching: Vec<&StoredCookie> = self
             .cookies
             .iter()
-            .filter(|c| path_matches(request_path, &c.path))
+            .filter(|c| c.sent_with(cx) && !(scripts && c.cookie.http_only))
             .collect();
+        matching.sort_by_key(|c| (std::cmp::Reverse(c.cookie.path.len()), c.created));
+        matching.into_iter().map(|c| &c.cookie).collect()
+    }
+
+    /// Send the matching cookies in a single `Cookie` header after any the
+    /// test set explicitly.
+    fn add_cookie_header(&mut self, cx: &Context, headers: &mut HeaderMap) {
+        let matching = self.matching(cx, false);
         if matching.is_empty() {
             return;
         }
-        matching.sort_by_key(|c| std::cmp::Reverse(c.path.len()));
-
         let explicit: Vec<String> = headers
             .get_all(COOKIE)
             .iter()
@@ -768,6 +1421,25 @@ impl CookieStore {
             headers.insert(COOKIE, value);
         }
     }
+}
+
+fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.as_bytes()[..prefix.len()].eq_ignore_ascii_case(prefix.as_bytes())
+}
+
+/// The origin and path of an absolute URL given to a cookie helper.
+#[track_caller]
+fn page(url: &str) -> (Origin, String) {
+    let uri: http::Uri = url
+        .parse()
+        .unwrap_or_else(|_| panic!("invalid URL: {url:?}"));
+    let origin = Origin::from_uri(&uri)
+        .unwrap_or_else(|| panic!("expected an absolute http(s) URL, got {url:?}"));
+    let path = match uri.path() {
+        "" => "/".to_owned(),
+        p => p.to_owned(),
+    };
+    (origin, path)
 }
 
 /// The directory of the request path (RFC 6265, section 5.1.4).
@@ -908,6 +1580,51 @@ mod tests {
         assert!(!path_matches("/administrator", "/admin"));
         assert!(!path_matches("/", "/admin"));
         assert!(path_matches("/anything", "/"));
+    }
+
+    #[test]
+    fn sites_and_domains() {
+        assert_eq!(registrable_domain("app.example.com"), "example.com");
+        assert_eq!(registrable_domain("example.com"), "example.com");
+        assert_eq!(registrable_domain("a.b.example.co.uk"), "example.co.uk");
+        assert_eq!(registrable_domain("me.github.io"), "me.github.io");
+        assert_eq!(registrable_domain("localhost"), "localhost");
+        assert_eq!(registrable_domain("127.0.0.1"), "127.0.0.1");
+        assert_eq!(registrable_domain("co.uk"), "co.uk");
+
+        assert!(domain_matches("a.example.com", "example.com"));
+        assert!(domain_matches("example.com", "example.com"));
+        assert!(!domain_matches("badexample.com", "example.com"));
+        assert!(!domain_matches("example.com", "a.example.com"));
+        assert!(!domain_matches("1.2.3.4", "2.3.4"));
+
+        let https = |host: &str| Origin {
+            https: true,
+            host: host.into(),
+            port: None,
+        };
+        assert!(https("a.example.com").same_site(&https("b.example.com")));
+        assert!(!https("a.github.io").same_site(&https("b.github.io")));
+        let http = Origin {
+            https: false,
+            ..https("example.com")
+        };
+        assert!(!http.same_site(&https("example.com")), "schemeful");
+        assert!(Origin::localhost().is_secure());
+        assert!(!http.is_secure());
+        let with_port = Origin {
+            port: Some(443),
+            ..https("example.com")
+        };
+        assert!(with_port.same_origin(&https("example.com")));
+        assert_eq!(
+            Origin {
+                port: Some(8443),
+                ..https("::1")
+            }
+            .serialize(),
+            "https://[::1]:8443"
+        );
     }
 
     #[test]
