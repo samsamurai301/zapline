@@ -217,7 +217,7 @@ Two more harnesses live in `bench/`, with their numbers and caveats in the [Perf
 
 ## Project status
 
-zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830 tests, an adversarial security review whose findings were fixed, and a compile-checked guide. [ROADMAP.md](ROADMAP.md) lists deferred items and next steps. Planned next:
+zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830 tests, an adversarial security review whose findings were fixed, and a guide whose cheatsheet chapter is compiled as an example (the other chapters' snippets aren't compiled yet). [ROADMAP.md](ROADMAP.md) lists deferred items and next steps. Planned next:
 
 - [x] WebSockets over HTTP/2 (RFC 8441)
 - [x] HTTP/3 over QUIC (experimental, feature `http3`)

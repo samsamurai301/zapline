@@ -16,7 +16,7 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Observability: tracing, Prometheus metrics, health, OpenTelemetry OTLP traces with W3C `traceparent` propagation (`otlp` feature) | done |
 | Distributed stores: Redis client (`redis` feature, `redis-tls` for `rediss://`), Redis-backed cache, live updates, rate limits and sessions | done |
 | CLI: new, run, generate, add, dev, snap, routes, openapi, client, db, check, test, fuzz, css, explain, mcp, doctor, bench, ship | done |
-| Guide (mdBook, every snippet compile-checked) and examples | done |
+| Guide (mdBook; the cheatsheet chapter includes `examples/examples/cheatsheet.rs`, which CI compiles) and examples | done |
 | Ecosystem examples: sqlx transactions, SeaORM, Diesel, Leptos SSR (`examples/ecosystem`) | done |
 | Security review (5 dimensions) and fixes | done. Findings and fixes are in the git history ("Fix review findings ...") |
 
@@ -25,6 +25,7 @@ Run `./scripts/check.sh` to verify everything locally.
 ## Deferred, with reasons
 
 - **hyper 1.12 + `pipeline_flush`.** Malformed or oversized request heads close the connection without the 400/414/431 response, and buffered responses to earlier pipelined requests are lost with it. zapline can't answer for hyper: only hyper knows what was in its dropped write buffer, so a zapline-written 400 could answer the wrong pipelined request. The cause and a verified two-line fix are in the issue draft in `docs/src/upstream-issues.md`: file it, and re-test on new hyper releases (the canary test `hyper_drops_automatic_error_responses_with_pipeline_flush` fails once it is fixed). Until then `ServerConfig::pipeline_flush = false` works around it.
+- **Compiling the guide's snippets.** Only the cheatsheet chapter is compiled (it includes `examples/examples/cheatsheet.rs`). The other chapters' 200-odd fenced `rust` blocks are fragments without imports, and CI runs `mdbook build` but not `mdbook test`, so an API rename can leave them wrong. Fixing this means a `#[cfg(doctest)]` harness that `include_str!`s each `docs/src/*.md` with all features enabled, plus hidden `# use` lines (or `rust,ignore`) in every block. Until that harness exists, don't claim the compiler checks the guide: a test in `crates/zapline-cli/tests/cli.rs` fails if README.md or ROADMAP.md says so.
 - **OpenAPI:** credential schemes are matched by kind only. A custom `ApiKeyConfig` header name isn't visible at build time, so declare `api_key_auth(name, header)` explicitly.
 
 ## Next milestones

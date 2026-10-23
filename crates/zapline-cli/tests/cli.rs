@@ -156,6 +156,36 @@ fn readme_planned_next_leaves_no_shipped_item_unchecked() {
     }
 }
 
+/// Claiming a compile-checked guide needs a doctest harness that includes the
+/// guide's pages; until one exists, README and ROADMAP must not claim it.
+#[test]
+fn guide_is_not_called_compile_checked_without_a_harness() {
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("../zapline/src");
+    fn has_harness(dir: &Path) -> bool {
+        fs::read_dir(dir).unwrap().flatten().any(|e| {
+            let p = e.path();
+            if p.is_dir() {
+                has_harness(&p)
+            } else {
+                fs::read_to_string(&p)
+                    .is_ok_and(|s| s.contains("cfg(doctest)") && s.contains("docs/src/"))
+            }
+        })
+    }
+    if has_harness(&src) {
+        return;
+    }
+    for name in ["README.md", "ROADMAP.md"] {
+        let text = repo_file(name).to_lowercase();
+        for claim in ["compile-checked", "compile checked"] {
+            assert!(
+                !text.contains(claim),
+                "{name} calls the guide {claim}, but no #[cfg(doctest)] harness compiles docs/src"
+            );
+        }
+    }
+}
+
 #[test]
 fn subcommand_help_explains_templates_and_markers() {
     let tmp = tempfile::tempdir().unwrap();
