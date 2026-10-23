@@ -770,7 +770,9 @@ impl<DB: JobBackend> Jobs<DB> {
             soonest = soonest.min(next);
         }
         let wait = soonest.saturating_sub(now_ms()).max(0);
-        Ok(Duration::from_millis(u64::try_from(wait).unwrap_or(u64::MAX)))
+        Ok(Duration::from_millis(
+            u64::try_from(wait).unwrap_or(u64::MAX),
+        ))
     }
 
     /// The cron scheduler: enqueue cron jobs at their ticks until
@@ -910,8 +912,11 @@ pub trait JobBackend: sqlx::Database + sealed::Sealed {
     #[doc(hidden)]
     fn cron_rows(pool: &Pool<Self>) -> impl Future<Output = Result<Vec<(String, i64)>>> + Send;
     #[doc(hidden)]
-    fn cron_init(pool: &Pool<Self>, key: &str, next_at: i64)
-        -> impl Future<Output = Result<()>> + Send;
+    fn cron_init(
+        pool: &Pool<Self>,
+        key: &str,
+        next_at: i64,
+    ) -> impl Future<Output = Result<()>> + Send;
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
     fn cron_fire(

@@ -35,6 +35,11 @@
 //! no route (404/405 from the router or fallback) are counted with
 //! `route="unmatched"`. Non-standard methods are reported as `_OTHER` unless
 //! the route was registered with that method.
+//!
+//! [Durable jobs](crate::jobs#metrics) (`jobs_*{job}`) and
+//! [scheduled tasks](crate::App::schedule) (`scheduled_task_*{task}`) add
+//! their own series to the plugin's registry when the app has them; without
+//! the plugin they record nothing.
 
 mod process;
 mod registry;

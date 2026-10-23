@@ -196,6 +196,8 @@ process_resident_memory_bytes 7487488
 | `http_requests_in_flight` | gauge | |
 | `process_start_time_seconds` | gauge | |
 | `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_virtual_memory_bytes`, `process_open_fds`, `process_max_fds` | | Linux only. Read from `/proc` at scrape time, so they cost nothing between scrapes. |
+| `jobs_enqueued_total`, `jobs_started_total`, `jobs_succeeded_total`, `jobs_failed_total`, `jobs_retried_total`, `jobs_dead_total`, `jobs_duration_seconds` | counters, histogram | `job`. Only when the app has [durable jobs](jobs.md#metrics). |
+| `scheduled_task_runs_total`, `scheduled_task_duration_seconds` | counter, histogram | `task` (and `outcome`). Only when the app has [scheduled tasks](tasks.md#scheduled-jobs). |
 
 `route` is always the route **template** (`/users/{id}`), never the raw path, so cardinality is bounded by your route table. Requests that match no route are counted with `route="unmatched"`, and non-standard methods are reported as `_OTHER`.
 

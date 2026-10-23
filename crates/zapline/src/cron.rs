@@ -264,7 +264,9 @@ impl Tz {
                 i64::from(*off)
             }
             #[cfg(feature = "tz")]
-            TzKind::Named(tz, _) => jiff_ts(t).map_or(0, |ts| i64::from(tz.to_offset(ts).seconds())),
+            TzKind::Named(tz, _) => {
+                jiff_ts(t).map_or(0, |ts| i64::from(tz.to_offset(ts).seconds()))
+            }
         }
     }
 
@@ -516,11 +518,7 @@ const DOW: Field = Field {
 
 impl Field {
     fn value(&self, s: &str) -> Result<u32, String> {
-        if let Some(i) = self
-            .names
-            .iter()
-            .position(|n| n.eq_ignore_ascii_case(s))
-        {
+        if let Some(i) = self.names.iter().position(|n| n.eq_ignore_ascii_case(s)) {
             return Ok(self.lo + i as u32);
         }
         let v: u32 = s.parse().map_err(|_| {
@@ -807,7 +805,11 @@ impl Cron {
         let t = after.checked_add(1)?;
         let (mut y, mut mo, mut d) = civil_from_days(t.div_euclid(DAY));
         let sod = t.rem_euclid(DAY);
-        let (mut h, mut mi, mut s) = ((sod / 3600) as u32, (sod / 60 % 60) as u32, (sod % 60) as u32);
+        let (mut h, mut mi, mut s) = (
+            (sod / 3600) as u32,
+            (sod / 60 % 60) as u32,
+            (sod % 60) as u32,
+        );
         let last_year = y + 400;
         // Move to the start of the next day.
         macro_rules! next_day {
@@ -903,9 +905,7 @@ fn split_tz(s: &str) -> Result<(Tz, &str), CronError> {
     for prefix in ["CRON_TZ=", "TZ="] {
         if s.len() >= prefix.len() && s[..prefix.len()].eq_ignore_ascii_case(prefix) {
             let rest = &s[prefix.len()..];
-            let (zone, body) = rest
-                .split_once(char::is_whitespace)
-                .unwrap_or((rest, ""));
+            let (zone, body) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
             return Ok((Tz::parse(zone)?, body.trim_start()));
         }
     }
@@ -1001,10 +1001,10 @@ impl DaySpec {
                 continue;
             }
             let target = match weekday(y, m, n) {
-                6 if n == 1 => 3,   // Saturday the 1st: Monday the 3rd
-                6 => n - 1,         // Saturday: Friday
+                6 if n == 1 => 3,       // Saturday the 1st: Monday the 3rd
+                6 => n - 1,             // Saturday: Friday
                 0 if n == dim => n - 2, // Sunday the last: Friday
-                0 => n + 1,         // Sunday: Monday
+                0 => n + 1,             // Sunday: Monday
                 _ => n,
             };
             if target == d {
@@ -1150,16 +1150,41 @@ mod tests {
 
     #[test]
     fn five_and_six_fields() {
-        assert_eq!(next("* * * * *", "2024-01-01 00:00:00"), "2024-01-01 00:01:00");
-        assert_eq!(next("* * * * *", "2024-01-01 00:00:59"), "2024-01-01 00:01:00");
-        assert_eq!(next("* * * * * *", "2024-01-01 00:00:00"), "2024-01-01 00:00:01");
-        assert_eq!(next("30 * * * * *", "2024-01-01 00:00:30"), "2024-01-01 00:01:30");
-        assert_eq!(next("0 0 * * *", "2024-01-01 00:00:00"), "2024-01-02 00:00:00");
-        assert_eq!(next("15 10 * * *", "2024-01-01 10:14:59"), "2024-01-01 10:15:00");
-        assert_eq!(next("15 10 * * *", "2024-01-01 10:15:00"), "2024-01-02 10:15:00");
+        assert_eq!(
+            next("* * * * *", "2024-01-01 00:00:00"),
+            "2024-01-01 00:01:00"
+        );
+        assert_eq!(
+            next("* * * * *", "2024-01-01 00:00:59"),
+            "2024-01-01 00:01:00"
+        );
+        assert_eq!(
+            next("* * * * * *", "2024-01-01 00:00:00"),
+            "2024-01-01 00:00:01"
+        );
+        assert_eq!(
+            next("30 * * * * *", "2024-01-01 00:00:30"),
+            "2024-01-01 00:01:30"
+        );
+        assert_eq!(
+            next("0 0 * * *", "2024-01-01 00:00:00"),
+            "2024-01-02 00:00:00"
+        );
+        assert_eq!(
+            next("15 10 * * *", "2024-01-01 10:14:59"),
+            "2024-01-01 10:15:00"
+        );
+        assert_eq!(
+            next("15 10 * * *", "2024-01-01 10:15:00"),
+            "2024-01-02 10:15:00"
+        );
         assert_eq!(
             runs("*/20 * * * * *", "2024-01-01 23:59:30", 3),
-            ["2024-01-01 23:59:40", "2024-01-02 00:00:00", "2024-01-02 00:00:20"]
+            [
+                "2024-01-01 23:59:40",
+                "2024-01-02 00:00:00",
+                "2024-01-02 00:00:20"
+            ]
         );
     }
 
@@ -1176,7 +1201,11 @@ mod tests {
         );
         assert_eq!(
             runs("*/15 * * * *", "2024-01-01 00:50:00", 3),
-            ["2024-01-01 01:00:00", "2024-01-01 01:15:00", "2024-01-01 01:30:00"]
+            [
+                "2024-01-01 01:00:00",
+                "2024-01-01 01:15:00",
+                "2024-01-01 01:30:00"
+            ]
         );
         assert_eq!(
             runs("10-50/20 * * * *", "2024-01-01 00:00:00", 4),
@@ -1189,7 +1218,11 @@ mod tests {
         );
         assert_eq!(
             runs("5/25 * * * *", "2024-01-01 00:00:00", 3),
-            ["2024-01-01 00:05:00", "2024-01-01 00:30:00", "2024-01-01 00:55:00"]
+            [
+                "2024-01-01 00:05:00",
+                "2024-01-01 00:30:00",
+                "2024-01-01 00:55:00"
+            ]
         );
         assert_eq!(
             runs("0 0,12 1,15 * *", "2024-01-01 00:00:00", 4),
@@ -1225,11 +1258,26 @@ mod tests {
     #[test]
     fn names_and_weekdays() {
         // 2024-01-01 is a Monday.
-        assert_eq!(next("0 9 * * MON-FRI", "2024-01-05 12:00:00"), "2024-01-08 09:00:00");
-        assert_eq!(next("0 9 * * sat,sun", "2024-01-01 00:00:00"), "2024-01-06 09:00:00");
-        assert_eq!(next("0 9 * * 0", "2024-01-01 00:00:00"), "2024-01-07 09:00:00");
-        assert_eq!(next("0 9 * * 7", "2024-01-01 00:00:00"), "2024-01-07 09:00:00");
-        assert_eq!(next("0 9 * * 5-7", "2024-01-01 00:00:00"), "2024-01-05 09:00:00");
+        assert_eq!(
+            next("0 9 * * MON-FRI", "2024-01-05 12:00:00"),
+            "2024-01-08 09:00:00"
+        );
+        assert_eq!(
+            next("0 9 * * sat,sun", "2024-01-01 00:00:00"),
+            "2024-01-06 09:00:00"
+        );
+        assert_eq!(
+            next("0 9 * * 0", "2024-01-01 00:00:00"),
+            "2024-01-07 09:00:00"
+        );
+        assert_eq!(
+            next("0 9 * * 7", "2024-01-01 00:00:00"),
+            "2024-01-07 09:00:00"
+        );
+        assert_eq!(
+            next("0 9 * * 5-7", "2024-01-01 00:00:00"),
+            "2024-01-05 09:00:00"
+        );
         assert_eq!(
             runs("0 9 * * FRI-MON", "2024-01-02 00:00:00", 4),
             [
@@ -1239,13 +1287,26 @@ mod tests {
                 "2024-01-08 09:00:00"
             ]
         );
-        assert_eq!(next("0 0 1 JAN,jul *", "2024-02-01 00:00:00"), "2024-07-01 00:00:00");
-        assert_eq!(next("0 0 1 NOV-FEB *", "2024-03-01 00:00:00"), "2024-11-01 00:00:00");
+        assert_eq!(
+            next("0 0 1 JAN,jul *", "2024-02-01 00:00:00"),
+            "2024-07-01 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 1 NOV-FEB *", "2024-03-01 00:00:00"),
+            "2024-11-01 00:00:00"
+        );
         assert_eq!(
             runs("0 0 1 NOV-FEB *", "2024-12-15 00:00:00", 3),
-            ["2025-01-01 00:00:00", "2025-02-01 00:00:00", "2025-11-01 00:00:00"]
+            [
+                "2025-01-01 00:00:00",
+                "2025-02-01 00:00:00",
+                "2025-11-01 00:00:00"
+            ]
         );
-        assert_eq!(next("0 0 * * MON/2", "2024-01-01 00:00:00"), "2024-01-03 00:00:00");
+        assert_eq!(
+            next("0 0 * * MON/2", "2024-01-01 00:00:00"),
+            "2024-01-03 00:00:00"
+        );
     }
 
     #[test]
@@ -1261,9 +1322,18 @@ mod tests {
             ]
         );
         // A `*`-prefixed field means both must match.
-        assert_eq!(next("0 0 */2 * MON", "2024-01-01 00:00:00"), "2024-01-15 00:00:00");
-        assert_eq!(next("0 0 ? * MON", "2024-01-01 00:00:00"), "2024-01-08 00:00:00");
-        assert_eq!(next("0 0 13 * ?", "2024-01-01 00:00:00"), "2024-01-13 00:00:00");
+        assert_eq!(
+            next("0 0 */2 * MON", "2024-01-01 00:00:00"),
+            "2024-01-15 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 ? * MON", "2024-01-01 00:00:00"),
+            "2024-01-08 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 13 * ?", "2024-01-01 00:00:00"),
+            "2024-01-13 00:00:00"
+        );
     }
 
     #[test]
@@ -1290,32 +1360,78 @@ mod tests {
                 "2024-04-30 00:00:00"
             ]
         );
-        assert_eq!(next("0 0 L * *", "2023-02-01 00:00:00"), "2023-02-28 00:00:00");
-        assert_eq!(next("0 0 L-1 * *", "2023-02-01 00:00:00"), "2023-02-27 00:00:00");
-        assert_eq!(next("0 0 L-2 2 *", "2024-01-01 00:00:00"), "2024-02-27 00:00:00");
-        assert_eq!(next("0 0 1,L * *", "2024-01-01 00:00:00"), "2024-01-31 00:00:00");
+        assert_eq!(
+            next("0 0 L * *", "2023-02-01 00:00:00"),
+            "2023-02-28 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 L-1 * *", "2023-02-01 00:00:00"),
+            "2023-02-27 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 L-2 2 *", "2024-01-01 00:00:00"),
+            "2024-02-27 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 1,L * *", "2024-01-01 00:00:00"),
+            "2024-01-31 00:00:00"
+        );
         // Last weekday: 2024-03-31 is a Sunday, 2024-08-31 a Saturday.
-        assert_eq!(next("0 0 LW * *", "2024-03-01 00:00:00"), "2024-03-29 00:00:00");
-        assert_eq!(next("0 0 LW * *", "2024-08-01 00:00:00"), "2024-08-30 00:00:00");
-        assert_eq!(next("0 0 LW * *", "2024-07-01 00:00:00"), "2024-07-31 00:00:00");
+        assert_eq!(
+            next("0 0 LW * *", "2024-03-01 00:00:00"),
+            "2024-03-29 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 LW * *", "2024-08-01 00:00:00"),
+            "2024-08-30 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 LW * *", "2024-07-01 00:00:00"),
+            "2024-07-31 00:00:00"
+        );
         // Year rollover.
-        assert_eq!(next("59 23 31 12 *", "2024-06-01 00:00:00"), "2024-12-31 23:59:00");
-        assert_eq!(next("0 0 1 1 *", "2024-12-31 23:59:59"), "2025-01-01 00:00:00");
-        assert_eq!(next("* * * * * *", "2024-12-31 23:59:59"), "2025-01-01 00:00:00");
+        assert_eq!(
+            next("59 23 31 12 *", "2024-06-01 00:00:00"),
+            "2024-12-31 23:59:00"
+        );
+        assert_eq!(
+            next("0 0 1 1 *", "2024-12-31 23:59:59"),
+            "2025-01-01 00:00:00"
+        );
+        assert_eq!(
+            next("* * * * * *", "2024-12-31 23:59:59"),
+            "2025-01-01 00:00:00"
+        );
     }
 
     #[test]
     fn leap_years() {
         assert_eq!(
             runs("0 0 29 2 *", "2023-01-01 00:00:00", 3),
-            ["2024-02-29 00:00:00", "2028-02-29 00:00:00", "2032-02-29 00:00:00"]
+            [
+                "2024-02-29 00:00:00",
+                "2028-02-29 00:00:00",
+                "2032-02-29 00:00:00"
+            ]
         );
         // 2100 is not a leap year; 2000 was.
-        assert_eq!(next("0 0 29 2 *", "2096-03-01 00:00:00"), "2104-02-29 00:00:00");
-        assert_eq!(next("0 0 29 2 *", "1999-01-01 00:00:00"), "2000-02-29 00:00:00");
+        assert_eq!(
+            next("0 0 29 2 *", "2096-03-01 00:00:00"),
+            "2104-02-29 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 29 2 *", "1999-01-01 00:00:00"),
+            "2000-02-29 00:00:00"
+        );
         // A fifth Monday in February: only when the 29th is a Monday.
-        assert_eq!(next("0 0 * 2 MON#5", "2024-03-01 00:00:00"), "2044-02-29 00:00:00");
-        assert_eq!(next("0 0 L 2 *", "2100-01-01 00:00:00"), "2100-02-28 00:00:00");
+        assert_eq!(
+            next("0 0 * 2 MON#5", "2024-03-01 00:00:00"),
+            "2044-02-29 00:00:00"
+        );
+        assert_eq!(
+            next("0 0 L 2 *", "2100-01-01 00:00:00"),
+            "2100-02-28 00:00:00"
+        );
     }
 
     #[test]
@@ -1325,13 +1441,23 @@ mod tests {
             runs("0 9 * * FRI#2", "2024-01-01 00:00:00", 2),
             ["2024-01-12 09:00:00", "2024-02-09 09:00:00"]
         );
-        assert_eq!(next("0 9 * * 1#1", "2024-01-02 00:00:00"), "2024-02-05 09:00:00");
+        assert_eq!(
+            next("0 9 * * 1#1", "2024-01-02 00:00:00"),
+            "2024-02-05 09:00:00"
+        );
         // Last Friday: 2024-01-26, 2024-02-23, 2024-03-29.
         assert_eq!(
             runs("0 0 * * 5L", "2024-01-01 00:00:00", 3),
-            ["2024-01-26 00:00:00", "2024-02-23 00:00:00", "2024-03-29 00:00:00"]
+            [
+                "2024-01-26 00:00:00",
+                "2024-02-23 00:00:00",
+                "2024-03-29 00:00:00"
+            ]
         );
-        assert_eq!(next("0 0 * * SUNL", "2024-03-01 00:00:00"), "2024-03-31 00:00:00");
+        assert_eq!(
+            next("0 0 * * SUNL", "2024-03-01 00:00:00"),
+            "2024-03-31 00:00:00"
+        );
         // Fifth Monday only in months that have one: 2024-01-29, 2024-04-29.
         assert_eq!(
             runs("0 0 * * MON#5", "2024-01-01 00:00:00", 2),
@@ -1342,17 +1468,35 @@ mod tests {
     #[test]
     fn nearest_weekday() {
         // 2024-06-15 is a Saturday: Friday the 14th.
-        assert_eq!(next("0 0 15W * *", "2024-06-01 00:00:00"), "2024-06-14 00:00:00");
+        assert_eq!(
+            next("0 0 15W * *", "2024-06-01 00:00:00"),
+            "2024-06-14 00:00:00"
+        );
         // 2024-09-15 is a Sunday: Monday the 16th.
-        assert_eq!(next("0 0 15W * *", "2024-09-01 00:00:00"), "2024-09-16 00:00:00");
+        assert_eq!(
+            next("0 0 15W * *", "2024-09-01 00:00:00"),
+            "2024-09-16 00:00:00"
+        );
         // 2024-06-01 is a Saturday: not May 31st but Monday June 3rd.
-        assert_eq!(next("0 0 1W * *", "2024-05-02 00:00:00"), "2024-06-03 00:00:00");
+        assert_eq!(
+            next("0 0 1W * *", "2024-05-02 00:00:00"),
+            "2024-06-03 00:00:00"
+        );
         // 2024-03-31 is a Sunday: Friday the 29th, not April 1st.
-        assert_eq!(next("0 0 31W * *", "2024-03-01 00:00:00"), "2024-03-29 00:00:00");
+        assert_eq!(
+            next("0 0 31W * *", "2024-03-01 00:00:00"),
+            "2024-03-29 00:00:00"
+        );
         // 31W skips months without a 31st.
-        assert_eq!(next("0 0 31W * *", "2024-04-01 00:00:00"), "2024-05-31 00:00:00");
+        assert_eq!(
+            next("0 0 31W * *", "2024-04-01 00:00:00"),
+            "2024-05-31 00:00:00"
+        );
         // A weekday stays put.
-        assert_eq!(next("0 0 10W * *", "2024-01-01 00:00:00"), "2024-01-10 00:00:00");
+        assert_eq!(
+            next("0 0 10W * *", "2024-01-01 00:00:00"),
+            "2024-01-10 00:00:00"
+        );
     }
 
     #[test]
@@ -1371,17 +1515,35 @@ mod tests {
     #[test]
     fn fixed_offsets() {
         // 09:00 at UTC+02:00 is 07:00 UTC.
-        assert_eq!(next("CRON_TZ=+02:00 0 9 * * *", "2024-01-01 08:00:00"), "2024-01-02 07:00:00");
-        assert_eq!(next("TZ=UTC+2 0 9 * * *", "2024-01-01 06:00:00"), "2024-01-01 07:00:00");
+        assert_eq!(
+            next("CRON_TZ=+02:00 0 9 * * *", "2024-01-01 08:00:00"),
+            "2024-01-02 07:00:00"
+        );
+        assert_eq!(
+            next("TZ=UTC+2 0 9 * * *", "2024-01-01 06:00:00"),
+            "2024-01-01 07:00:00"
+        );
         // 23:30 at UTC-05:00 is 04:30 UTC the next day.
-        assert_eq!(next("CRON_TZ=-05:00 30 23 * * *", "2024-01-01 00:00:00"), "2024-01-01 04:30:00");
+        assert_eq!(
+            next("CRON_TZ=-05:00 30 23 * * *", "2024-01-01 00:00:00"),
+            "2024-01-01 04:30:00"
+        );
         // The day of week is the local one: Monday 01:00 at +05:30 is Sunday 19:30 UTC.
-        assert_eq!(next("CRON_TZ=+0530 0 1 * * MON", "2024-01-01 00:00:00"), "2024-01-07 19:30:00");
-        assert_eq!(next("cron_tz=utc @daily", "2024-01-01 00:00:00"), "2024-01-02 00:00:00");
+        assert_eq!(
+            next("CRON_TZ=+0530 0 1 * * MON", "2024-01-01 00:00:00"),
+            "2024-01-07 19:30:00"
+        );
+        assert_eq!(
+            next("cron_tz=utc @daily", "2024-01-01 00:00:00"),
+            "2024-01-02 00:00:00"
+        );
         let cron = Cron::parse("CRON_TZ=-08:00  0  9 * * *").unwrap();
         assert_eq!(cron.to_string(), "CRON_TZ=-08:00 0 9 * * *");
         assert_eq!(Cron::parse(&cron.to_string()).unwrap(), cron);
-        assert_eq!(Cron::parse("CRON_TZ=UTC 0 9 * * *").unwrap().to_string(), "0 9 * * *");
+        assert_eq!(
+            Cron::parse("CRON_TZ=UTC 0 9 * * *").unwrap().to_string(),
+            "0 9 * * *"
+        );
     }
 
     #[test]
@@ -1410,9 +1572,15 @@ mod tests {
         assert_eq!(reason("* * 0 * *"), "day of month `0` is out of range 1-31");
         assert_eq!(reason("* * * 13 *"), "month `13` is out of range 1-12");
         assert_eq!(reason("* * * * 8"), "day of week `8` is out of range 0-7");
-        assert_eq!(reason("* * * FOO *"), "month `FOO` is not a number or a name (JAN-DEC)");
+        assert_eq!(
+            reason("* * * FOO *"),
+            "month `FOO` is not a number or a name (JAN-DEC)"
+        );
         assert_eq!(reason("x * * * *"), "minute `x` is not a number");
-        assert_eq!(reason("*/0 * * * *"), "step `0` in the minute field must be a number from 1 to 60");
+        assert_eq!(
+            reason("*/0 * * * *"),
+            "step `0` in the minute field must be a number from 1 to 60"
+        );
         assert_eq!(reason("1,,2 * * * *"), "empty item in the minute field");
         assert!(reason("* * * *").starts_with("expected 5 fields"));
         assert!(reason("* * * * * * *").starts_with("expected 5 fields"));
@@ -1429,7 +1597,10 @@ mod tests {
         #[cfg(feature = "tz")]
         assert!(reason("CRON_TZ=Mars/Olympus * * * * *").contains("unknown time zone"));
         let full = Cron::parse("0 25 * * *").unwrap_err().to_string();
-        assert_eq!(full, "invalid cron expression `0 25 * * *`: hour `25` is out of range 0-23");
+        assert_eq!(
+            full,
+            "invalid cron expression `0 25 * * *`: hour `25` is out of range 0-23"
+        );
     }
 
     #[test]
@@ -1490,8 +1661,14 @@ mod tests {
         assert_eq!(cron.next_after(before_epoch), Some(UNIX_EPOCH));
         let t = UNIX_EPOCH + Duration::from_millis(500);
         let every_second = Cron::parse("* * * * * *").unwrap();
-        assert_eq!(every_second.next_after(t), Some(UNIX_EPOCH + Duration::from_secs(1)));
-        assert_eq!(every_second.next_after(UNIX_EPOCH), Some(UNIX_EPOCH + Duration::from_secs(1)));
+        assert_eq!(
+            every_second.next_after(t),
+            Some(UNIX_EPOCH + Duration::from_secs(1))
+        );
+        assert_eq!(
+            every_second.next_after(UNIX_EPOCH),
+            Some(UNIX_EPOCH + Duration::from_secs(1))
+        );
         let upcoming: Vec<_> = every_second.upcoming(UNIX_EPOCH).take(3).collect();
         assert_eq!(upcoming.len(), 3);
         assert_eq!(upcoming[2], UNIX_EPOCH + Duration::from_secs(3));
@@ -1526,7 +1703,11 @@ mod tests {
         fn spring_forward_runs_skipped_times_at_the_jump() {
             // New York, 2024-03-10: 02:00 EST jumps to 03:00 EDT (07:00 UTC).
             assert_eq!(
-                zrun("CRON_TZ=America/New_York 30 2 * * *", "2024-03-09 12:00:00", 3),
+                zrun(
+                    "CRON_TZ=America/New_York 30 2 * * *",
+                    "2024-03-09 12:00:00",
+                    3
+                ),
                 [
                     "2024-03-10 07:00:00", // 02:30 doesn't exist: at the jump
                     "2024-03-11 06:30:00", // 02:30 EDT
@@ -1535,7 +1716,11 @@ mod tests {
             );
             // Every 15 minutes: the skipped hour fires once, at the jump.
             assert_eq!(
-                zrun("CRON_TZ=America/New_York */15 * * * *", "2024-03-10 06:40:00", 4),
+                zrun(
+                    "CRON_TZ=America/New_York */15 * * * *",
+                    "2024-03-10 06:40:00",
+                    4
+                ),
                 [
                     "2024-03-10 06:45:00", // 01:45 EST
                     "2024-03-10 07:00:00", // 03:00 EDT
@@ -1550,17 +1735,29 @@ mod tests {
             // New York, 2024-11-03: 02:00 EDT goes back to 01:00 EST (06:00 UTC).
             // 01:30 happens at 05:30 UTC (EDT) and 06:30 UTC (EST).
             assert_eq!(
-                zrun("CRON_TZ=America/New_York 30 1 * * *", "2024-11-02 12:00:00", 2),
+                zrun(
+                    "CRON_TZ=America/New_York 30 1 * * *",
+                    "2024-11-02 12:00:00",
+                    2
+                ),
                 ["2024-11-03 05:30:00", "2024-11-04 06:30:00"]
             );
             // Started during the second pass: still not repeated.
             assert_eq!(
-                zrun("CRON_TZ=America/New_York 30 1 * * *", "2024-11-03 06:10:00", 1),
+                zrun(
+                    "CRON_TZ=America/New_York 30 1 * * *",
+                    "2024-11-03 06:10:00",
+                    1
+                ),
                 ["2024-11-04 06:30:00"]
             );
             // Hour `*`: keeps running every 30 minutes through both passes.
             assert_eq!(
-                zrun("CRON_TZ=America/New_York */30 * * * *", "2024-11-03 05:00:00", 5),
+                zrun(
+                    "CRON_TZ=America/New_York */30 * * * *",
+                    "2024-11-03 05:00:00",
+                    5
+                ),
                 [
                     "2024-11-03 05:30:00", // 01:30 EDT
                     "2024-11-03 06:00:00", // 01:00 EST
@@ -1574,7 +1771,9 @@ mod tests {
         #[test]
         fn display_and_with_timezone() {
             let paris = Tz::parse("Europe/Paris").unwrap();
-            let cron = Cron::parse("0 9 * * *").unwrap().with_timezone(paris.clone());
+            let cron = Cron::parse("0 9 * * *")
+                .unwrap()
+                .with_timezone(paris.clone());
             assert_eq!(cron.to_string(), "CRON_TZ=Europe/Paris 0 9 * * *");
             assert_eq!(*cron.timezone(), paris);
             assert_eq!(Cron::parse(&cron.to_string()).unwrap(), cron);

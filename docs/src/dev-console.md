@@ -22,7 +22,8 @@ Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `
 |---|---|
 | Recent requests | The last 50 requests: status (4xx and 5xx highlighted), method, path with query, and how long the app took. |
 | Routes | Every route with its summary and tags (from doc comments and `#[get(.., tag = "..")]`). Parameterless `GET` routes are links. |
-| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. |
+| Jobs | When [durable jobs](jobs.md) are registered: queued, running and failed counts, the registered job names, the latest failures with their errors, and a **Retry failed jobs** button. With the [metrics plugin](observability.md#metrics), per-job enqueued, succeeded, failed, retried and dead counts and the average run time; with [cron jobs](jobs.md#cron-jobs), each one's schedule and next enqueue. |
+| Scheduled tasks | When the app has [`App::schedule`](tasks.md#scheduled-jobs) jobs: each one's name, schedule (`every 5m`, `cron 0 3 * * *`), next run, run and failure counts, and how the last run went. |
 | Mail | When the [mailer](mail.md) is the dev outbox: how many emails were kept, with a link to the inbox at `/_dev/mail`. |
 
 ## Safe to leave in

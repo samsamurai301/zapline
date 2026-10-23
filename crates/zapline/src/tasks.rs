@@ -926,7 +926,11 @@ fn render_schedules(list: &[Arc<ScheduleState>]) -> String {
             None => "not started".to_owned(),
         };
         let last = st.last.map_or_else(String::new, |(at, took, outcome)| {
-            let class = if outcome == Outcome::Ok { "" } else { " class=s5" };
+            let class = if outcome == Outcome::Ok {
+                ""
+            } else {
+                " class=s5"
+            };
             format!(
                 "<span{class}>{}</span>, {}, took {took:.1?}",
                 outcome.as_str(),
