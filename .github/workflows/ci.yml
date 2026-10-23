@@ -169,6 +169,22 @@ jobs:
           name: token-bench-results
           path: bench/tokens/results.md
 
+  # The TechEmpower implementation must keep passing TFB's own checks
+  # (headers, bodies, fortunes, query counts via pg_stat_statements).
+  tfb:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench/tfb
+      - run: sudo apt-get update && sudo apt-get install -y wrk
+      - run: (cd bench/tfb && cargo clippy --all-targets -- -D warnings && cargo test -q)
+      - run: VERIFY_ONLY=1 ./bench/tfb/run.sh
+
   # Smoke-run the benchmark harness (shared runners are noisy: not results).
   bench:
     runs-on: ubuntu-latest
