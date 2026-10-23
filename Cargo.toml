@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-cli", "examples", "bench/servers"]
+members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-codegen", "crates/zapline-cli", "examples", "bench/servers"]
 
 [workspace.package]
 version = "0.1.0"

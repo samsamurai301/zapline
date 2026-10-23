@@ -4026,6 +4026,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "validator",
+ "zapline-codegen",
  "zapline-macros",
 ]
 
@@ -4043,6 +4044,14 @@ dependencies = [
  "signal-hook",
  "tempfile",
  "toml",
+ "zapline-codegen",
+]
+
+[[package]]
+name = "zapline-codegen"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]

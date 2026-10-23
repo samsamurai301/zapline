@@ -22,7 +22,7 @@ macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
 query = ["dep:serde_urlencoded"]
 form = ["dep:serde_urlencoded"]
-openapi = ["json", "dep:schemars", "zapline-macros?/openapi"]
+openapi = ["json", "dep:schemars", "dep:zapline-codegen", "zapline-macros?/openapi"]
 validate = ["json", "dep:validator", "zapline-macros?/validate"]
 config = ["dep:toml"]
 i18n = ["dep:toml"]
@@ -51,6 +51,7 @@ _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", 
 
 [dependencies]
 zapline-macros = { path = "../zapline-macros", version = "0.1.0", optional = true }
+zapline-codegen = { path = "../zapline-codegen", version = "0.1.0", optional = true }
 
 # core (always on)
 bytes = "1.9"

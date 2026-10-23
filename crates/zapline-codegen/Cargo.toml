@@ -1,0 +1,18 @@
+[package]
+name = "zapline-codegen"
+description = "Typed TypeScript and JavaScript clients from zapline's OpenAPI documents"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+rust-version.workspace = true
+documentation = "https://docs.rs/zapline-codegen"
+readme = "README.md"
+keywords = ["openapi", "typescript", "codegen", "client", "zapline"]
+categories = ["development-tools", "web-programming"]
+
+# Pure functions from an OpenAPI document (JSON) to source text, shared by
+# the framework (`OpenApi::client_js`) and the CLI (`zapline client`).
+[dependencies]
+serde_json = "1"

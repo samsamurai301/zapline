@@ -446,6 +446,8 @@ fn path_parameters_are_typed() {
     let rest = param(op(&spec, "/files/{rest}", "get"), "rest");
     assert_eq!(rest["schema"], json!({ "type": "string" }));
     assert_eq!(rest["required"], true);
+    // Clients keep the slashes of a catch-all.
+    assert_eq!(rest["x-zapline-catch-all"], true);
 
     // Params from the nest prefix are documented too.
     let v2 = op(&spec, "/v2/users/{id}", "get");
@@ -654,7 +656,11 @@ fn component_schemas_are_shared_and_resolvable() {
             .unwrap_or_else(|| panic!("unexpected ref {r}"));
         assert!(schemas.contains_key(name), "dangling ref {r}");
     }
-    assert!(!spec.to_string().contains("x-zapline"));
+    // (`x-zapline-catch-all` on `{*rest}` parameters is documented output.)
+    assert!(!spec
+        .to_string()
+        .replace("\"x-zapline-catch-all\"", "")
+        .contains("x-zapline"));
     assert!(spec["components"].get("x-zapline-input").is_none());
 }
 
