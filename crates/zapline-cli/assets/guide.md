@@ -340,6 +340,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
+| Form errors + flash | `ValidForm(form): ValidForm<T>`; `Err(invalid) => return views.render_invalid("new.html", context!{}, invalid)` (422, `{{ errors.title }}`, `{{ old.title }}`, htmx-aware); `flash: Flash`, `flash.success("Saved"); Ok(flash.redirect("/posts"))`, `{% for m in flash %}` in templates ([Views](views.md#forms-errors-next-to-each-field)) |
 
 
 ---
@@ -1711,6 +1712,26 @@ async fn save(Json(body): Json<Link>) -> Result<String> {
 
 `zapline::validate::field_errors(&errors)` returns the flattened, sorted `Vec<FieldError>` if you want to build your own response.
 
+## HTML forms
+
+A JSON 422 is right for an API client, but a browser that posts a form needs the form back, with a message next to each field. For pages, take `ValidForm<T>` (feature `views`) instead of `Valid<Form<T>>`: it runs the same rules but hands the outcome to the handler as a `Result`, and `views.render_invalid` re-renders the form as a 422 with `{{ errors.field }}` and `{{ old.field }}`:
+
+```rust,ignore
+use zapline::view::{context, ValidForm, Views};
+
+#[post("/signup")]
+async fn signup(views: Views, ValidForm(form): ValidForm<SignUp>) -> Result<Response> {
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("signup.html", context! {}, invalid),
+    };
+    // ...
+    Ok(Redirect::to("/").into_response())
+}
+```
+
+The messages are the ones listed above; fields that don't parse at all get "must be a number" or "is required". Struct-level (`schema`) errors appear as `{{ errors._form }}`. `FormErrors::from(&validation_errors)` and `FormErrors::from_error(&err)` convert by hand. See [Views: Forms](views.md#forms-errors-next-to-each-field).
+
 ## OpenAPI
 
 `Valid<Json<T>>` documents the request body exactly like `Json<T>` and adds a `422 Validation Error` response. The `#[validate(..)]` rules are visible to `#[derive(JsonSchema)]`, so `length`, `range` and `email` also appear in the schema as `minLength`, `maximum`, `format: email` and so on. See [OpenAPI & interactive docs](openapi.md).
@@ -2794,11 +2815,119 @@ fn main() -> std::io::Result<()> {
 | `views.render(name, ctx)` | The whole template → `Html<String>` |
 | `views.render_block(name, block, ctx)` | Only `{% block block %}` (with the same context) |
 | `views.page_or_block(&hx, name, block, ctx)` | `render_block` for htmx requests, `render` otherwise (boosted links and history restores get the full page) |
+| `ValidForm(form): ValidForm<T>` | A validated form post as `Result<T, Invalid>`: never rejects bad input ([Forms](#forms-errors-next-to-each-field)) |
+| `views.render_invalid(name, ctx, invalid)` | `422` with `errors` and `old` in the context; the `form` block for htmx |
+| `flash: Flash` | `flash.success(msg)` / `.error` / `.info` / `.warning`, `flash.redirect(to)`; `{% for m in flash %}` in templates ([Flash messages](#flash-messages)) |
 | `HxRequest` | Extractor: `htmx`, `boosted`, `history_restore`, `target`, `trigger` from the `HX-*` headers |
 | `Hx::redirect / refresh / trigger / retarget / push_url` | htmx response headers; `.with(response)` adds them to any response |
 | `context! { a, b => expr }` | Build a template context; any `Serialize` value works too |
 
 Values are HTML-escaped automatically in `.html` templates. Use `{{ value | safe }}` only for HTML you produced yourself.
+
+## Forms: errors next to each field
+
+A rejected form should come back with a message next to each field and what the user typed still in the inputs. `ValidForm<T>` parses and validates a form post *without* rejecting it, and `views.render_invalid` shows the form again:
+
+```rust,ignore
+use serde::{Deserialize, Serialize};
+use validator::Validate;
+use zapline::prelude::*;
+use zapline::session::Flash;
+use zapline::view::{context, FormErrors, Invalid, ValidForm, Views};
+
+#[derive(Deserialize, Serialize, Validate)]
+struct NewPost {
+    #[validate(length(min = 1, max = 200))]
+    title: String,
+    views: i64,
+}
+
+#[get("/posts/new")]
+async fn new_post(views: Views) -> Result<Html<String>> {
+    views.render("posts/new.html", context! {})
+}
+
+#[post("/posts")]
+async fn create(views: Views, flash: Flash, db: Db, ValidForm(form): ValidForm<NewPost>) -> Result<Response> {
+    let post = match form {
+        Ok(post) => post,
+        // 422 with `errors` and `old` in the template context.
+        Err(invalid) => return views.render_invalid("posts/new.html", context! {}, invalid),
+    };
+    if title_taken(&db, &post.title).await? {
+        // Checks only the handler can make render the same way.
+        let errors = FormErrors::one("title", "is already used");
+        return views.render_invalid("posts/new.html", context! {}, Invalid::new(errors, &post));
+    }
+    insert(&db, &post).await?;
+    flash.success("Post created");
+    Ok(flash.redirect("/posts")) // 303, or HX-Redirect for htmx
+}
+```
+
+`templates/posts/new.html`:
+
+```html
+{% extends "base.html" %}
+{% block content %}
+<form id="post-form" hx-post="/posts">
+  {% block form %}
+  {% if errors._form %}<p role="alert">{{ errors._form }}</p>{% endif %}
+  <label>Title <input name="title" value="{{ old.title }}" aria-invalid="{{ 'true' if errors.title else 'false' }}"></label>
+  {% if errors.title %}<small class="error">{{ errors.title }}</small>{% endif %}
+  <label>Views <input name="views" type="number" value="{{ old.views }}"></label>
+  {% if errors.views %}<small class="error">{{ errors.views }}</small>{% endif %}
+  <button>Save</button>
+  {% endblock %}
+</form>
+{% endblock %}
+```
+
+- **`ValidForm<T>`** gives the handler `Ok(T)`, or `Err(Invalid { errors, old })`. Fields that don't parse get a message (`views=abc`: "must be a number"; empty or missing: "is required"); once every field parses, the `validator` rules run, with the same messages as the JSON 422 ([Validation](validation.md)). Only a request that isn't a form at all (wrong `Content-Type`, too large) is rejected, like `Form<T>`.
+- **`errors`** is a `FormErrors`: `{{ errors.title }}` is the first message for `title`, undefined (falsy) when the field is fine; `{{ errors._form }}` holds errors about the whole form. Build one by hand with `FormErrors::one(field, msg)` / `.add(field, msg)`, or from any error with `FormErrors::from_error(&err)`.
+- **`old`** holds the submitted values by field name, HTML-escaped like any value. Fields whose names look secret (`password`, `token`, `secret`, `*_hash`) are never echoed back.
+- Both are empty globals in every template, so the same template renders the blank form and the rejected one.
+- **`render_invalid`** answers `422 Unprocessable Entity`. For a normal form post it renders the whole page. For htmx it renders only `{% block form %}` (the *inside* of the `<form>`; the whole template if it has no such block). When the form has an `id` but posts somewhere else (`hx-target="#list"`, a create form above a list), it adds `HX-Retarget: #post-form` and `HX-Reswap: innerHTML`, so the messages land in the form instead of the list.
+
+htmx does not swap error responses by default. Allow `422` once, in the layout:
+
+```html
+<script>
+  // Invalid forms come back as 422 with the form re-rendered: swap it in.
+  document.addEventListener("htmx:beforeSwap", (e) => {
+    if (e.detail.xhr.status === 422) { e.detail.shouldSwap = true; e.detail.isError = false; }
+  });
+</script>
+```
+
+Apps created with `zapline new --template fullstack` have this in `templates/base.html`, and `zapline g resource` and `zapline g auth` generate forms that work this way.
+
+## Flash messages
+
+With sessions (`cookies` feature and a [`SessionLayer`](sessions.md)), `Flash` queues one-time messages for the next page, and every template sees the waiting ones as `flash`:
+
+```rust,ignore
+use zapline::session::Flash;
+
+#[post("/posts/{id}/delete")]
+async fn delete(flash: Flash, db: Db, Path(id): Path<i64>) -> Result<Response> {
+    delete_post(&db, id).await?;
+    flash.success("Post deleted"); // also .error(..), .info(..), .warning(..)
+    Ok(flash.redirect("/posts"))
+}
+```
+
+```html
+{# base.html #}
+<div id="flash">
+  {% for m in flash %}<p role="status" class="flash flash-{{ m.level }}">{{ m.message }}</p>{% endfor %}
+</div>
+```
+
+- A message stays in the session until something reads it: the first template that uses `flash` (later reads in the same request see the same list), or `flash.take()` in a handler (for JSON clients). A message queued while rendering a page shows on that page.
+- `flash.redirect(to)` answers `303 See Other`, or `HX-Redirect` for htmx (which then loads the whole page, where the flash shows).
+- An htmx request answered in place (a fragment, no redirect) gets its new messages right away as `HX-Trigger: {"flash": {"messages": [{"level": "success", "message": "Saved"}]}}`, merged with any `HX-Trigger` the handler set. Show them as toasts with a few lines of script listening for the `flash` event (`e.detail.messages`); the fullstack layout does.
+- No cost when unused: `flash` is a lazy template global. A page reads the session store only when a small marker cookie (`zapline.sid.flash`) says a message is waiting.
 
 ## Hot reload
 
@@ -4018,6 +4147,10 @@ async fn session_survives_a_round_trip() {
     assert_eq!(res.text(), "user 42");
 }
 ```
+
+### Flash messages
+
+`zapline::session::Flash` keeps one-time messages in the session for the next page: `flash.success("Saved")` (or `.error`, `.info`, `.warning`), then `flash.redirect("/posts")`. The page reads them once: in templates as `{% for m in flash %}` ([Views: Flash messages](views.md#flash-messages)), in handlers with `flash.take()`, which returns `Vec<FlashMessage>` (`{level, message}`). htmx requests answered in place receive them as an `HX-Trigger: {"flash": ...}` event instead.
 
 ## CSRF
 

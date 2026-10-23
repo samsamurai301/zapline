@@ -257,6 +257,10 @@ async fn session_survives_a_round_trip() {
 }
 ```
 
+### Flash messages
+
+`zapline::session::Flash` keeps one-time messages in the session for the next page: `flash.success("Saved")` (or `.error`, `.info`, `.warning`), then `flash.redirect("/posts")`. The page reads them once: in templates as `{% for m in flash %}` ([Views: Flash messages](views.md#flash-messages)), in handlers with `flash.take()`, which returns `Vec<FlashMessage>` (`{level, message}`). htmx requests answered in place receive them as an `HX-Trigger: {"flash": ...}` event instead.
+
 ## CSRF
 
 There are two ways to stop cross-site request forgery. Most apps want the first.

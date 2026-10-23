@@ -230,6 +230,26 @@ async fn save(Json(body): Json<Link>) -> Result<String> {
 
 `zapline::validate::field_errors(&errors)` returns the flattened, sorted `Vec<FieldError>` if you want to build your own response.
 
+## HTML forms
+
+A JSON 422 is right for an API client, but a browser that posts a form needs the form back, with a message next to each field. For pages, take `ValidForm<T>` (feature `views`) instead of `Valid<Form<T>>`: it runs the same rules but hands the outcome to the handler as a `Result`, and `views.render_invalid` re-renders the form as a 422 with `{{ errors.field }}` and `{{ old.field }}`:
+
+```rust,ignore
+use zapline::view::{context, ValidForm, Views};
+
+#[post("/signup")]
+async fn signup(views: Views, ValidForm(form): ValidForm<SignUp>) -> Result<Response> {
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("signup.html", context! {}, invalid),
+    };
+    // ...
+    Ok(Redirect::to("/").into_response())
+}
+```
+
+The messages are the ones listed above; fields that don't parse at all get "must be a number" or "is required". Struct-level (`schema`) errors appear as `{{ errors._form }}`. `FormErrors::from(&validation_errors)` and `FormErrors::from_error(&err)` convert by hand. See [Views: Forms](views.md#forms-errors-next-to-each-field).
+
 ## OpenAPI
 
 `Valid<Json<T>>` documents the request body exactly like `Json<T>` and adds a `422 Validation Error` response. The `#[validate(..)]` rules are visible to `#[derive(JsonSchema)]`, so `length`, `range` and `email` also appear in the schema as `minLength`, `maximum`, `format: email` and so on. See [OpenAPI & interactive docs](openapi.md).
