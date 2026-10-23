@@ -698,8 +698,13 @@ pub fn docs(topic: Option<&str>) -> String {
             } else {
                 out.push_str(&block);
             }
-        } else if more.len() < 6 {
-            more.push(format!("{} › {}", s.title, s.heading));
+        } else {
+            // A short pointer list: at most 6 entries and about 200 bytes.
+            let entry = format!("{} › {}", s.title, s.heading);
+            let used: usize = more.iter().map(|m: &String| m.len() + 2).sum();
+            if more.len() < 6 && used + entry.len() <= 160 {
+                more.push(entry);
+            }
         }
     }
     if !more.is_empty() {
