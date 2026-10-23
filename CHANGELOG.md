@@ -11,6 +11,9 @@ The first public release.
 - `zapline::view` (feature `views`): MiniJinja templates with hot reload in debug builds, `render_block`/`page_or_block` for htmx fragments, `HxRequest` and `Hx` response headers.
 - `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
 - `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
+- `zapline g resource` reaches scaffold parity: `date`, `datetime`, `uuid` and `author:references` fields (foreign key, index, `?author_id=` filter, `GET /api/authors/{id}/posts`, a `<select>` in forms), `created_at`/`updated_at` on every table, `PATCH` with an `Update{P}` struct, and show and edit pages (`GET /{path}/{id}`, `GET /{path}/{id}/edit`, `PUT /{path}/{id}`).
+- `zapline g migration <name> [field:type...]`: `add_<col>_to_<table>` and `remove_<col>_from_<table>` become `ALTER TABLE`, any other name `CREATE TABLE`, in the project's SQL dialect; also the MCP tool `generate_migration`.
+- Features `chrono` and `uuid`: `zapline::chrono` and `zapline::uuid` re-exported with sqlx, serde and OpenAPI support, plus `extract::datetime` / `extract::optional_datetime` for `datetime-local` form inputs.
 - `zapline db new` / `zapline db migrate`.
 - `zapline g auth`: accounts in one command (users migration, sign-up/log-in/log-out as JSON API and htmx pages, `CurrentUser` extractor, tests).
 - `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing, and `new_token` / `hash_token` for single-use links.
