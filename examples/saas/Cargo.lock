@@ -992,6 +992,7 @@ checksum = "86886cf6dbf4e614b19c9a1eec9775f021869d7eadde0fc73921a81b90c9b4c9"
 dependencies = [
  "memo-map",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1739,6 +1740,8 @@ dependencies = [
  "serde_json",
  "sha2",
  "sqlx-core",
+ "sqlx-mysql",
+ "sqlx-postgres",
  "sqlx-sqlite",
  "syn 2.0.119",
  "tokio",
@@ -1776,6 +1779,7 @@ dependencies = [
  "percent-encoding",
  "rand",
  "rsa",
+ "serde",
  "sha1",
  "sha2",
  "smallvec",

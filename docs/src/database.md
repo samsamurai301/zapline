@@ -61,6 +61,8 @@ With both features enabled, `Db` and `Database` default to Postgres; use `Sqlite
 | pool timeout | 503, code `db_pool_timeout` |
 | anything else | 500 (details logged, not sent) |
 
+Resources made by `zapline g resource` turn the two 409s into errors that name the field: `422 author_not_found` for a reference to a row that doesn't exist, `409 email_taken` for a duplicate in an `email:string:unique` column (see [Resource fields](cli.md#resource-fields)). The generated `write_error` function shows how: on a foreign-key violation it checks which parent is missing, on a unique violation it matches the index name (`users_email_key`).
+
 ## List endpoints: paging, sorting, filters, search
 
 `Listing` turns the query string into a safe, paged query. Callers get pagination, sorting, filters and search; you write one expression:
@@ -123,7 +125,7 @@ zapline g migration remove_legacy_from_posts legacy:bool               # DROP CO
 zapline g migration backfill_slugs                                     # an empty pair to fill in
 ```
 
-A required column added to an existing table gets a default so the rows already there stay valid: the one after `=`, or `''`, `0`, `FALSE`; dates, UUIDs and references need an `=` value or have to be optional there. When the table came from `zapline g resource`, its module, pages and test are updated to read and write the new columns, your own edits kept ([The resource follows the table](cli.md#the-resource-follows-the-table)). `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
+A required column added to an existing table gets a default so the rows already there stay valid: the one after `=`, or `''`, `0`, `FALSE`; dates, UUIDs, JSON and references need an `=` value or have to be optional there. `:unique` and `:index` work here too (`add_slug_to_posts slug:string?:unique`) and add the index; the down file, and a later `remove_` migration, drop it before the column. When the table came from `zapline g resource`, its module, pages and test are updated to read and write the new columns, your own edits kept ([The resource follows the table](cli.md#the-resource-follows-the-table)). `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
 
 ### Status, rollback, redo, reset
 
@@ -199,6 +201,32 @@ pub struct NewEvent {
 ```
 
 `zapline::extract::optional_datetime` is the same for an `Option<DateTime<Utc>>` field (empty means `None`).
+
+## JSON columns
+
+With the `sqlite` or `postgres` feature, sqlx reads and binds `serde_json::Value` (re-exported as `zapline::db::sqlx::types::JsonValue`) for a `JSONB` column on Postgres and a `TEXT` one on SQLite, and `sqlx::types::Json<T>` for your own type. `zapline g resource settings prefs:json` generates such a column.
+
+```rust,ignore
+use zapline::db::sqlx::types::JsonValue;
+
+#[model]
+#[derive(sqlx::FromRow)]
+pub struct Settings {
+    pub id: i64,
+    pub prefs: JsonValue,           // JSONB on Postgres, TEXT on SQLite
+}
+
+#[model]
+pub struct NewSettings {
+    // A JSON body sends {"prefs": {"theme": "dark"}}; a form's <textarea> sends the text.
+    #[serde(deserialize_with = "zapline::extract::json_text")]
+    pub prefs: JsonValue,
+}
+```
+
+`zapline::extract::json_text` parses a string that holds a JSON object or array, reads an empty string as `null` (so `Option<JsonValue>` is `None`; add `#[serde(default)]`), and leaves other values alone. Malformed JSON is a 422 naming the field. In templates, `{{ item.prefs|tojson }}` writes the value back as JSON.
+
+Postgres can query into `JSONB` (`WHERE prefs->>'theme' = $1`); SQLite has `json_extract(prefs, '$.theme')`. Neither is portable, so write those queries for the dialect you use.
 
 ## Seed data
 

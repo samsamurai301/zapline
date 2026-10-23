@@ -692,12 +692,12 @@ fn sql_resource_writes_pages_timestamps_and_enables_chrono() {
 }
 
 #[test]
-fn references_use_the_parent_label_and_note_a_missing_parent() {
+fn references_use_the_parent_label_and_need_the_parent_first() {
     let tmp = tempfile::tempdir().unwrap();
     let root = scaffold(tmp.path(), Template::Fullstack);
 
-    // No `authors` table yet.
-    let report = resource_with_fields(
+    // No `authors` table yet: the foreign key would fail, so nothing is written.
+    let err = resource_with_fields(
         &root,
         "post",
         None,
@@ -705,20 +705,14 @@ fn references_use_the_parent_label_and_note_a_missing_parent() {
         false,
         false,
     )
-    .unwrap();
+    .unwrap_err()
+    .to_string();
     assert!(
-        report
-            .notes
-            .iter()
-            .any(|n| n.contains("no migration creates the `authors` table")),
-        "{:?}",
-        report.notes
+        err.contains("no migration creates it")
+            && err.contains("run `zapline g resource author` first"),
+        "{err}"
     );
-    let module = read(&root, "src/routes/posts.rs");
-    assert!(
-        module.contains("CAST(id AS TEXT) AS label FROM authors"),
-        "{module}"
-    );
+    assert!(!root.join("src/routes/posts.rs").exists());
 
     // With the parent generated first, forms show its name and rows link to it.
     resource_with_fields(&root, "author", None, &["name".into()], false, false).unwrap();
@@ -753,17 +747,91 @@ fn references_use_the_parent_label_and_note_a_missing_parent() {
         .count();
     assert_eq!(count, 1);
 
+    // A reference to the own table must be optional.
     let err = resource_with_fields(
         &root,
         "author",
         None,
-        &["author:references".into()],
+        &["name".into(), "mentor:ref:authors".into()],
         false,
         true,
     )
     .unwrap_err()
     .to_string();
-    assert!(err.contains("refer to itself"), "{err}");
+    assert!(
+        err.contains("refers to authors itself, so it must be optional")
+            && err.contains("`mentor:references:authors?`"),
+        "{err}"
+    );
+    // `parent` with no `parents` table hints at naming the own table.
+    let err = resource_with_fields(
+        &root,
+        "category",
+        None,
+        &["name".into(), "parent:references?".into()],
+        false,
+        false,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(err.contains("`parent:ref:categories?`"), "{err}");
+    resource_with_fields(
+        &root,
+        "category",
+        None,
+        &["name".into(), "parent:ref:categories?".into()],
+        false,
+        false,
+    )
+    .unwrap();
+    let module = read(&root, "src/routes/categories.rs");
+    assert!(module.contains("async fn list_for_parent("), "{module}");
+    assert!(module.contains("CAST(name AS TEXT) AS label FROM categories ORDER BY name"));
+    assert!(read(&root, "templates/categories/_row.html")
+        .contains("<a href=\"/categories/{{ item.parent_id }}\">"));
+
+    // Two references to one table: no nested route, and a note says why.
+    resource_with_fields(
+        &root,
+        "user",
+        None,
+        &["email:string:unique".into()],
+        false,
+        false,
+    )
+    .unwrap();
+    let report = resource_with_fields(
+        &root,
+        "article",
+        None,
+        &[
+            "title".into(),
+            "writer:ref:users".into(),
+            "editor:ref:users?".into(),
+        ],
+        false,
+        false,
+    )
+    .unwrap();
+    assert!(
+        report.notes.iter().any(|n| n
+            .contains("`writer_id` and `editor_id` refer to the same table, `users`")
+            && n.contains("/api/users/{id}/articles")
+            && n.contains("/api/articles?writer_id=1")),
+        "{:?}",
+        report.notes
+    );
+    let module = read(&root, "src/routes/articles.rs");
+    assert!(!module.contains("list_for_writer"), "{module}");
+    assert!(module.contains("CAST(email AS TEXT) AS label FROM users"));
+    assert!(module.contains(
+        "// zapline:resource article title:string writer:references:users editor:references:users?"
+    ));
+    let sql = migration_text(&root, "_create_users.up.sql");
+    assert!(
+        sql.contains("CREATE UNIQUE INDEX users_email_key ON users (email);"),
+        "{sql}"
+    );
 }
 
 #[test]
@@ -857,6 +925,65 @@ fn migration_adds_columns_to_an_existing_table() {
         .notes
         .iter()
         .any(|n| n.contains("no migration creates the `nopes` table")));
+}
+
+#[test]
+fn migrations_add_and_drop_unique_and_plain_indexes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    resource_with_fields(&root, "post", None, &["title".into()], false, false).unwrap();
+    migration(
+        &root,
+        "add_slug_to_posts",
+        &[
+            "slug:string?:unique".into(),
+            "rank:int:index".into(),
+            "meta:json?".into(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        migration_text(&root, "_add_slug_to_posts.up.sql"),
+        "-- Created by `zapline generate migration add_slug_to_posts`.\n\
+         ALTER TABLE posts ADD COLUMN slug TEXT;\n\
+         CREATE UNIQUE INDEX posts_slug_key ON posts (slug);\n\
+         ALTER TABLE posts ADD COLUMN rank BIGINT NOT NULL DEFAULT 0;\n\
+         CREATE INDEX posts_rank_idx ON posts (rank);\n\
+         ALTER TABLE posts ADD COLUMN meta TEXT;\n"
+    );
+    assert_eq!(
+        migration_text(&root, "_add_slug_to_posts.down.sql"),
+        "-- Reverts add_slug_to_posts.\n\
+         ALTER TABLE posts DROP COLUMN meta;\n\
+         DROP INDEX posts_rank_idx;\n\
+         ALTER TABLE posts DROP COLUMN rank;\n\
+         DROP INDEX posts_slug_key;\n\
+         ALTER TABLE posts DROP COLUMN slug;\n"
+    );
+    let module = read(&root, "src/routes/posts.rs");
+    assert!(
+        module.contains(
+            "// zapline:resource post title:string slug:string:unique? rank:int:index meta:json?"
+        ),
+        "{module}"
+    );
+    assert!(module.contains("with_code(\"slug_taken\")"), "{module}");
+
+    // Removing it later drops the index first; rolling back brings the
+    // unique column back nullable, so the empty rows don't clash.
+    migration(&root, "remove_slug_from_posts", &[]).unwrap();
+    let up = migration_text(&root, "_remove_slug_from_posts.up.sql");
+    assert!(
+        up.contains("DROP INDEX IF EXISTS posts_slug_key;\nALTER TABLE posts DROP COLUMN slug;\n"),
+        "{up}"
+    );
+    let down = migration_text(&root, "_remove_slug_from_posts.down.sql");
+    assert!(
+        down.contains(
+            "ALTER TABLE posts ADD COLUMN slug TEXT;\nCREATE UNIQUE INDEX posts_slug_key"
+        ),
+        "{down}"
+    );
 }
 
 /// `g migration add_..` then `remove_..` on a generated resource gives what

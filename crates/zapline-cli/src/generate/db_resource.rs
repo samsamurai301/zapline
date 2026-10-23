@@ -44,12 +44,15 @@ pub enum FieldType {
     DateTime,
     /// `Uuid`, `UUID` (`BLOB` on SQLite, which is how sqlx stores it there).
     Uuid,
+    /// Any JSON value: `JsonValue` (`serde_json::Value`), `JSONB` (`TEXT` on
+    /// SQLite), a textarea holding JSON in forms.
+    Json,
     /// `author:references`: an `author_id BIGINT` foreign key to `authors(id)`.
     References,
 }
 
 /// Every spelling `FieldType::parse` accepts, for error messages.
-const TYPE_NAMES: &str = "string, text, int, float, bool, date, datetime, uuid, references";
+const TYPE_NAMES: &str = "string, text, int, float, bool, date, datetime, uuid, json, references";
 
 impl FieldType {
     fn parse(s: &str) -> Result<Self> {
@@ -62,10 +65,11 @@ impl FieldType {
             "date" => FieldType::Date,
             "datetime" | "timestamp" | "timestamptz" => FieldType::DateTime,
             "uuid" => FieldType::Uuid,
+            "json" | "jsonb" => FieldType::Json,
             "references" | "reference" | "ref" | "belongs_to" => FieldType::References,
             other => bail!(
                 "unknown field type `{other}`; use one of: {TYPE_NAMES} \
-                 (add `?` for optional, e.g. `bio:text?`)"
+                 (add `?` for optional, e.g. `bio:text?`, and `:unique` or `:index` after the type)"
             ),
         })
     }
@@ -81,6 +85,7 @@ impl FieldType {
             FieldType::Date => "date",
             FieldType::DateTime => "datetime",
             FieldType::Uuid => "uuid",
+            FieldType::Json => "json",
             FieldType::References => "references",
         }
     }
@@ -94,6 +99,7 @@ impl FieldType {
             FieldType::Date => "NaiveDate",
             FieldType::DateTime => "DateTime<Utc>",
             FieldType::Uuid => "Uuid",
+            FieldType::Json => "JsonValue",
         }
     }
 
@@ -108,22 +114,28 @@ impl FieldType {
             FieldType::Date if pg => "DATE",
             FieldType::DateTime if pg => "TIMESTAMPTZ",
             FieldType::Uuid if pg => "UUID",
-            FieldType::Date | FieldType::DateTime => "TEXT",
+            FieldType::Json if pg => "JSONB",
+            FieldType::Date | FieldType::DateTime | FieldType::Json => "TEXT",
             FieldType::Uuid => "BLOB",
         }
     }
 
     /// Whether `.bind()` takes the value by reference (it is not `Copy`).
     fn borrowed(self) -> bool {
-        matches!(self, FieldType::String | FieldType::Text)
+        matches!(self, FieldType::String | FieldType::Text | FieldType::Json)
     }
 }
 
 /// The table a `references` field points to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parent {
-    /// The parent resource's names (`authors`, `/authors`, `Author`...).
+    /// The parent table's names (`authors`, `/authors`, `Author`...): `users`
+    /// for `author:ref:users`.
     pub names: ResourceNames,
+    /// What the field calls the parent: `author` for `author:references` and
+    /// for `author:ref:users`. Names the column (`author_id`), the error code
+    /// (`author_not_found`) and the nested list handler (`list_for_author`).
+    pub role: String,
     /// The column `<select>`s show for a parent row: `name`, `title`... or `id`.
     pub label: String,
     /// The parent has an HTML page at `{path}/{id}` to link to.
@@ -139,31 +151,82 @@ pub struct Field {
     pub ty: FieldType,
     /// `name:type?`: nullable column, `Option<T>` field.
     pub optional: bool,
+    /// `:unique`: a unique index on the column; a duplicate is a 409
+    /// `<name>_taken`.
+    pub unique: bool,
+    /// `:index`: an index on the column (references always get one).
+    pub index: bool,
     /// For `references`, the table it points to.
     pub parent: Option<Parent>,
 }
 
+/// `bio?` -> (`bio`, true).
+fn split_optional(part: &str) -> (&str, bool) {
+    match part.strip_suffix('?') {
+        Some(p) => (p, true),
+        None => (part, false),
+    }
+}
+
 impl Field {
-    /// Parses `title`, `title:string`, `bio:text?`, `author:references`.
+    /// Parses `title`, `title:string`, `bio:text?`, `email:string:unique`,
+    /// `rating:int:index`, `author:references`, `author:ref:users?`.
     pub fn parse(spec: &str) -> Result<Field> {
-        let (name, ty) = spec.split_once(':').unwrap_or((spec, "string"));
-        let (ty, optional) = match ty.strip_suffix('?') {
-            Some(t) => (t, true),
-            None => (ty, false),
-        };
+        let mut parts = spec.split(':');
+        let raw_name = parts.next().unwrap_or_default();
+        let (ty, mut optional) = parts.next().map_or(("string", false), split_optional);
         let ty = FieldType::parse(&ty.to_ascii_lowercase())?;
-        let mut name = snake_case(name);
+        let (mut unique, mut index, mut table) = (false, false, None::<String>);
+        for (i, part) in parts.enumerate() {
+            let (part, opt) = split_optional(part);
+            optional |= opt;
+            match part.to_ascii_lowercase().as_str() {
+                "unique" => unique = true,
+                "index" => index = true,
+                t if ty == FieldType::References && i == 0 && !t.is_empty() => {
+                    table = Some(part.to_string());
+                }
+                other => bail!(
+                    "`{spec}`: unknown modifier `{other}`; use `unique` or `index`{}",
+                    if ty == FieldType::References {
+                        " (or a table right after the type, e.g. `author:ref:users`)"
+                    } else {
+                        ""
+                    }
+                ),
+            }
+        }
+        let mut name = snake_case(raw_name);
         if name.is_empty() || !name.starts_with(|c: char| c.is_ascii_alphabetic()) {
             bail!("`{spec}`: field names must start with a letter");
         }
         let mut parent = None;
         if ty == FieldType::References {
-            let stem = name.strip_suffix("_id").unwrap_or(&name).to_string();
-            let names =
+            // `author_id:references` means the same as `author:references`.
+            let stem = match name.strip_suffix("_id") {
+                Some(s) if !s.is_empty() => s.to_string(),
+                _ => name.clone(),
+            };
+            let role =
                 ResourceNames::parse(&stem, None).map_err(|e| anyhow::anyhow!("`{spec}`: {e}"))?;
-            name = format!("{}_id", names.singular);
+            let names = match &table {
+                Some(t) => {
+                    let t = snake_case(t);
+                    ResourceNames::parse(&t, Some(&t))
+                        .map_err(|e| anyhow::anyhow!("`{spec}`: {e}"))?
+                }
+                None => role.clone(),
+            };
+            if SQL_RESERVED.contains(&names.plural.as_str()) {
+                bail!(
+                    "`{spec}`: `{}` is a reserved word in SQL and can't be a table name",
+                    names.plural
+                );
+            }
+            name = format!("{}_id", role.singular);
             parent = Some(Parent {
                 names,
+                role: role.singular,
                 label: "id".into(),
                 page: false,
             });
@@ -179,25 +242,50 @@ impl Field {
                 "`{name}` is a reserved word in SQL; pick another field name (e.g. `is_{name}` or `{name}_value`)"
             );
         }
+        if unique && ty == FieldType::Bool {
+            bail!("`{spec}`: a bool can't be unique");
+        }
         // A missing checkbox already means `false`.
         let optional = optional && ty != FieldType::Bool;
         Ok(Field {
             name,
             ty,
             optional,
+            unique,
+            index,
             parent,
         })
     }
 
     /// The argument that parses back into this field: `bio:text?`,
-    /// `author:references`.
+    /// `email:string:unique`, `author:references`, `author:references:users?`.
     pub fn spec(&self) -> String {
-        let name = match &self.parent {
-            Some(p) => p.names.singular.as_str(),
-            None => self.name.as_str(),
+        let mut spec = match &self.parent {
+            Some(p) => {
+                let mut s = format!("{}:{}", p.role, self.ty.name());
+                if p.names.plural != crate::naming::pluralize(&p.role) {
+                    let _ = write!(s, ":{}", p.names.plural);
+                }
+                s
+            }
+            None => format!("{}:{}", self.name, self.ty.name()),
         };
-        let optional = if self.optional { "?" } else { "" };
-        format!("{name}:{}{optional}", self.ty.name())
+        if self.unique {
+            spec.push_str(":unique");
+        }
+        if self.index {
+            spec.push_str(":index");
+        }
+        if self.optional {
+            spec.push('?');
+        }
+        spec
+    }
+
+    /// What the field is called in hints and error codes: `author` for
+    /// `author_id`, else its name.
+    pub fn role(&self) -> &str {
+        self.parent.as_ref().map_or(&self.name, |p| &p.role)
     }
 
     /// The field's Rust type, `Option<..>` when optional.
@@ -210,11 +298,7 @@ impl Field {
     }
 
     fn label(&self) -> String {
-        let base = match &self.parent {
-            Some(p) => p.names.singular.clone(),
-            None => self.name.clone(),
-        };
-        let mut words = base.replace('_', " ");
+        let mut words = self.role().replace('_', " ");
         if let Some(first) = words.get_mut(0..1) {
             first.make_ascii_uppercase();
         }
@@ -242,6 +326,37 @@ impl Field {
         format!("{} {}{null}{default}{fk}", self.name, self.ty.sql(dialect))
     }
 
+    /// The index the column gets, if any: unique for `:unique` (named
+    /// `<table>_<column>_key`, like the constraint Postgres makes for an inline
+    /// `UNIQUE`), plain for `:index` and for references. An index rather than
+    /// an inline constraint, so SQLite can still drop the column later.
+    pub fn index_sql(&self, table: &str) -> String {
+        if self.unique {
+            format!(
+                "CREATE UNIQUE INDEX {table}_{c}_key ON {table} ({c});\n",
+                c = self.name
+            )
+        } else if self.index || self.parent.is_some() {
+            index_sql(table, &self.name)
+        } else {
+            String::new()
+        }
+    }
+
+    /// `DROP INDEX` for [`index_sql`](Self::index_sql): needed before SQLite
+    /// drops the column.
+    pub fn drop_index_sql(&self, table: &str, if_exists: bool) -> String {
+        let suffix = if self.unique {
+            "key"
+        } else if self.index || self.parent.is_some() {
+            "idx"
+        } else {
+            return String::new();
+        };
+        let if_exists = if if_exists { "IF EXISTS " } else { "" };
+        format!("DROP INDEX {if_exists}{table}_{}_{suffix};\n", self.name)
+    }
+
     /// A value for tests, as a `json!` expression (a variable for references).
     fn sample_json(&self) -> String {
         match self.ty {
@@ -253,6 +368,7 @@ impl Field {
             FieldType::Date => "\"2026-01-15\"".into(),
             FieldType::DateTime => "\"2026-01-15T09:30:00Z\"".into(),
             FieldType::Uuid => "\"67e55044-10b1-426f-9247-bb680e5fe0c8\"".into(),
+            FieldType::Json => "{\"tags\": [\"a\", \"b\"], \"n\": 1}".into(),
             FieldType::References => self.name.clone(),
         }
     }
@@ -268,6 +384,7 @@ impl Field {
             FieldType::Date => "\"2026-02-28\"".into(),
             FieldType::DateTime => "\"2026-02-28T18:45:00Z\"".into(),
             FieldType::Uuid => "\"a1a2a3a4-b1b2-4c1c-8d1d-e1e2e3e4e5e6\"".into(),
+            FieldType::Json => "{\"n\": 2}".into(),
             FieldType::References => self.name.clone(),
         }
     }
@@ -283,6 +400,7 @@ impl Field {
             FieldType::Date => "\"2026-02-28\".to_string()".into(),
             FieldType::DateTime => "\"2026-02-28T18:45\".to_string()".into(),
             FieldType::Uuid => "\"a1a2a3a4-b1b2-4c1c-8d1d-e1e2e3e4e5e6\".to_string()".into(),
+            FieldType::Json => r#""{\"n\": 2}".to_string()"#.into(),
             FieldType::References => format!("{}.to_string()", self.name),
         }
     }
@@ -298,6 +416,13 @@ impl Field {
             }
             (FieldType::DateTime, true) => {
                 "#[serde(default, deserialize_with = \"zapline::extract::optional_datetime\")]"
+            }
+            // A form's textarea sends the JSON as text.
+            (FieldType::Json, false) => {
+                "#[serde(deserialize_with = \"zapline::extract::json_text\")]"
+            }
+            (FieldType::Json, true) => {
+                "#[serde(default, deserialize_with = \"zapline::extract::json_text\")]"
             }
             (_, true) => {
                 "#[serde(default, deserialize_with = \"zapline::extract::empty_as_none\")]"
@@ -509,6 +634,75 @@ impl Plan<'_> {
     fn uses(&self, ty: FieldType) -> bool {
         self.fields.iter().any(|f| f.ty == ty)
     }
+
+    /// The references that get a nested list route: all but those whose
+    /// table another field refers to as well (`/users/{id}/posts` would be
+    /// ambiguous for `author:ref:users editor:ref:users`).
+    fn nested(&self) -> impl Iterator<Item = (&Field, &Parent)> {
+        self.references().filter(|(_, p)| {
+            self.references()
+                .filter(|(_, o)| o.names.plural == p.names.plural)
+                .count()
+                == 1
+        })
+    }
+
+    /// Each table the references point to, once: one `<select>` list each.
+    fn choice_tables(&self) -> Vec<&Parent> {
+        let mut out: Vec<&Parent> = Vec::new();
+        for (_, p) in self.references() {
+            if !out.iter().any(|o| o.names.plural == p.names.plural) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// Whether `field` refers to this resource's own table.
+    fn is_self(&self, field: &Field) -> bool {
+        field
+            .parent
+            .as_ref()
+            .is_some_and(|p| p.names.plural == self.names.plural)
+    }
+
+    /// Whether writes can fail in a way worth a named error: a missing
+    /// parent or a duplicate in a unique column.
+    fn checked_writes(&self) -> bool {
+        self.fields.iter().any(|f| f.unique || f.parent.is_some())
+    }
+}
+
+/// The references in `fields` that share a table with another one, as
+/// `(table, [column, ..])`: they get no nested list route.
+pub fn ambiguous_references(fields: &[Field]) -> Vec<(String, Vec<String>)> {
+    let mut out: Vec<(String, Vec<String>)> = Vec::new();
+    for f in fields {
+        let Some(p) = &f.parent else { continue };
+        match out.iter_mut().find(|(t, _)| *t == p.names.plural) {
+            Some((_, cols)) => cols.push(f.name.clone()),
+            None => out.push((p.names.plural.clone(), vec![f.name.clone()])),
+        }
+    }
+    out.retain(|(_, cols)| cols.len() > 1);
+    out
+}
+
+/// The column `<select>`s show for a row of a resource with `fields`:
+/// `name`, `title`, `label`, `email` or `username`, else the first required
+/// text column, else `id`. For a resource that refers to itself, whose
+/// table has no migration yet.
+pub fn label_field(fields: &[Field]) -> String {
+    for preferred in ["name", "title", "label", "email", "username"] {
+        if fields.iter().any(|f| f.name == preferred) {
+            return preferred.to_string();
+        }
+    }
+    fields
+        .iter()
+        .find(|f| matches!(f.ty, FieldType::String | FieldType::Text) && !f.optional)
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "id".to_string())
 }
 
 /// The migration (and its down file), the module, the templates and the test.
@@ -554,7 +748,7 @@ pub fn files(plan: &Plan<'_>) -> Vec<OutputFile> {
 }
 
 /// `CREATE TABLE` with an `id`, the fields, `created_at`/`updated_at` and an
-/// index per foreign key.
+/// index per foreign key, `:index` and `:unique` column.
 pub fn create_table_sql(table: &str, fields: &[Field], dialect: Dialect) -> String {
     let (id, ts) = match dialect {
         Dialect::Sqlite => ("id INTEGER PRIMARY KEY AUTOINCREMENT", "TEXT"),
@@ -568,8 +762,8 @@ pub fn create_table_sql(table: &str, fields: &[Field], dialect: Dialect) -> Stri
         cols.push(format!("    {c} {ts} NOT NULL DEFAULT CURRENT_TIMESTAMP"));
     }
     let mut sql = format!("CREATE TABLE {table} (\n{}\n);\n", cols.join(",\n"));
-    for f in fields.iter().filter(|f| f.parent.is_some()) {
-        sql.push_str(&index_sql(table, &f.name));
+    for f in fields {
+        sql.push_str(&f.index_sql(table));
     }
     sql
 }
@@ -655,6 +849,33 @@ fn module(plan: &Plan<'_>) -> String {
     let new_binds = binds(plan.fields, "new");
     let change_binds = binds(plan.fields, "changes");
     let refs: Vec<(&Field, &Parent)> = plan.references().collect();
+    let nested: Vec<(&Field, &Parent)> = plan.nested().collect();
+    // How a write query ends: `?`, or through `write_error` for named errors.
+    let finish = |var: &str, all_optional: bool| -> String {
+        if !plan.checked_writes() {
+            return "\n    .fetch_one(&**db)\n    .await?;\n    Ok(row)".to_string();
+        }
+        if refs.is_empty() {
+            return "\n    .fetch_one(&**db)\n    .await\n    .map_err(write_error)?;\n    Ok(row)"
+                .to_string();
+        }
+        let ids: Vec<String> = refs
+            .iter()
+            .map(|(f, _)| {
+                if f.optional || all_optional {
+                    format!("{var}.{}", f.name)
+                } else {
+                    format!("Some({var}.{})", f.name)
+                }
+            })
+            .collect();
+        format!(
+            "\n    .fetch_one(&**db)\n    .await;\n    \
+             match row {{\n        Ok(row) => Ok(row),\n        \
+             Err(err) => Err(write_error(db, err, [{}]).await),\n    }}",
+            ids.join(", ")
+        )
+    };
 
     let mut s = String::new();
     let _ = writeln!(
@@ -685,6 +906,9 @@ fn module(plan: &Plan<'_>) -> String {
     }
     s.push_str("use zapline::db::{sqlx, Db, ListParams, Listing, Paged};\n");
     s.push_str("use zapline::prelude::*;\n");
+    if plan.uses(FieldType::Json) {
+        s.push_str("use zapline::db::sqlx::types::JsonValue;\n");
+    }
     if plan.uses(FieldType::Uuid) {
         s.push_str("use zapline::uuid::Uuid;\n");
     }
@@ -738,6 +962,9 @@ fn module(plan: &Plan<'_>) -> String {
             FieldType::DateTime => s.push_str(
                 "    #[serde(default, deserialize_with = \"zapline::extract::optional_datetime\")]\n",
             ),
+            FieldType::Json => s.push_str(
+                "    #[serde(default, deserialize_with = \"zapline::extract::json_text\")]\n",
+            ),
             _ => {}
         }
         let _ = writeln!(s, "    pub {}: Option<{}>,", f.name, f.ty.rust());
@@ -753,7 +980,7 @@ fn module(plan: &Plan<'_>) -> String {
     let mut sortable: Vec<String> = plan
         .fields
         .iter()
-        .filter(|f| f.ty != FieldType::Text)
+        .filter(|f| !matches!(f.ty, FieldType::Text | FieldType::Json))
         .map(|f| format!("\"{}\"", f.name))
         .collect();
     sortable.extend(["\"created_at\"".to_owned(), "\"updated_at\"".to_owned()]);
@@ -785,7 +1012,8 @@ fn module(plan: &Plan<'_>) -> String {
             | FieldType::Float
             | FieldType::Date
             | FieldType::DateTime
-            | FieldType::Uuid => continue,
+            | FieldType::Uuid
+            | FieldType::Json => continue,
         };
         accepts.push(format!("`?{}=`", f.name));
         let _ = writeln!(chain, "        .{filter}(\"{}\")", f.name);
@@ -802,8 +1030,8 @@ fn module(plan: &Plan<'_>) -> String {
         .iter()
         .map(|h| h.to_string())
         .collect();
-    for (_, parent) in &refs {
-        handlers.push(format!("list_for_{}", parent.names.singular));
+    for (_, parent) in &nested {
+        handlers.push(format!("list_for_{}", parent.role));
     }
     if plan.html {
         handlers.extend(
@@ -839,23 +1067,29 @@ fn module(plan: &Plan<'_>) -> String {
     let _ = writeln!(
         s,
         "async fn insert(db: &Db, new: &New{p}) -> Result<{p}> {{\n    \
-         let row = sqlx::query_as::<_, {p}>(\n        \"INSERT INTO {t} ({cols}) VALUES ({vals}) RETURNING {select_cols}\",\n    ){new_binds}\n    .fetch_one(&**db)\n    .await?;\n    Ok(row)\n}}\n",
+         let row = sqlx::query_as::<_, {p}>(\n        \"INSERT INTO {t} ({cols}) VALUES ({vals}) RETURNING {select_cols}\",\n    ){new_binds}{end}\n}}\n",
         cols = cols.join(", "),
         vals = placeholders.join(", "),
+        end = finish("new", false),
     );
     let _ = writeln!(
         s,
         "async fn update_row(db: &Db, id: i64, new: &New{p}) -> Result<{p}> {{\n    \
-         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){new_binds}\n    .bind(id)\n    .fetch_one(&**db)\n    .await?;\n    Ok(row)\n}}\n",
+         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){new_binds}\n    .bind(id){end}\n}}\n",
         sets = sets.join(", "),
+        end = finish("new", false),
     );
     let _ = writeln!(
         s,
         "/// Fields that are `None` keep their value.\n\
          async fn patch_row(db: &Db, id: i64, changes: &Update{p}) -> Result<{p}> {{\n    \
-         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){change_binds}\n    .bind(id)\n    .fetch_one(&**db)\n    .await?;\n    Ok(row)\n}}\n",
+         let row = sqlx::query_as::<_, {p}>(\n        \"UPDATE {t} SET {sets}, updated_at = CURRENT_TIMESTAMP WHERE id = ${id_param} RETURNING {select_cols}\",\n    ){change_binds}\n    .bind(id){end}\n}}\n",
         sets = coalesce.join(", "),
+        end = finish("changes", true),
     );
+    if plan.checked_writes() {
+        write_error_fn(&mut s, plan);
+    }
     let _ = writeln!(
         s,
         "async fn delete_row(db: &Db, id: i64) -> Result<()> {{\n    \
@@ -863,7 +1097,7 @@ fn module(plan: &Plan<'_>) -> String {
          if done.rows_affected() == 0 {{\n        return Err(Error::not_found());\n    }}\n    Ok(())\n}}\n"
     );
     if plan.html {
-        for (_, parent) in &refs {
+        for parent in plan.choice_tables() {
             let _ = writeln!(
                 s,
                 "/// The {ph} to pick from in forms.\n\
@@ -924,11 +1158,11 @@ fn module(plan: &Plan<'_>) -> String {
          delete_row(&db, id).await?;\n    Ok(StatusCode::NO_CONTENT)\n}}\n",
         a = n.a_human,
     );
-    for (field, parent) in &refs {
+    for (field, parent) in &nested {
         let _ = writeln!(
             s,
             "/// List the {ph} of {pa} (404 if there is no such {phh}).\n#[get(\"{path}\", tag = \"{t}\")]\n\
-             async fn list_for_{sg}(\n    db: Db,\n    Path(id): Path<i64>,\n    params: ListParams,\n) -> Result<Json<Paged<{p}>>> {{\n    \
+             async fn list_for_{role}(\n    db: Db,\n    Path(id): Path<i64>,\n    params: ListParams,\n) -> Result<Json<Paged<{p}>>> {{\n    \
              sqlx::query(\"SELECT id FROM {pt} WHERE id = $1\")\n        .bind(id)\n        .fetch_one(&*db)\n        .await?;\n    \
              let listing = listing().scope(\"{col}\", id);\n    \
              Ok(Json(listing.fetch(&db, &params).await?))\n}}\n",
@@ -936,24 +1170,109 @@ fn module(plan: &Plan<'_>) -> String {
             pa = parent.names.a_human,
             phh = parent.names.human,
             path = nested_path(plan, parent),
-            sg = parent.names.singular,
+            role = parent.role,
             pt = parent.names.plural,
             col = field.name,
         );
     }
 
     if plan.html {
-        html_handlers(&mut s, plan, &refs);
+        html_handlers(&mut s, plan);
     }
     s.trim_end().to_string() + "\n"
 }
 
+/// `write_error`, which turns a failed insert or update into an error that
+/// names the field at fault (and `missing`, which it asks).
+fn write_error_fn(s: &mut String, plan: &Plan<'_>) {
+    let t = &plan.names.plural;
+    let refs: Vec<(&Field, &Parent)> = plan.references().collect();
+    let uniques: Vec<&Field> = plan.fields.iter().filter(|f| f.unique).collect();
+    let mut doc = Vec::new();
+    if let Some((f, _)) = refs.first() {
+        doc.push(format!(
+            "a 422 `{}_not_found` for a missing {}",
+            f.role(),
+            f.role().replace('_', " ")
+        ));
+    }
+    if let Some(f) = uniques.first() {
+        doc.push(format!(
+            "a 409 `{}_taken` for a duplicate {}",
+            f.name,
+            f.name.replace('_', " ")
+        ));
+    }
+    let _ = writeln!(
+        s,
+        "/// The error for a failed insert or update, naming the field at fault:\n\
+         /// {}.\n/// Anything else is what `?` would give.",
+        doc.join(",\n/// ")
+    );
+    let mut body = String::new();
+    if !refs.is_empty() {
+        let vars: Vec<&str> = refs.iter().map(|(f, _)| f.name.as_str()).collect();
+        let _ = write!(
+            body,
+            "    if e.is_foreign_key_violation() {{\n        let [{}] = parents;",
+            vars.join(", ")
+        );
+        for (f, p) in &refs {
+            let _ = write!(
+                body,
+                "\n        if missing(db, \"{pt}\", {c}).await {{\n            \
+                 return Error::unprocessable(\"{h} not found\").with_code(\"{r}_not_found\");\n        }}",
+                pt = p.names.plural,
+                c = f.name,
+                h = title_case(&p.role.replace('_', " ")),
+                r = p.role,
+            );
+        }
+        body.push_str("\n    }\n");
+    }
+    for f in &uniques {
+        // Postgres names the index; SQLite says `UNIQUE constraint failed: posts.slug`.
+        let _ = writeln!(
+            body,
+            "    if e.is_unique_violation()\n        \
+             && (e.constraint() == Some(\"{t}_{c}_key\") || e.message().ends_with(\": {t}.{c}\"))\n    {{\n        \
+             return Error::conflict(\"{h} is already taken\").with_code(\"{c}_taken\");\n    }}",
+            c = f.name,
+            h = title_case(&f.name.replace('_', " ")),
+        );
+    }
+    if refs.is_empty() {
+        let _ = writeln!(
+            s,
+            "fn write_error(err: sqlx::Error) -> Error {{\n    \
+             let sqlx::Error::Database(e) = &err else {{\n        return err.into();\n    }};\n\
+             {body}    err.into()\n}}\n"
+        );
+        return;
+    }
+    let _ = writeln!(
+        s,
+        "async fn write_error(db: &Db, err: sqlx::Error, parents: [Option<i64>; {n}]) -> Error {{\n    \
+         let sqlx::Error::Database(e) = &err else {{\n        return err.into();\n    }};\n\
+         {body}    err.into()\n}}\n",
+        n = refs.len()
+    );
+    s.push_str(
+        "/// Whether `table` has no row `id`; asked only after a write failed.\n\
+         async fn missing(db: &Db, table: &str, id: Option<i64>) -> bool {\n    \
+         let Some(id) = id else {\n        return false;\n    };\n    \
+         let sql = format!(\"SELECT COUNT(*) FROM {table} WHERE id = $1\");\n    \
+         let found = sqlx::query_scalar::<_, i64>(&sql).bind(id).fetch_one(&**db).await;\n    \
+         matches!(found, Ok(0))\n}\n\n",
+    );
+}
+
 /// `let author_choices = author_choices(&db).await?;` lines and the names
 /// to add to `context! { .. }`.
-fn choices_setup(refs: &[(&Field, &Parent)], db: &str) -> (String, String) {
+fn choices_setup(plan: &Plan<'_>, db: &str) -> (String, String) {
     let mut lets = String::new();
     let mut names = String::new();
-    for (_, parent) in refs {
+    for parent in plan.choice_tables() {
         let sg = &parent.names.singular;
         let _ = write!(lets, "\n    let {sg}_choices = {sg}_choices({db}).await?;");
         let _ = write!(names, ", {sg}_choices");
@@ -961,13 +1280,13 @@ fn choices_setup(refs: &[(&Field, &Parent)], db: &str) -> (String, String) {
     (lets, names)
 }
 
-fn html_handlers(s: &mut String, plan: &Plan<'_>, refs: &[(&Field, &Parent)]) {
+fn html_handlers(s: &mut String, plan: &Plan<'_>) {
     let n = plan.names;
     let p = &n.pascal;
     let t = &n.plural;
     let path = &n.path;
-    let (lets_ref, ctx) = choices_setup(refs, "db");
-    let (lets_owned, _) = choices_setup(refs, "&db");
+    let (lets_ref, ctx) = choices_setup(plan, "db");
+    let (lets_owned, _) = choices_setup(plan, "&db");
     s.push_str(
         "// ---- HTML (htmx) -----------------------------------------------------------\n\n",
     );
@@ -1111,6 +1430,11 @@ fn input(f: &Field, item: Option<&str>) -> String {
             "<input name=\"{name}\" placeholder=\"{label}\" pattern=\"[0-9a-fA-F-]{{32,36}}\"{}{required}{invalid}>",
             value_attr(&field)
         ),
+        // The stored value is shown as JSON text; `json_text` parses it back.
+        FieldType::Json => format!(
+            "<textarea name=\"{name}\" placeholder=\"{label} (JSON)\"{required}{invalid}>{{{{ {} }}}}</textarea>",
+            value(&format!("{field}|tojson"))
+        ),
         FieldType::References => {
             let parent = f.parent.as_ref().map(|p| p.names.singular.as_str()).unwrap_or("");
             // Submitted values are strings; ids are numbers.
@@ -1153,6 +1477,10 @@ fn display(f: &Field) -> String {
             }
         }
         (None, FieldType::Bool, _) => format!("{{{{ '✓' if {v} }}}}"),
+        (None, FieldType::Json, true) => {
+            format!("{{% if {v} is not none %}}<code>{{{{ {v}|tojson }}}}</code>{{% endif %}}")
+        }
+        (None, FieldType::Json, false) => format!("<code>{{{{ {v}|tojson }}}}</code>"),
         (None, _, true) => format!("{{{{ {v} if {v} is not none }}}}"),
         _ => format!("{{{{ {v} }}}}"),
     }
@@ -1324,38 +1652,44 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
     let n = plan.names;
     let api = api_path(plan);
     let refs: Vec<(&Field, &Parent)> = plan.references().collect();
-    let json_body = |changed: Option<&str>| -> String {
+    // A body with every field's sample value, except those in `overrides`.
+    let body_with = |overrides: &[(&str, String)]| -> String {
         let pairs: Vec<String> = plan
             .fields
             .iter()
             .map(|f| {
-                let v = if changed == Some(f.name.as_str()) {
-                    f.changed_json()
-                } else {
-                    f.sample_json()
-                };
+                let v = overrides
+                    .iter()
+                    .find(|(name, _)| *name == f.name)
+                    .map_or_else(|| f.sample_json(), |(_, v)| v.clone());
                 format!("\"{}\": {v}", f.name)
             })
             .collect();
         format!("{{{}}}", pairs.join(", "))
     };
-    let body = json_body(None);
+    let body = body_with(&[]);
     // The field the PATCH test changes: the first that isn't a reference.
     let patched = plan.fields.iter().find(|f| f.parent.is_none());
 
-    // Rows the resource refers to, inserted by `Factory` with made-up values.
+    // Rows the resource refers to, inserted by `Factory` with made-up values;
+    // a reference to the resource's own table starts out empty.
+    let factories: Vec<&(&Field, &Parent)> =
+        refs.iter().filter(|(f, _)| !plan.is_self(f)).collect();
     let mut setup = String::from("    let client = app(Database::sqlite_memory()).test();\n");
-    if !refs.is_empty() {
+    if !factories.is_empty() {
         setup.push_str(
             "    let pool: sqlx::Pool<DefaultDb> = client.resources().await.require().unwrap();\n",
         );
-        for (f, parent) in &refs {
+        for (f, parent) in &factories {
             let _ = writeln!(
                 setup,
                 "    let {} = Factory::new(\"{}\").create(&pool).await.unwrap().int(\"id\").unwrap();",
                 f.name, parent.names.plural
             );
         }
+    }
+    for (f, _) in refs.iter().filter(|(f, _)| plan.is_self(f)) {
+        let _ = writeln!(setup, "    let {}: Option<i64> = None;", f.name);
     }
     let create = format!(
         "    let res = client.post(\"{api}\").json(&json!({body})).send().await;\n    \
@@ -1370,7 +1704,7 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
         "//! `{api}` against a fresh in-memory database per test.\n\n\
          use serde_json::{{json, Value}};\n{}\n\
          use {krate}::app;\n",
-        if refs.is_empty() {
+        if factories.is_empty() {
             "use zapline::db::Database;"
         } else {
             "use zapline::db::{sqlx, Database, DefaultDb, Factory};"
@@ -1448,25 +1782,99 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
             invalid.join(", ")
         );
     }
-    for (f, parent) in &refs {
+    for (f, parent) in plan.nested() {
         let nested = nested_path(plan, parent).replace("{id}", &format!("{{{}}}", f.name));
         let missing = nested_path(plan, parent).replace("{id}", "999999");
+        if plan.is_self(f) {
+            // A row under the first one; unique columns need values of their own.
+            let mut child: Vec<(&str, String)> = plan
+                .fields
+                .iter()
+                .filter(|o| o.unique && o.parent.is_none())
+                .map(|o| (o.name.as_str(), o.changed_json()))
+                .collect();
+            child.push((f.name.as_str(), "id".to_string()));
+            let _ = writeln!(
+                s,
+                "#[tokio::test]\nasync fn listed_under_their_{role}() {{\n{setup}\n{create}\n    \
+                 let res = client.post(\"{api}\").json(&json!({child})).send().await;\n    \
+                 assert_eq!(res.status(), 201, \"{{}}\", res.text());\n    \
+                 let child = res.json::<Value>()[\"id\"].as_i64().unwrap();\n\n    \
+                 let list: Value = client.get(&format!(\"{under}\")).send().await.json();\n    \
+                 assert_eq!(list[\"total\"], 1, \"{{list}}\");\n    \
+                 assert_eq!(list[\"items\"][0][\"id\"], child);\n\n    \
+                 let res = client.get(\"{missing}\").send().await;\n    \
+                 assert_eq!(res.status(), 404);\n}}\n",
+                role = parent.role,
+                child = body_with(&child),
+                under = nested_path(plan, parent),
+            );
+            continue;
+        }
         let _ = writeln!(
             s,
-            "#[tokio::test]\nasync fn listed_under_their_{sg}() {{\n{setup}\n{create}\n    \
+            "#[tokio::test]\nasync fn listed_under_their_{role}() {{\n{setup}\n{create}\n    \
              let list: Value = client.get(&format!(\"{nested}\")).send().await.json();\n    \
              assert_eq!(list[\"total\"], 1, \"{{list}}\");\n    \
              assert_eq!(list[\"items\"][0][\"id\"], id);\n\n    \
              let res = client.get(\"{missing}\").send().await;\n    \
-             assert_eq!(res.status(), 404);\n\n    \
-             // A {h} that doesn't exist can't be referred to.\n    \
-             let res = client.post(\"{api}\").json(&json!({bad})).send().await;\n    \
-             assert_eq!(res.status(), 409, \"{{}}\", res.text());\n}}\n",
-            sg = parent.names.singular,
-            h = parent.names.human,
-            bad = body.replace(&format!(": {}", f.name), ": 999999"),
+             assert_eq!(res.status(), 404);\n}}\n",
+            role = parent.role,
         );
     }
+    for (f, parent) in &refs {
+        let _ = writeln!(
+            s,
+            "#[tokio::test]\nasync fn missing_{role}_is_422() {{\n{setup}\n{create}\n    \
+             // A {h} that doesn't exist can't be referred to.\n    \
+             let res = client.post(\"{api}\").json(&json!({bad})).send().await;\n    \
+             assert_eq!(res.status(), 422, \"{{}}\", res.text());\n    \
+             assert_eq!(res.json::<Value>()[\"code\"], \"{role}_not_found\");\n    \
+             let res = client\n        .patch(&format!(\"{api}/{{id}}\"))\n        \
+             .json(&json!({{\"{c}\": 999999}}))\n        .send()\n        .await;\n    \
+             assert_eq!(res.status(), 422, \"{{}}\", res.text());\n}}\n",
+            role = parent.role,
+            h = parent.role.replace('_', " "),
+            c = f.name,
+            bad = body_with(&[(f.name.as_str(), "999999".to_string())]),
+        );
+    }
+    let uniques: Vec<&Field> = plan.fields.iter().filter(|f| f.unique).collect();
+    // Another row needs other values in every unique column; a reference
+    // would need another parent, so those are left to the reader.
+    if !uniques.iter().any(|f| f.parent.is_some()) {
+        let others: Vec<(&str, String)> = uniques
+            .iter()
+            .map(|f| (f.name.as_str(), f.changed_json()))
+            .collect();
+        for f in &uniques {
+            let _ = writeln!(
+                s,
+                "#[tokio::test]\nasync fn duplicate_{c}_is_409() {{\n{setup}\n{create}\n    \
+                 // A second row, then the first one's {h} again.\n    \
+                 let other = json!({other});\n    \
+                 let res = client.post(\"{api}\").json(&other).send().await;\n    \
+                 assert_eq!(res.status(), 201, \"{{}}\", res.text());\n    \
+                 let res = client.post(\"{api}\").json(&json!({body})).send().await;\n    \
+                 assert_eq!(res.status(), 409, \"{{}}\", res.text());\n    \
+                 assert_eq!(res.json::<Value>()[\"code\"], \"{c}_taken\");\n    \
+                 let res = client.put(&format!(\"{api}/{{id}}\")).json(&other).send().await;\n    \
+                 assert_eq!(res.status(), 409, \"{{}}\", res.text());\n}}\n",
+                c = f.name,
+                h = f.name.replace('_', " "),
+                other = body_with(&others),
+            );
+        }
+    }
+    // What a browser form sends for each field: nothing for a reference to
+    // the resource itself, which has no other row to point at.
+    let form_value = |f: &Field| -> String {
+        if plan.is_self(f) {
+            "String::new()".to_string()
+        } else {
+            f.changed_form()
+        }
+    };
     if plan.html {
         let _ = writeln!(
             s,
@@ -1480,13 +1888,15 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
         let form: Vec<String> = plan
             .fields
             .iter()
-            .map(|f| format!("(\"{}\", {})", f.name, f.changed_form()))
+            .map(|f| format!("(\"{}\", {})", f.name, form_value(f)))
             .collect();
         let shown = patched
             .map(|f| match f.ty {
                 // The page shows the stored form, which can differ from the input.
                 FieldType::DateTime => "2026-02-28T18:45".to_string(),
                 FieldType::Bool => "✓".to_string(),
+                // `tojson` writes it compactly; escaped for the Rust string.
+                FieldType::Json => "{\\\"n\\\":2}".to_string(),
                 _ => f.changed_json().trim_matches('"').to_string(),
             })
             .filter(|v| v != "✓");
@@ -1535,7 +1945,7 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
                     if f.name == field.name {
                         format!("(\"{}\", \"{bad}\".to_string())", f.name)
                     } else {
-                        format!("(\"{}\", {})", f.name, f.changed_form())
+                        format!("(\"{}\", {})", f.name, form_value(f))
                     }
                 })
                 .collect();
@@ -1754,7 +2164,10 @@ mod tests {
         assert_eq!(f[2].ty, FieldType::DateTime);
         assert_eq!(f[3].rust_type(), "Uuid");
         let err = Field::parse("x:money").unwrap_err().to_string();
-        assert!(err.contains("date, datetime, uuid, references"), "{err}");
+        assert!(
+            err.contains("date, datetime, uuid, json, references"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -1769,6 +2182,7 @@ mod tests {
             (FieldType::Date, "TEXT", "DATE"),
             (FieldType::DateTime, "TEXT", "TIMESTAMPTZ"),
             (FieldType::Uuid, "BLOB", "UUID"),
+            (FieldType::Json, "TEXT", "JSONB"),
             (FieldType::References, "BIGINT", "BIGINT"),
         ];
         for (ty, sqlite, postgres) in cases {
@@ -1785,7 +2199,8 @@ mod tests {
             ("a:date", FieldType::Date),
             ("a:datetime", FieldType::DateTime),
             ("a:uuid", FieldType::Uuid),
-            ("a:references", FieldType::References),
+            ("a:json", FieldType::Json),
+            ("item:references", FieldType::References),
         ] {
             let f = Field::parse(spec).unwrap();
             assert_eq!(f.ty, ty);
@@ -2123,5 +2538,297 @@ mod tests {
                 ("b".to_string(), "TEXT".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn modifiers_and_custom_tables_parse_and_round_trip() {
+        let f = Field::parse("email:string:unique").unwrap();
+        assert!(f.unique && !f.index && !f.optional);
+        assert_eq!(f.spec(), "email:string:unique");
+        let f = Field::parse("sku:string?:index").unwrap();
+        assert!(f.index && f.optional && !f.unique);
+        assert_eq!(f.spec(), "sku:string:index?");
+        assert_eq!(Field::parse(&f.spec()).unwrap(), f);
+        let f = Field::parse("rating:int:index").unwrap();
+        assert_eq!(f.rust_type(), "i64");
+
+        // `author:ref:users`: the column and the codes say `author`, the
+        // foreign key and the `<select>` use `users`.
+        let f = Field::parse("author:ref:users?").unwrap();
+        assert_eq!(f.name, "author_id");
+        assert!(f.optional);
+        let p = f.parent.as_ref().unwrap();
+        assert_eq!(
+            (p.role.as_str(), p.names.plural.as_str()),
+            ("author", "users")
+        );
+        assert_eq!(p.names.singular, "user");
+        assert_eq!(f.label(), "Author");
+        assert_eq!(
+            f.column_sql(Dialect::Postgres),
+            "author_id BIGINT REFERENCES users(id) ON DELETE SET NULL"
+        );
+        assert_eq!(f.spec(), "author:references:users?");
+        assert_eq!(Field::parse(&f.spec()).unwrap(), f);
+        // The default table is not repeated.
+        assert_eq!(
+            Field::parse("author:ref:authors").unwrap().spec(),
+            "author:references"
+        );
+
+        let err = |spec: &str| Field::parse(spec).unwrap_err().to_string();
+        assert!(err("done:bool:unique").contains("can't be unique"));
+        assert!(err("x:string:sorted").contains("unknown modifier `sorted`"));
+        assert!(err("a:ref:users:oops").contains("unknown modifier `oops`"));
+        assert!(err("author:ref:user").contains("reserved word in SQL"));
+
+        // The recipe line keeps them, so `g migration` regenerates the same code.
+        let names = names();
+        let fields =
+            parse_fields(&["slug:string:unique".into(), "editor:ref:users?".into()]).unwrap();
+        let line = recipe(&names, &fields);
+        assert_eq!(
+            line,
+            "// zapline:resource blog_post slug:string:unique editor:references:users?"
+        );
+        let (_, back) = parse_recipe(&line).unwrap().unwrap();
+        assert_eq!(back, fields);
+    }
+
+    #[test]
+    fn unique_and_index_columns_get_indexes() {
+        let fields = parse_fields(&[
+            "email:string:unique".into(),
+            "rating:int:index".into(),
+            "author:references".into(),
+        ])
+        .unwrap();
+        let sql = create_table_sql("reviews", &fields, Dialect::Postgres);
+        assert!(sql.contains("    email TEXT NOT NULL,\n"), "{sql}");
+        assert!(sql.ends_with(
+            ");\n\
+             CREATE UNIQUE INDEX reviews_email_key ON reviews (email);\n\
+             CREATE INDEX reviews_rating_idx ON reviews (rating);\n\
+             CREATE INDEX reviews_author_id_idx ON reviews (author_id);\n"
+        ));
+        assert_eq!(
+            fields[0].drop_index_sql("reviews", true),
+            "DROP INDEX IF EXISTS reviews_email_key;\n"
+        );
+        assert_eq!(
+            fields[1].drop_index_sql("reviews", false),
+            "DROP INDEX reviews_rating_idx;\n"
+        );
+        assert_eq!(
+            Field::parse("x:int").unwrap().drop_index_sql("t", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn json_fields_bind_a_value_and_take_a_textarea() {
+        let names = names();
+        let fields =
+            parse_fields(&["title".into(), "meta:json".into(), "extra:json?".into()]).unwrap();
+        assert_eq!(fields[1].rust_type(), "JsonValue");
+        assert_eq!(
+            fields[1].column_sql(Dialect::Postgres),
+            "meta JSONB NOT NULL"
+        );
+        assert_eq!(fields[2].column_sql(Dialect::Sqlite), "extra TEXT");
+        let plan = plan(&names, &fields, true);
+        let module = module(&plan);
+        assert!(module.contains("use zapline::db::sqlx::types::JsonValue;"));
+        assert!(module.contains(
+            "    #[serde(deserialize_with = \"zapline::extract::json_text\")]\n    pub meta: JsonValue,\n"
+        ));
+        assert!(module.contains(
+            "    #[serde(default, deserialize_with = \"zapline::extract::json_text\")]\n    pub extra: Option<JsonValue>,\n"
+        ));
+        assert!(module.contains("    pub meta: Option<JsonValue>,\n"));
+        assert!(module.contains(".bind(&new.meta)"));
+        // Not sortable or filterable.
+        assert!(module.contains(".sortable([\"title\", \"created_at\", \"updated_at\"])"));
+        assert!(!module.contains("filter_text(\"meta\")"));
+
+        let edit = edit_template(&plan);
+        assert!(edit.contains(
+            "<textarea name=\"meta\" placeholder=\"Meta (JSON)\" required{% if errors.meta %} aria-invalid=\"true\"{% endif %}>\
+             {{ old.meta if old else item.meta|tojson }}</textarea>"
+        ), "{edit}");
+        assert!(edit
+            .contains("{{ old.extra if old else (item.extra|tojson if item.extra is not none) }}"));
+        let row = row_template(&plan);
+        assert!(
+            row.contains("<td><code>{{ item.meta|tojson }}</code></td>"),
+            "{row}"
+        );
+        assert!(row.contains(
+            "{% if item.extra is not none %}<code>{{ item.extra|tojson }}</code>{% endif %}"
+        ));
+
+        let test = test(&plan, "demo");
+        assert!(
+            test.contains("\"meta\": {\"tags\": [\"a\", \"b\"], \"n\": 1}"),
+            "{test}"
+        );
+        assert!(
+            test.contains("(\"meta\", \"{\\\"n\\\": 2}\".to_string())"),
+            "{test}"
+        );
+        // Without references or unique columns, writes keep the plain `?`.
+        assert!(!module.contains("write_error"));
+    }
+
+    #[test]
+    fn missing_parents_and_duplicates_get_named_errors() {
+        let names = ResourceNames::parse("review", None).unwrap();
+        let fields = parse_fields(&[
+            "slug:string:unique".into(),
+            "product:references".into(),
+            "rating:int:index".into(),
+        ])
+        .unwrap();
+        let plan = plan(&names, &fields, false);
+        let module = module(&plan);
+        assert!(module.contains(
+            "async fn write_error(db: &Db, err: sqlx::Error, parents: [Option<i64>; 1]) -> Error {"
+        ), "{module}");
+        assert!(module.contains(
+            "    if e.is_foreign_key_violation() {\n        let [product_id] = parents;\n        \
+             if missing(db, \"products\", product_id).await {\n            \
+             return Error::unprocessable(\"Product not found\").with_code(\"product_not_found\");\n        }\n    }\n"
+        ), "{module}");
+        assert!(module.contains(
+            "    if e.is_unique_violation()\n        \
+             && (e.constraint() == Some(\"reviews_slug_key\") || e.message().ends_with(\": reviews.slug\"))\n    {\n        \
+             return Error::conflict(\"Slug is already taken\").with_code(\"slug_taken\");\n    }\n"
+        ));
+        // Every write goes through it; a PATCH passes what it was given.
+        assert_eq!(
+            module
+                .matches("Err(err) => Err(write_error(db, err, [")
+                .count(),
+            3
+        );
+        assert!(module.contains("write_error(db, err, [Some(new.product_id)])"));
+        assert!(module.contains("write_error(db, err, [changes.product_id])"));
+        assert!(
+            module.contains("async fn missing(db: &Db, table: &str, id: Option<i64>) -> bool {")
+        );
+
+        let test = test(&plan, "demo");
+        assert!(test.contains("async fn missing_product_is_422()"), "{test}");
+        assert!(test.contains("assert_eq!(res.json::<Value>()[\"code\"], \"product_not_found\");"));
+        assert!(test.contains(".json(&json!({\"product_id\": 999999}))"));
+        assert!(!test.contains("409, \"{}\", res.text());\n}\n\n#[tokio::test]\nasync fn missing"));
+        assert!(test.contains("async fn duplicate_slug_is_409()"));
+        assert!(test.contains("let other = json!({\"slug\": \"Changed\", \"product_id\": product_id, \"rating\": 42});"), "{test}");
+        assert!(test.contains("assert_eq!(res.json::<Value>()[\"code\"], \"slug_taken\");"));
+        assert!(test.contains("async fn listed_under_their_product()"));
+
+        // Only unique columns: a plain function, no parent lookups.
+        let fields = parse_fields(&["email:string:unique".into()]).unwrap();
+        let module = super::module(&tests::plan(&names, &fields, false));
+        assert!(module.contains("fn write_error(err: sqlx::Error) -> Error {"));
+        assert!(module.contains(".await\n    .map_err(write_error)?;"));
+        assert!(!module.contains("async fn missing"));
+    }
+
+    #[test]
+    fn two_references_to_one_table_get_no_nested_route() {
+        let names = ResourceNames::parse("post", None).unwrap();
+        let fields = parse_fields(&[
+            "title".into(),
+            "author:ref:users".into(),
+            "editor:ref:users?".into(),
+            "category:references".into(),
+        ])
+        .unwrap();
+        assert_eq!(
+            ambiguous_references(&fields),
+            [(
+                "users".to_string(),
+                vec!["author_id".to_string(), "editor_id".to_string()]
+            )]
+        );
+        let plan = plan(&names, &fields, true);
+        let module = module(&plan);
+        assert!(!module.contains("list_for_author"), "{module}");
+        assert!(!module.contains("list_for_editor"));
+        assert!(module.contains("async fn list_for_category("));
+        // One `<select>` list per table, shared by both fields.
+        assert_eq!(module.matches("async fn user_choices(").count(), 1);
+        assert!(module.contains("context! { items, user_choices, category_choices }"));
+        let edit = edit_template(&plan);
+        assert!(
+            edit.contains(
+                "<select name=\"editor_id\" aria-label=\"Editor\"{% if errors.editor_id %}"
+            ),
+            "{edit}"
+        );
+        assert_eq!(edit.matches("{% for c in user_choices %}").count(), 2);
+        let test = test(&plan, "demo");
+        assert!(test.contains("let author_id = Factory::new(\"users\")"));
+        assert!(test.contains("let editor_id = Factory::new(\"users\")"));
+        assert!(test.contains("async fn missing_author_is_422()"));
+        assert!(test.contains("async fn missing_editor_is_422()"));
+        assert!(!test.contains("listed_under_their_author"));
+        assert!(test.contains("async fn listed_under_their_category()"));
+    }
+
+    #[test]
+    fn an_optional_reference_to_the_own_table_lists_children() {
+        let names = ResourceNames::parse("category", None).unwrap();
+        let mut fields = parse_fields(&[
+            "name".into(),
+            "slug:string:unique".into(),
+            "parent:ref:categories?".into(),
+        ])
+        .unwrap();
+        if let Some(p) = fields[2].parent.as_mut() {
+            p.label = "name".into();
+            p.page = true;
+        }
+        let plan = plan(&names, &fields, true);
+        let sql = create_table_sql("categories", &fields, Dialect::Sqlite);
+        assert!(sql.contains("parent_id BIGINT REFERENCES categories(id) ON DELETE SET NULL"));
+        let module = module(&plan);
+        assert!(
+            module.contains("#[get(\"/api/categories/{id}/categories\", tag = \"categories\")]")
+        );
+        assert!(module.contains("async fn list_for_parent("));
+        assert!(module.contains("FROM categories ORDER BY name"));
+        let test = test(&plan, "demo");
+        assert!(
+            test.contains("    let parent_id: Option<i64> = None;\n"),
+            "{test}"
+        );
+        assert!(!test.contains("Factory"));
+        assert!(test.contains("use zapline::db::Database;"));
+        // A child of the first row, with a slug of its own.
+        assert!(
+            test.contains(
+                ".json(&json!({\"name\": \"Example\", \"slug\": \"Changed\", \"parent_id\": id}))"
+            ),
+            "{test}"
+        );
+        assert!(test.contains("client.get(&format!(\"/api/categories/{id}/categories\"))"));
+        assert!(test.contains("async fn missing_parent_is_422()"));
+        // Forms send no parent.
+        assert!(test.contains("(\"parent_id\", String::new())"));
+    }
+
+    #[test]
+    fn the_label_field_prefers_names_then_required_text() {
+        let f = |specs: &[&str]| {
+            label_field(
+                &parse_field_list(&specs.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+                    .unwrap(),
+            )
+        };
+        assert_eq!(f(&["body:text", "title"]), "title");
+        assert_eq!(f(&["bio:text?", "handle", "n:int"]), "handle");
+        assert_eq!(f(&["n:int", "due:date"]), "id");
     }
 }

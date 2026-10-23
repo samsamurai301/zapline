@@ -178,11 +178,8 @@ fn render(
 ) -> Vec<(PathBuf, String)> {
     // Notes about parents were given when the resource was generated.
     let mut quiet = Report::default();
-    for f in &mut fields {
-        if let Some(parent) = f.parent.as_mut() {
-            super::resolve_parent(project, parent, &mut quiet);
-        }
-    }
+    // Not strict, so it can't fail.
+    let _ = super::resolve_parents(project, names, &mut fields, false, &mut quiet);
     let settings = super::ResourceSettings::of(project);
     // Only the migration's file names; the migration itself is not compared.
     let migration = crate::db::MigrationFiles::new("0_resource", crate::db::Style::Reversible);

@@ -675,11 +675,34 @@ zapline g resource post title body:text published_on:date author:references
 | `date` | `chrono::NaiveDate` | `TEXT` | `DATE` | `type=date` |
 | `datetime` | `chrono::DateTime<Utc>` | `TEXT` | `TIMESTAMPTZ` | `type=datetime-local` (read as UTC) |
 | `uuid` | `uuid::Uuid` | `BLOB` (how sqlx stores it) | `UUID` | text |
+| `json` | `JsonValue` (`serde_json::Value`) | `TEXT` | `JSONB` | textarea holding JSON |
 | `author:references` | `author_id: i64` | `BIGINT REFERENCES authors(id) ON DELETE CASCADE` | same | `<select>` of authors |
+| `author:ref:users` | `author_id: i64` | `BIGINT REFERENCES users(id) ON DELETE CASCADE` | same | `<select>` of users |
 
-Add `?` for an optional field: a nullable column and an `Option<T>`; an optional reference uses `ON DELETE SET NULL`. Dates, times and UUIDs come from `zapline::chrono` and `zapline::uuid`; the generator turns on zapline's `chrono` (and `uuid`) feature in `Cargo.toml`, so you don't add those crates yourself.
+Add `?` for an optional field: a nullable column and an `Option<T>`; an optional reference uses `ON DELETE SET NULL`. Dates, times and UUIDs come from `zapline::chrono` and `zapline::uuid`; the generator turns on zapline's `chrono` (and `uuid`) feature in `Cargo.toml`, so you don't add those crates yourself. A `json` field takes any JSON value in the API; in forms its textarea shows the stored value as JSON and [`zapline::extract::json_text`](database.md#json-columns) parses what comes back (malformed JSON is a `422` naming the field). JSON fields are not sortable or filterable.
 
-A reference also gets a `?author_id=` filter on the list, `GET /api/authors/{id}/posts` (the author's posts, paged like the main list; `404` for an unknown author), and an author `<select>` in the forms that shows each author's `name` (or `title`, `email`, the first required text column, or the id: read from the authors migration). Rows link to the author's page when it has one. Generate the parent first: the generator warns when no migration creates its table, since Postgres won't create a foreign key to a missing table. Inserting a post for an author that doesn't exist answers `409` (`foreign_key_violation`).
+### Resource fields
+
+Modifiers go after the type, before or after the `?`:
+
+```sh
+zapline g resource user email:string:unique name
+zapline g resource review body:text product:references rating:int:index
+```
+
+| Modifier | Migration | API |
+|---|---|---|
+| `:unique` (`email:string:unique`) | `CREATE UNIQUE INDEX users_email_key ON users (email)` | a duplicate is `409` with code `email_taken` |
+| `:index` (`rating:int:index`) | `CREATE INDEX reviews_rating_idx ON reviews (rating)` | |
+
+Unique columns get a unique index rather than an inline `UNIQUE`, so a later `zapline g migration remove_email_from_users` can drop the column on SQLite too. A `bool` can't be unique. References are always indexed.
+
+A reference gets a `?author_id=` filter on the list, `GET /api/authors/{id}/posts` (the author's posts, paged like the main list; `404` for an unknown author), and an author `<select>` in the forms that shows each author's `name` (or `title`, `label`, `email`, `username`, the first required text column, or the id: read from the authors migration). Rows link to the author's page when it has one. Creating or updating a post for an author that doesn't exist answers `422` with code `author_not_found`, before the generic `409 foreign_key_violation` would.
+
+- **Another table name**: `author:ref:users` names the column and the error code after `author` (`author_id`, `author_not_found`) and points the foreign key at `users`.
+- **Generate the parent first**: when no migration creates the parent's table, the generator stops with `run zapline g resource author first` and writes nothing (Postgres won't create a foreign key to a missing table, and the migration must run after the parent's).
+- **The same table**: an optional reference to the resource's own table works, `zapline g resource category name parent:ref:categories?` (or `category:references?`), with `GET /api/categories/{id}/categories` listing the children. A required one is refused: the first row would have nothing to point at.
+- **Two references to one table** (`author:ref:users editor:ref:users?`) get no nested route, since `/api/users/{id}/posts` would be ambiguous; the generator says so, and `?author_id=` filters the list instead.
 
 `PUT` replaces every field; `PATCH` takes any subset (`{"title": "New"}`) and leaves the rest. Both set `updated_at`.
 
@@ -4030,6 +4053,8 @@ With both features enabled, `Db` and `Database` default to Postgres; use `Sqlite
 | pool timeout | 503, code `db_pool_timeout` |
 | anything else | 500 (details logged, not sent) |
 
+Resources made by `zapline g resource` turn the two 409s into errors that name the field: `422 author_not_found` for a reference to a row that doesn't exist, `409 email_taken` for a duplicate in an `email:string:unique` column (see [Resource fields](cli.md#resource-fields)). The generated `write_error` function shows how: on a foreign-key violation it checks which parent is missing, on a unique violation it matches the index name (`users_email_key`).
+
 ## List endpoints: paging, sorting, filters, search
 
 `Listing` turns the query string into a safe, paged query. Callers get pagination, sorting, filters and search; you write one expression:
@@ -4092,7 +4117,7 @@ zapline g migration remove_legacy_from_posts legacy:bool               # DROP CO
 zapline g migration backfill_slugs                                     # an empty pair to fill in
 ```
 
-A required column added to an existing table gets a default so the rows already there stay valid: the one after `=`, or `''`, `0`, `FALSE`; dates, UUIDs and references need an `=` value or have to be optional there. When the table came from `zapline g resource`, its module, pages and test are updated to read and write the new columns, your own edits kept ([The resource follows the table](cli.md#the-resource-follows-the-table)). `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
+A required column added to an existing table gets a default so the rows already there stay valid: the one after `=`, or `''`, `0`, `FALSE`; dates, UUIDs, JSON and references need an `=` value or have to be optional there. `:unique` and `:index` work here too (`add_slug_to_posts slug:string?:unique`) and add the index; the down file, and a later `remove_` migration, drop it before the column. When the table came from `zapline g resource`, its module, pages and test are updated to read and write the new columns, your own edits kept ([The resource follows the table](cli.md#the-resource-follows-the-table)). `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
 
 ### Status, rollback, redo, reset
 
@@ -4168,6 +4193,32 @@ pub struct NewEvent {
 ```
 
 `zapline::extract::optional_datetime` is the same for an `Option<DateTime<Utc>>` field (empty means `None`).
+
+## JSON columns
+
+With the `sqlite` or `postgres` feature, sqlx reads and binds `serde_json::Value` (re-exported as `zapline::db::sqlx::types::JsonValue`) for a `JSONB` column on Postgres and a `TEXT` one on SQLite, and `sqlx::types::Json<T>` for your own type. `zapline g resource settings prefs:json` generates such a column.
+
+```rust,ignore
+use zapline::db::sqlx::types::JsonValue;
+
+#[model]
+#[derive(sqlx::FromRow)]
+pub struct Settings {
+    pub id: i64,
+    pub prefs: JsonValue,           // JSONB on Postgres, TEXT on SQLite
+}
+
+#[model]
+pub struct NewSettings {
+    // A JSON body sends {"prefs": {"theme": "dark"}}; a form's <textarea> sends the text.
+    #[serde(deserialize_with = "zapline::extract::json_text")]
+    pub prefs: JsonValue,
+}
+```
+
+`zapline::extract::json_text` parses a string that holds a JSON object or array, reads an empty string as `null` (so `Option<JsonValue>` is `None`; add `#[serde(default)]`), and leaves other values alone. Malformed JSON is a 422 naming the field. In templates, `{{ item.prefs|tojson }}` writes the value back as JSON.
+
+Postgres can query into `JSONB` (`WHERE prefs->>'theme' = $1`); SQLite has `json_extract(prefs, '$.theme')`. Neither is portable, so write those queries for the dialect you use.
 
 ## Seed data
 
