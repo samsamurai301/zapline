@@ -638,14 +638,14 @@ browser ──▶ zapline dev proxy (the app's address, e.g. :8080)
 ```
 
 1. `zapline dev` starts the app with `ZAPLINE_DEV_PROXY=<file>`. `App::run` then listens on a free loopback port instead of the address you gave it and writes both addresses to that file (`zapline::dev::ENV_DEV_PROXY`). Nothing else in the app changes, and without `ZAPLINE_DEV=1` the variable is ignored.
-2. The CLI listens on the app's own address and forwards every request to the app. HTML pages get one tag before `</head>`: `<script src="/__zapline/client.js" defer>` (fragments such as htmx partials are left alone). An external script, so a `script-src 'self'` policy allows it; with a nonce-based Content-Security-Policy the page's nonce is reused. Pages are fetched uncompressed so the tag can be added; everything else (JSON, assets, streams, server-sent events, WebSocket upgrades) passes through untouched.
+2. The CLI listens on the app's own address and forwards every request to the app. HTML pages get one tag before `</head>`: `<script src="/__zapline/client.js" defer>` (fragments such as htmx partials are left alone). An external script, so a `script-src 'self'` policy allows it; with a nonce-based Content-Security-Policy the page's nonce is reused. Pages are fetched uncompressed so the tag can be added. A page that arrives in one go gets its new length; a page the app streams (it pauses for a moment while writing, or is over 32 MiB) is forwarded as it arrives, with the tag added on the way. Everything else (JSON, assets, streams, server-sent events, WebSocket upgrades) passes through untouched.
 3. The client opens an `EventSource` on `/__zapline/events`. The CLI classifies each file change (Rust or asset), and pushes `reload`, `css`, `building`, `problem` (the parsed `cargo build --message-format=json` errors) or `clear`.
 4. Each forwarded request opens its own connection to the app, so pointing the proxy at a new version takes effect on the very next request.
 5. The proxy tells the app who the browser is with `X-Forwarded-For`, plus a random per-run key (`ZAPLINE_DEV_PROXY_KEY` in the app's environment, `x-zapline-dev-proxy` on each request). The app's local-only pages (the [dev console](dev-console.md) at `/_dev`, the dev inbox, dev error pages, an unguarded admin) trust that `X-Forwarded-For` only when the key matches, and answer only when it names a single loopback address. So they work through the proxy from your machine, while a client reaching a proxy bound to `0.0.0.0` from elsewhere, or anything else that sends a forwarding header, still gets a 404.
 
 The cost in production is zero: the proxy is part of the CLI, and the app side is one environment check in `App::run` at startup. Some limits:
 
-- Apps served with TLS (`ServerConfig::tls`), on a Unix socket, or with `App::serve` on your own listener are run directly (no proxy), as with `--no-proxy`.
+- Apps served with TLS (`ServerConfig::tls`), on a Unix socket, or with `App::serve` on your own listener are run directly (no proxy), as with `--no-proxy`. An app that has not reported its address 60 seconds after starting (it does not use `App::run`, or its startup is that slow) is restarted without the proxy, so it binds its own address, and the session stays direct.
 - The browser talks HTTP/1.1 to the proxy; the app may still serve HTTP/2 to other clients.
 - Each open tab holds one event-stream connection; browsers allow about six HTTP/1.1 connections per host, so keep fewer than that many tabs of the app open.
 - The proxy remembers the app's address from the last run, so the overlay also works when the first build of a session fails. On the very first run in a project it learns the address when the app first starts.
@@ -2089,7 +2089,7 @@ Click through your app once and keep what happened as a regression test. In a de
    If the new responses are right, accept them with ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test
    ```
 
-4. **Accept changes.** When the new responses are right, `ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test --test snapshots` rewrites the snapshots that changed (and only those). Review the change in your diff like any other code.
+4. **Accept changes.** When the new responses are right, `ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test --test snapshots` rewrites the snapshot files that changed (and only those), each as the replay saw it: every exchange in an updated file is stored with the ids and values of this run, so the requests after a changed response still line up on the next run. Review the change in your diff like any other code.
 
 ### What may differ between runs
 
@@ -2107,7 +2107,7 @@ Ids also carry forward. When the recording's `POST /users` answered `{"id": 7}` 
 
 ### Credentials and cookies
 
-`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token` and CSRF token headers are never recorded: the snapshot says `"[redacted]"` and the replay does not send them. Each snapshot file replays with a fresh cookie jar, like a new browser, so a recorded login sets the session cookie that the following requests use. For bearer tokens and API keys, give the replay a test credential:
+`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token` and CSRF token headers are never recorded: the snapshot says `"[redacted]"` and the replay does not send them (CSRF headers carry the replay's own token, see below). Each snapshot file replays with a fresh cookie jar, like a new browser, so a recorded login sets the session cookie that the following requests use. For bearer tokens and API keys, give the replay a test credential:
 
 ```rust
 app().test()
@@ -2124,6 +2124,8 @@ app().test()
     .secret("password", "test-password")
     .await;
 ```
+
+CSRF tokens need nothing: a CSRF-protected app ([`Csrf`](sessions.md#csrf)) mints a new token for each replay's browser, so the replay sends the token from its CSRF cookie (a cookie whose name contains `csrf` or `xsrf`, such as `zapline.csrf`) in each recorded CSRF form field, JSON key and header (`x-csrf-token`, as htmx sends it), the way the page's form or script would.
 
 Other parts of a body (HTML pages, multipart uploads, plain text) are recorded as they are: record with throwaway dev accounts.
 
@@ -8441,7 +8443,7 @@ An upgraded WebSocket stays a connection as far as the server is concerned:
 
 - **It keeps counting against `max_connections`.** The socket takes over the slot of the HTTP connection it came from, with no gap in between, so a new connection can't slip in when hyper hands the socket over. At the limit, an upgrade is never refused: it doesn't need a new slot.
 - **Or against its own limit.** Set `max_upgraded` to count WebSockets separately. The HTTP connection's slot is then freed at the upgrade, and an upgrade beyond `max_upgraded` is answered with `503` (`ws_too_many_connections`, `Retry-After: 1`) instead of `101`, so your callback never runs.
-- **Over HTTP/2 (RFC 8441)** a socket is one stream on a connection that stays open, so it counts once more against `max_connections` on top of that connection (still never refused), or against `max_upgraded` like any other socket, with the same `503` when it is full.
+- **Over HTTP/2 (RFC 8441)** a socket is one stream on a connection that stays open and keeps its `max_connections` slot until its last stream ends, so the socket takes no slot of its own there: one client cannot fill `max_connections` with streams on a single connection (`http2_max_concurrent_streams` bounds the streams per connection). With `max_upgraded` set, it counts against that like any other socket, with the same `503` when it is full.
 - **Graceful shutdown waits for it.** When the drain starts, each socket sends a close frame with code `1001` (`close_code::AWAY`, "server shutting down") the next time your callback reads from or writes to it. A `recv` loop then sees the close handshake and ends; a `send` afterwards fails with `ws_closed`. The server waits for the callbacks to return, up to `shutdown_timeout`, and then drops the ones still running (the socket closes). Upgrades that arrive during the drain get `503` (`ws_shutting_down`).
 
 ```rust
