@@ -65,6 +65,32 @@ async fn serve_graceful_shutdown_finishes_in_flight_request() {
 }
 
 #[tokio::test]
+async fn responses_while_draining_close_keep_alive_connections() {
+    // During `drain_grace` a kept-alive connection is still served, and each
+    // response says `connection: close`: both one that is ready at once and
+    // one from a handler that waits.
+    let app = quiet(App::new().get("/", || async { "ok" }).get("/slow", slow));
+    let mut server = TestServer::spawn(app).await;
+    let mut ready = TcpStream::connect(server.addr).await.unwrap();
+    let mut waits = TcpStream::connect(server.addr).await.unwrap();
+    let before = get_on(&mut ready, "/").await;
+    assert!(!before.contains("connection: close"), "{before}");
+    let before = get_on(&mut waits, "/").await;
+    assert!(!before.contains("connection: close"), "{before}");
+
+    server.stop();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let out = get_on(&mut ready, "/").await;
+    assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
+    assert!(out.contains("connection: close"), "{out}");
+    let out = get_on(&mut waits, "/slow").await;
+    assert!(out.starts_with("HTTP/1.1 200 OK"), "{out}");
+    assert!(out.contains("connection: close"), "{out}");
+    assert!(out.ends_with("done"), "{out}");
+    server.join().await.unwrap();
+}
+
+#[tokio::test]
 async fn idle_keep_alive_connections_do_not_delay_shutdown() {
     let app = App::new().get("/", || async { "ok" });
     let mut server = TestServer::spawn(app).await;

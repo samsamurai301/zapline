@@ -17,7 +17,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{ready, Context, Poll};
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use super::limit::{Limit, Permit};
@@ -183,44 +183,38 @@ pub(crate) struct Service {
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
     type Response = crate::Response;
     type Error = std::convert::Infallible;
-    type Future = H1Response;
+    // Kept as the bare `ResponseFuture`: hyper's dispatcher moves this
+    // future by value, and any wrapper (even an `Option<Signal>` next to
+    // it) costs every HTTP/1.1 request extra copies, drain or not.
+    type Future = ResponseFuture;
 
     /// HTTP/1: see [`ResponseFuture::poll_now`].
     #[inline]
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> H1Response {
-        let mut inner = self
+    fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
+        let mut fut = self
             .app
             .handle(req.map(ReqBody::Incoming), self.conn)
             .poll_now();
-        let drain = match (&self.drain, &mut inner) {
-            (None, _) => None,
-            (Some(signal), ResponseFuture::Ready(Some(res))) => {
-                close_if_draining(signal, res);
-                None
-            }
-            (Some(signal), _) => Some(signal.clone()),
+        let Some(signal) = &self.drain else {
+            return fut;
         };
-        H1Response { inner, drain }
-    }
-}
-
-/// An HTTP/1.1 response future; see `Service::drain`.
-pub(crate) struct H1Response {
-    inner: ResponseFuture,
-    drain: Option<Signal>,
-}
-
-impl Future for H1Response {
-    type Output = Result<crate::Response, std::convert::Infallible>;
-
-    #[inline]
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let mut res = ready!(Pin::new(&mut this.inner).poll(cx));
-        if let (Some(signal), Ok(res)) = (&this.drain, &mut res) {
+        if let ResponseFuture::Ready(Some(res)) = &mut fut {
             close_if_draining(signal, res);
+            return fut;
         }
-        Poll::Ready(res)
+        match fut {
+            // Rare (a handler that waits) and already boxed: check once the
+            // response is ready, in one more box.
+            ResponseFuture::Pending(inner) => {
+                let signal = signal.clone();
+                ResponseFuture::Pending(Box::pin(async move {
+                    let mut res = inner.await;
+                    close_if_draining(&signal, &mut res);
+                    res
+                }))
+            }
+            done => done,
+        }
     }
 }
 
@@ -807,5 +801,28 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for Rewind<I> {
     #[inline]
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Pin::new(&mut self.io).poll_shutdown(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The HTTP/1.1 response future is the bare `ResponseFuture`: hyper
+    /// moves it by value per request, so a wrapper around it (for the drain
+    /// check, say) costs every request, drain or not.
+    #[test]
+    fn http1_response_future_is_not_wrapped() {
+        fn future_of<S: hyper::service::Service<http::Request<hyper::body::Incoming>>>(
+        ) -> std::any::TypeId
+        where
+            S::Future: 'static,
+        {
+            std::any::TypeId::of::<S::Future>()
+        }
+        assert_eq!(
+            future_of::<Service>(),
+            std::any::TypeId::of::<ResponseFuture>()
+        );
     }
 }
