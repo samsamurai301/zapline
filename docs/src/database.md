@@ -107,7 +107,7 @@ zapline db new create_posts     # migrations/20261022062406_create_posts.sql
 zapline db migrate              # apply pending migrations, then exit
 ```
 
-The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
+The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `.migrations(zapline::embed!("migrations"))` compiles them into the binary, with the same checksums as the files ([One binary](deployment.md#one-binary-one-command)). `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
 

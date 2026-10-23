@@ -10,8 +10,9 @@
 //!
 //! fn main() -> std::io::Result<()> {
 //!     App::new()
-//!         .views(zapline::embed!("templates"))
-//!         .assets("/static", zapline::embed!("static"))
+//!         // Relative to Cargo.toml; usually just "templates" and "static".
+//!         .views(zapline::embed!("tests/fixtures/embed/templates"))
+//!         .assets("/static", zapline::embed!("tests/fixtures/embed/static"))
 //!         .run("0.0.0.0:8080")
 //! }
 //! # }

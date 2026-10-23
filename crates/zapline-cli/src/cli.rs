@@ -30,6 +30,7 @@ Examples:
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
   zapline db new create_posts              Add a SQL migration
   zapline db migrate                       Apply pending migrations
+  zapline ship deploy@example.com          Build, upload and swap in a release with zero downtime
   zapline doctor                           Check your toolchain
   zapline bench http://localhost:8080/     Load test with wrk
 
@@ -197,6 +198,22 @@ Examples:
   zapline bench http://localhost:8080/
   zapline bench http://localhost:8080/users -c 128 -d 30s -t 2")]
     Bench(BenchArgs),
+
+    /// Build a release binary and swap it in on a Linux server over ssh
+    #[command(after_long_help = "\
+Builds `cargo build --release`, copies the binary over scp and starts it next to the
+running release on the same port (SO_REUSEPORT). The old release stops only after the
+new one answers its health check; if anything fails first, the old one keeps serving.
+The first run creates a system user, /etc/<app>/env (with generated secrets) and the
+systemd unit <app>@.service. Needs ssh access as root or a user with sudo, and systemd.
+
+Examples:
+  zapline ship deploy@example.com --dry-run      Print every command and file, run nothing
+  zapline ship root@203.0.113.7                  Build, upload, swap
+  zapline ship web1 --static                     A static musl binary (any Linux)
+  zapline ship web1 --env SMTP_HOST=mail.local   Also set a value in /etc/<app>/env
+  zapline ship web1 --rollback                   Start the previous release again")]
+    Ship(ShipArgs),
 }
 
 /// Arguments of `zapline new`.
@@ -461,10 +478,98 @@ pub struct BenchArgs {
     pub raw: bool,
 }
 
+/// Arguments of `zapline ship`.
+#[derive(Debug, Args)]
+pub struct ShipArgs {
+    /// The server: user@host, or a Host from ~/.ssh/config
+    #[arg(value_name = "USER@HOST")]
+    pub host: String,
+
+    /// Binary target to ship [default: the package's binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+
+    /// Service name on the server [default: the package name]
+    #[arg(long, value_name = "NAME")]
+    pub name: Option<String>,
+
+    /// Port the app listens on (written to the settings file on the first deploy)
+    #[arg(long, default_value_t = 8080)]
+    pub port: u16,
+
+    /// Health check path [default: /health/ready with the Health plugin, else /]
+    #[arg(long, value_name = "PATH")]
+    pub health: Option<String>,
+
+    /// Cargo target triple to build for
+    #[arg(long, value_name = "TRIPLE", conflicts_with = "static_build")]
+    pub target: Option<String>,
+
+    /// Build a static binary (the musl target for the server's CPU)
+    #[arg(long = "static")]
+    pub static_build: bool,
+
+    /// ssh port
+    #[arg(long, value_name = "PORT")]
+    pub ssh_port: Option<u16>,
+
+    /// ssh identity (private key) file
+    #[arg(short, long, value_name = "FILE")]
+    pub identity: Option<PathBuf>,
+
+    /// Set KEY=VALUE in the server's settings file (repeatable)
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub env: Vec<String>,
+
+    /// Releases kept on the server, including the live one
+    #[arg(long, default_value_t = 3, value_parser = clap::value_parser!(u16).range(1..))]
+    pub keep: u16,
+
+    /// Print every command and generated file without running anything
+    #[arg(long)]
+    pub dry_run: bool,
+
+    /// Start the previous release again instead of shipping a new one
+    #[arg(long, conflicts_with_all = ["target", "static_build", "bin"])]
+    pub rollback: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::CommandFactory;
+
+    #[test]
+    fn ship_parses() {
+        let Command::Ship(s) = parse(&[
+            "ship",
+            "deploy@h",
+            "--static",
+            "--env",
+            "A=1",
+            "--env",
+            "B=2",
+            "--dry-run",
+            "--ssh-port",
+            "2222",
+            "-i",
+            "k",
+            "--keep",
+            "5",
+        ])
+        .command
+        else {
+            panic!()
+        };
+        assert_eq!(s.host, "deploy@h");
+        assert!(s.static_build && s.dry_run && !s.rollback);
+        assert_eq!(s.env, ["A=1", "B=2"]);
+        assert_eq!((s.ssh_port, s.keep, s.port), (Some(2222), 5, 8080));
+        assert_eq!(s.identity, Some(PathBuf::from("k")));
+        assert!(Cli::try_parse_from(["zapline", "ship", "h", "--rollback", "--static"]).is_err());
+        assert!(Cli::try_parse_from(["zapline", "ship", "h", "--keep", "0"]).is_err());
+        assert!(Cli::try_parse_from(["zapline", "ship"]).is_err());
+    }
 
     #[test]
     fn the_cli_definition_is_consistent() {

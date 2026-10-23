@@ -27,7 +27,7 @@
 //! - `HEAD` support (headers only), exact `Content-Length`, and files
 //!   streamed in 64 KiB chunks instead of being buffered.
 //! - Directories compiled into the binary with
-//!   [`embed!`](crate::embed): `ServeDir::new(zapline::embed!("public"))`
+//!   [`embed!`](mod@crate::embed): `ServeDir::new(zapline::embed!("public"))`
 //!   serves from memory, with the same headers (the `ETag` is the content
 //!   hash, there is no `Last-Modified`).
 //!

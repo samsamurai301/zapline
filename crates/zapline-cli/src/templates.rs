@@ -102,6 +102,7 @@ const FULLSTACK: &[TemplateFile] = &[
     file!(".github/workflows/ci.yml", "common/ci.yml.tmpl"),
     file!("Dockerfile", "fullstack/Dockerfile.tmpl"),
     file!("README.md", "fullstack/README.md.tmpl"),
+    file!("build.rs", "fullstack/build.rs.tmpl"),
     file!("src/main.rs", "fullstack/src/main.rs.tmpl"),
     file!("src/lib.rs", "fullstack/src/lib.rs.tmpl"),
     file!("src/routes/mod.rs", "fullstack/src/routes/mod.rs.tmpl"),

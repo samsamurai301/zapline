@@ -10,14 +10,12 @@
 //! HTTP/1.1 path.
 
 use std::future::poll_fn;
-#[cfg(feature = "http2")]
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{ready, Context, Poll};
 use std::time::Duration;
 
 use hyper::server::conn::http1;
@@ -33,7 +31,7 @@ use hyper_util::rt::TokioExecutor;
 
 #[cfg(any(feature = "tls", feature = "http2"))]
 use super::shutdown::Slot;
-use super::shutdown::{GracefulShutdown, Signal, Watched};
+use super::shutdown::{GracefulShutdown, Signal, Watched, RUNNING};
 use super::ServerConfig;
 use crate::app::{AppInner, ResponseFuture};
 use crate::body::ReqBody;
@@ -173,28 +171,64 @@ impl Listen for tokio::net::UnixListener {
 pub(crate) struct Service {
     app: Arc<AppInner>,
     conn: ConnInfo,
-    /// Flagged when the first request starts, so draining can tell a
-    /// connection that never sent one (see `Watched::first_request`).
-    /// `None` without a drain grace period.
-    started: Option<Arc<AtomicBool>>,
+    /// The accept loop's shutdown signal, when connections linger on drain
+    /// (`ServerConfig::drain_grace`): responses sent while draining say
+    /// `connection: close`, so a keep-alive client sends its next request
+    /// on a new connection instead of racing the close.
+    drain: Option<Signal>,
 }
 
 impl hyper::service::Service<http::Request<hyper::body::Incoming>> for Service {
     type Response = crate::Response;
     type Error = std::convert::Infallible;
-    type Future = ResponseFuture;
+    type Future = H1Response;
 
     /// HTTP/1: see [`ResponseFuture::poll_now`].
     #[inline]
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> ResponseFuture {
-        if let Some(started) = &self.started {
-            if !started.load(Ordering::Relaxed) {
-                started.store(true, Ordering::Relaxed);
-            }
-        }
-        self.app
+    fn call(&self, req: http::Request<hyper::body::Incoming>) -> H1Response {
+        let mut inner = self
+            .app
             .handle(req.map(ReqBody::Incoming), self.conn)
-            .poll_now()
+            .poll_now();
+        let drain = match (&self.drain, &mut inner) {
+            (None, _) => None,
+            (Some(signal), ResponseFuture::Ready(Some(res))) => {
+                close_if_draining(signal, res);
+                None
+            }
+            (Some(signal), _) => Some(signal.clone()),
+        };
+        H1Response { inner, drain }
+    }
+}
+
+/// An HTTP/1.1 response future; see `Service::drain`.
+pub(crate) struct H1Response {
+    inner: ResponseFuture,
+    drain: Option<Signal>,
+}
+
+impl Future for H1Response {
+    type Output = Result<crate::Response, std::convert::Infallible>;
+
+    #[inline]
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        let mut res = ready!(Pin::new(&mut this.inner).poll(cx));
+        if let (Some(signal), Ok(res)) = (&this.drain, &mut res) {
+            close_if_draining(signal, res);
+        }
+        Poll::Ready(res)
+    }
+}
+
+#[inline]
+fn close_if_draining(signal: &Signal, res: &mut crate::Response) {
+    if signal.state() != RUNNING {
+        res.headers_mut().insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
     }
 }
 
@@ -460,9 +494,9 @@ impl Proto {
                 return serve_h2(stream, service, h2, self.detect_timeout, slot).await;
             }
         }
-        let started = service.started.clone();
+        let linger = service.drain.is_some();
         Watched::new(self.h1(stream, service), slot, None)
-            .first_request(started)
+            .linger(linger)
             .await
     }
 
@@ -490,8 +524,8 @@ impl Proto {
             drop(permit);
         } else {
             // Its own task, so HTTP/1.1 runs exactly the hot-path future.
-            let started = service.started.clone();
-            tokio::spawn(Watched::new(self.h1(io, service), slot, permit).first_request(started));
+            let linger = service.drain.is_some();
+            tokio::spawn(Watched::new(self.h1(io, service), slot, permit).linger(linger));
         }
     }
 }
@@ -638,7 +672,7 @@ fn spawn_connection<I: Accepted>(
     let service = Service {
         app: worker.app.clone(),
         conn,
-        started: worker.drain_grace.then(|| Arc::new(AtomicBool::new(false))),
+        drain: worker.drain_grace.then(|| worker.signal.clone()),
     };
 
     #[cfg(feature = "tls")]
@@ -656,8 +690,8 @@ fn spawn_connection<I: Accepted>(
     }
 
     // Plain HTTP/1.1, the hot path: the task is just the watched connection.
-    let started = service.started.clone();
-    tokio::spawn(Watched::new(worker.proto.h1(io, service), slot, permit).first_request(started));
+    let linger = service.drain.is_some();
+    tokio::spawn(Watched::new(worker.proto.h1(io, service), slot, permit).linger(linger));
 }
 
 /// Accept errors are per-connection or resource exhaustion (EMFILE, ENFILE,

@@ -56,7 +56,7 @@
 //! [`ENV_MIGRATE_ONLY`] set.
 //!
 //! `Database::migrations(zapline::embed!("migrations"))` compiles them into
-//! the binary (see [`embed`](crate::embed)), so the server needs no
+//! the binary (see [`embed`](mod@crate::embed)), so the server needs no
 //! `migrations/` directory. Checksums are the same as for the files on
 //! disk, so switching either way never looks like an edited migration.
 //!

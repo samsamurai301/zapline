@@ -69,7 +69,7 @@
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
 //! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
-//! | Deployment | [`embed`]: templates, static files, migrations and translations compiled into the binary (`embed!`) |
+//! | Deployment | [`embed`](mod@embed): templates, static files, migrations and translations compiled into the binary (`embed!`) |
 //!
 //! # Cargo features
 //!

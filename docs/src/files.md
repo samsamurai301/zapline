@@ -138,6 +138,8 @@ In templates (feature `views`) it is a function, whether `.views(..)` comes befo
 
 No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
 
+`App::assets("/static", zapline::embed!("static"))` (and `ServeDir::new(zapline::embed!("public"))`) serve files compiled into the binary instead: same URLs, hashes, ETags, ranges and precompressed variants, with the hashes computed at compile time. Debug builds keep reading the directory ([One binary](deployment.md#one-binary-one-command)).
+
 ## Tailwind CSS without Node
 
 ```sh

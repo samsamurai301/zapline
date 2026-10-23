@@ -1,0 +1,15 @@
+//! Release builds compile `templates/`, `static/` and `migrations/` into the
+//! binary with `zapline::embed!`. Cargo notices edits to embedded files on
+//! its own; this makes a release build also notice files that were added
+//! or removed. Debug builds read the directories from disk, so editing a
+//! template never triggers a rebuild there.
+
+fn main() {
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        for dir in ["templates", "static", "migrations"] {
+            println!("cargo:rerun-if-changed={dir}");
+        }
+    } else {
+        println!("cargo:rerun-if-changed=build.rs");
+    }
+}

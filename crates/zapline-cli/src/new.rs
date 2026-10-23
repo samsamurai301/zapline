@@ -504,6 +504,7 @@ mod tests {
                     "templates/todos/index.html",
                     "static/app.css",
                     "tests/todos.rs",
+                    "build.rs",
                     "Dockerfile",
                     ".dockerignore",
                     ".github/workflows/ci.yml",

@@ -9,8 +9,8 @@
 //! - With [`ENV_READY_PATH`] set, the server first requests that path from
 //!   itself, in-process (so it is this process that answers, not whichever
 //!   instance owns the port), until it answers below 400. Startup fails if
-//!   it never does within [`ENV_READY_TIMEOUT`] seconds (default 30), and
-//!   the port is never bound.
+//!   it never does within [`ENV_READY_TIMEOUT`] seconds (default 30), or
+//!   at once on 404 or 405 (no such route), and the port is never bound.
 //! - With [`ENV_REUSE_PORT`] set, the multi-threaded runtime also binds with
 //!   `SO_REUSEPORT` (the default thread-per-core runtime always does on
 //!   Linux), so two instances can share the port during the swap.
@@ -95,6 +95,12 @@ pub(crate) async fn self_check(app: &AppInner) -> io::Result<()> {
         };
         if status.as_u16() < 400 {
             return Ok(());
+        }
+        // No such route: waiting won't make one appear.
+        if status == http::StatusCode::NOT_FOUND || status == http::StatusCode::METHOD_NOT_ALLOWED {
+            return Err(io::Error::other(format!(
+                "readiness check failed: GET {path} answered {status} (is {ENV_READY_PATH} a route of this app?)"
+            )));
         }
         if Instant::now() >= deadline {
             return Err(io::Error::other(format!(

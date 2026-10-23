@@ -323,6 +323,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Background work | `BackgroundTasks` extractor, `App::schedule(Schedule::every(dur), job)` |
 | Live updates | `App::live(Live::new())` + `live: Live`; `live.publish("topic", "event", html)`; handler returns `live.sse("topic").into_response()`; htmx: `hx-ext="sse" sse-connect="/live/topic" sse-swap="event"` ([Live updates](live.md)) |
 | Realtime | `WebSocketUpgrade` (`ws` feature), `Sse` |
+| One binary + deploy | `zapline::embed!("templates")` wherever a dir goes (disk in debug); `zapline ship user@host` ([Deployment](deployment.md#one-binary-one-command)) |
 | Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
@@ -363,6 +364,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
 | `zapline dev [--bin X] [-- app args]` | Rebuild and restart on changes to `src/`, `config/`, `migrations/` and `Cargo.toml` (templates reload without a restart). The old process gets SIGTERM, then a kill after 5 seconds. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
+| `zapline ship <user@host> [--dry-run] [--static] [--rollback]` | [Build a release binary, copy it over ssh and swap it in](deployment.md#one-binary-one-command) next to the running one on the same port, with systemd. The first run creates the user, `/etc/<app>/env` (with generated secrets) and the unit. Any failure leaves the old release serving. `--env K=V` sets a setting, `--keep N` keeps N releases |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
@@ -2658,7 +2660,7 @@ zapline db new create_posts     # migrations/20261022062406_create_posts.sql
 zapline db migrate              # apply pending migrations, then exit
 ```
 
-The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
+The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `.migrations(zapline::embed!("migrations"))` compiles them into the binary, with the same checksums as the files ([One binary](deployment.md#one-binary-one-command)). `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
 
@@ -2802,7 +2804,7 @@ Values are HTML-escaped automatically in `.html` templates. Use `{{ value | safe
 
 ## Hot reload
 
-In debug builds templates are read from disk on every render: edit a template, refresh the browser, no rebuild. Release builds load each template once. Copy `templates/` next to the binary when you deploy (the generated Dockerfiles do).
+In debug builds templates are read from disk on every render: edit a template, refresh the browser, no rebuild. Release builds load each template once. To ship the templates inside the binary, pass `App::views(zapline::embed!("templates"))`: release builds then read them from memory, and debug builds still read the directory, so hot reload keeps working ([One binary](deployment.md#one-binary-one-command)). Otherwise copy `templates/` next to the binary when you deploy.
 
 ## Errors
 
@@ -5315,6 +5317,8 @@ In templates (feature `views`) it is a function, whether `.views(..)` comes befo
 
 No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
 
+`App::assets("/static", zapline::embed!("static"))` (and `ServeDir::new(zapline::embed!("public"))`) serve files compiled into the binary instead: same URLs, hashes, ETags, ranges and precompressed variants, with the hashes computed at compile time. Debug builds keep reading the directory ([One binary](deployment.md#one-binary-one-command)).
+
 ## Tailwind CSS without Node
 
 ```sh
@@ -6067,7 +6071,7 @@ Notes for a clean setup:
 `App::run(addr)` starts a production-ready server with no extra configuration:
 
 - **Thread-per-core.** One single-threaded Tokio runtime per CPU, each with its own `SO_REUSEPORT` listener. This is the default on Linux, Android and FreeBSD. Elsewhere, or with `.runtime(RuntimeMode::MultiThread)`, it uses one listener on a work-stealing runtime.
-- **Graceful shutdown.** On SIGINT or SIGTERM (Ctrl-C on Windows) it stops accepting connections, lets in-flight requests finish, closes idle keep-alive connections, waits up to `shutdown_timeout` (default 30s), then runs your [shutdown hooks](lifecycle.md). A second signal forces an immediate stop.
+- **Graceful shutdown.** On SIGINT or SIGTERM (Ctrl-C on Windows) it stops accepting connections, lets in-flight requests finish, closes keep-alive connections after their next response (or after `drain_grace`, 1s, if idle), waits up to `shutdown_timeout` (default 30s), then runs your [shutdown hooks](lifecycle.md). A second signal forces an immediate stop.
 - **HTTP/1.1** with keep-alive and pipelining. **HTTP/2** with the `http2` feature, using h2c prior knowledge and ALPN `h2` over TLS. Detection costs nothing for HTTP/1.1 connections.
 
 ```rust
@@ -6119,6 +6123,7 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `max_header_size`, `max_headers`, `max_buf_size` | hyper defaults | Request head limits |
 | `http2`, `http2_max_concurrent_streams`, `http2_keep_alive_interval` | true (feature on) | HTTP/2 tuning |
 | `shutdown_timeout` | 30s | Drain deadline |
+| `drain_grace` | 1s | How long an idle connection may still send a request once draining starts; its response says `connection: close` ([why](deployment.md#why-no-request-is-dropped)) |
 | `tls_handshake_timeout` | 10s | Abandon slow handshakes |
 | `backlog` | 4096 | Listen backlog |
 | `banner` | true | Print the startup line |
@@ -6158,9 +6163,146 @@ cargo build --release
 
 Consider `mimalloc` as the global allocator for throughput-heavy services.
 
+## One binary, one command
+
+A zapline app can be a single executable: templates, static files, migrations,
+translations and config compiled in. `zapline ship` puts it on a Linux server
+and swaps it in without dropping a request.
+
+### Compile the directories in: `zapline::embed!`
+
+```rust,ignore
+App::new()
+    .views(zapline::embed!("templates"))
+    .assets("/static", zapline::embed!("static"))
+    .database(Database::from_env().migrations(zapline::embed!("migrations")))
+    .i18n(I18n::load(zapline::embed!("locales"))?)
+```
+
+`embed!("dir")` reads the directory (relative to the crate's `Cargo.toml`)
+at compile time and gives a [`Dir`](https://docs.rs/zapline/latest/zapline/embed/struct.Dir.html).
+Everything that takes a directory takes a `Dir`: `App::views`, `App::assets`,
+`ServeDir::new`, `Database::migrations`, `I18n::load` and
+`Config::builder().standard_in(..)` (for `config/`).
+
+- **Release builds** serve from memory. Fingerprinted asset URLs, ETags,
+  ranges and precompressed `.gz`/`.br` files work as they do from disk; the
+  hashes are computed at compile time, so startup reads nothing.
+  Migrations have the same checksums as the files, so a database migrated
+  from disk accepts the embedded copy.
+- **Debug builds** read the real directory while it exists, so editing a
+  template or a stylesheet still needs only a browser refresh.
+  `Dir::in_memory()` uses the compiled copy in debug too (for tests).
+
+Cargo rebuilds when an embedded file changes, but it doesn't watch for files
+that are added. The `fullstack` template has a `build.rs` for that; in your
+own project, add one:
+
+```rust,ignore
+// build.rs
+fn main() {
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        for dir in ["templates", "static", "migrations"] {
+            println!("cargo:rerun-if-changed={dir}");
+        }
+    } else {
+        println!("cargo:rerun-if-changed=build.rs");
+    }
+}
+```
+
+(`zapline ship` also sets `ZAPLINE_EMBED_STAMP`, which forces the re-read.)
+
+### Deploy: `zapline ship`
+
+```sh
+zapline ship deploy@203.0.113.7 --dry-run   # every command and file, nothing runs
+zapline ship deploy@203.0.113.7             # build, upload, swap
+zapline ship deploy@203.0.113.7 --rollback  # the previous release, the same way
+```
+
+The server needs systemd and a login that is root or can `sudo`. Only the
+system `ssh` and `scp` are used, so keys, agents, `~/.ssh/config` hosts and
+known hosts work as in your terminal. One ssh connection is shared by
+the whole run.
+
+What one run does:
+
+1. `ssh host uname -sm` picks the build: a plain `cargo build --release` when
+   this machine has the same OS and CPU, otherwise an error that says what
+   to use. `--static` builds for `<cpu>-unknown-linux-musl`, which runs on
+   any Linux. It uses `musl-gcc` (`apt install musl-tools`), a
+   `<cpu>-linux-musl-gcc` cross compiler, or `cargo zigbuild`, whichever is
+   installed, and says what to install when none is. `--target <triple>`
+   picks the target yourself.
+2. With `styles/app.css`, Tailwind builds the minified `static/app.css` first.
+3. `scp` uploads the binary, its SHA-256, a systemd unit, the settings file
+   and the install script to a private directory in `/tmp`.
+4. The script installs and swaps:
+
+   | First run only | Every run |
+   |---|---|
+   | A system user named after the app | The binary in `/opt/<app>/releases/<id>/`, checked against its SHA-256 |
+   | `/etc/<app>/env` with `PORT`, `APP_ENV=production`, the database URL (SQLite in `/var/lib/<app>/`), and a generated value for each `*_SECRET`/`*_KEY` in `.env.example` | `--env KEY=VALUE` settings merged into `/etc/<app>/env` |
+   | `net.ipv4.tcp_migrate_req=1` (see below) | `/etc/systemd/system/<app>@.service` rewritten |
+
+   It then runs `systemctl start <app>@<id>` next to the running release. Both
+   bind the same port (`SO_REUSEPORT`). `systemctl start` returns only once
+   the new process has answered its own health check (`/health/ready` with
+   the `Health` plugin, otherwise `/`; `--health` picks another path) and
+   said `READY=1`. The script checks the port with curl, points
+   `/opt/<app>/current` at the new release, enables it for boot, and stops
+   the old one. The old release drains: it finishes its requests and closes
+   its connections. Only the newest three releases are kept (`--keep N`).
+
+Any failure before the old release stops leaves it serving. This covers a
+build error, a corrupted upload, a release that crashes on startup, a
+failing health check or a port that doesn't answer. The new release and its
+unit change are undone, and the script prints the new release's last log
+lines. If the new release dies right after the swap, the old one is started
+again.
+
+On the server:
+
+```sh
+journalctl -u 'myapp@*' -f            # logs
+sudoedit /etc/myapp/env               # settings; ship again (or restart) to apply
+systemctl status 'myapp@*'
+ls /opt/myapp/releases                # what --rollback can go back to
+```
+
+### Why no request is dropped
+
+- **The new process is ready before it takes traffic.** With
+  `ZAPLINE_READY_PATH` set, the server requests that path from itself,
+  in-process, before it binds the port. It retries until the answer is below
+  400, for up to `ZAPLINE_READY_TIMEOUT` seconds (default 30; the unit sets
+  60). A 404 fails at once. With `NOTIFY_SOCKET` set (systemd `Type=notify`),
+  it sends `READY=1` once it is listening and `STOPPING=1` when it starts to
+  drain.
+- **Two processes share the port.** `ZAPLINE_REUSE_PORT=1` makes every
+  listener use `SO_REUSEPORT`. The default thread-per-core runtime always
+  does on Linux.
+- **Queued connections move over.** When a listener closes, Linux drops the
+  connections still waiting in its accept queue. With
+  `net.ipv4.tcp_migrate_req=1` (Linux 5.14+, which `zapline ship` turns on),
+  it hands them to the other listener on the port instead.
+- **Keep-alive connections end cleanly.** For `ServerConfig::drain_grace`
+  (default 1s) after draining starts, a connection may still send its next
+  request. The response says `connection: close`, so the client opens its
+  next connection to the new release. Closing an idle keep-alive connection
+  right away would reset a request that is already on its way. Connections
+  still idle when the grace ends are closed.
+
+On a test server, 8 clients (half of them keeping connections alive) sent
+about 150,000 requests to a `fullstack` app through a swap, and none failed.
+
+The same environment variables work under any supervisor that can start a
+second instance before stopping the first.
+
 ## Container image
 
-Projects generated by `zapline new` (`api`, `full` and `fullstack` templates) include a two-stage Dockerfile. The first stage compiles your dependencies in their own cached layer, then your code. The runtime image is `debian:bookworm-slim` with CA certificates, running as a non-root user. The `fullstack` image also carries `templates/`, `static/` and `migrations/`, and keeps the SQLite file in `/home/app/data`, which is meant to be a volume.
+Projects generated by `zapline new` (`api`, `full` and `fullstack` templates) include a two-stage Dockerfile. The first stage compiles your dependencies in their own cached layer, then your code. The runtime image is `debian:bookworm-slim` with CA certificates, running as a non-root user. The `fullstack` binary has `templates/`, `static/` and `migrations/` compiled in ([`embed!`](#compile-the-directories-in-zaplineembed)), so the image holds just the binary, and it keeps the SQLite file in `/home/app/data`, which is meant to be a volume.
 
 The app listens on `ADDR` if set, otherwise on `0.0.0.0:$PORT` (the image sets `PORT=8080`). Hosts that choose the port, such as Railway and Render, override `PORT`.
 

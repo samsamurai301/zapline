@@ -170,13 +170,14 @@ pub struct ServerConfig {
     /// On shutdown, how long to wait for in-flight requests before closing
     /// the remaining connections. Default: 30s.
     pub shutdown_timeout: Duration,
-    /// On shutdown, how long an HTTP/1.1 connection that has not sent a
-    /// request yet may still send one (within `shutdown_timeout`). The
-    /// listening socket closes at once; this is for clients that connected
-    /// just before: they get their response instead of a reset, so a
-    /// rolling restart drops nothing. Connections that already sent a
-    /// request close as soon as it is answered. `Duration::ZERO` closes
-    /// them all at once. Default: 1s.
+    /// On shutdown, how long an idle HTTP/1.1 connection may still send a
+    /// request (within `shutdown_timeout`). The listening socket closes at
+    /// once; this is for requests already on their way, from clients that
+    /// just connected or reuse a keep-alive connection: they get a response
+    /// (saying `connection: close`) instead of a reset, so a rolling restart
+    /// drops nothing. A connection closes right after that response, or
+    /// when the grace ends if it sends nothing. `Duration::ZERO` closes idle
+    /// connections at once. Default: 1s.
     pub drain_grace: Duration,
     /// Abort TLS handshakes that take longer than this. Default: 10s.
     pub tls_handshake_timeout: Duration,

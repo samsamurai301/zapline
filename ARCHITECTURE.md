@@ -46,6 +46,8 @@ TCP accept (per-core runtime, SO_REUSEPORT)            server.rs
 | `ServerConfig` (`#[non_exhaustive]`, lives in `server.rs`) | Server tuning. Add new fields with defaults. |
 | `ENV_PRINT_ROUTES` (`ZAPLINE_PRINT_ROUTES=1`) | `App::run` prints the route table as JSON and exits. Used by the CLI. |
 | `ZAPLINE_EXPORT_OPENAPI=<path>` | The OpenAPI plugin writes the spec from its `on_build` hook and exits. Used by the CLI. |
+| `ZAPLINE_READY_PATH`, `ZAPLINE_READY_TIMEOUT`, `ZAPLINE_REUSE_PORT`, `NOTIFY_SOCKET` (`server/ready.rs`) | Supervised zero-downtime swaps: an in-process health check before binding, `SO_REUSEPORT`, systemd `READY=1`/`STOPPING=1`. Read once in `run()`, never per request. Set by the unit `zapline ship` installs. |
+| `embed::Dir` (`embed.rs`, from `zapline::embed!`) | A directory on disk or compiled in. `views`, `assets`, `ServeDir`, `Database::migrations`, `I18n::load` and `standard_in` take `impl Into<Dir>`; embedded lookups are a hash-map hit with no blocking-pool hop. |
 
 Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature module's own file. For example, `openapi/mod.rs` can add `App::openapi(...)`. That keeps each feature self-contained.
 

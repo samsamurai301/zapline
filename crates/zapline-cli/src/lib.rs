@@ -25,6 +25,7 @@ pub mod openapi;
 pub mod project;
 pub mod render;
 pub mod routes;
+pub mod ship;
 pub mod tailwind;
 pub mod templates;
 pub mod ui;
@@ -219,6 +220,27 @@ pub fn execute(cli: Cli) -> Result<()> {
         }
         Command::Mcp => mcp::run(),
         Command::Doctor => doctor::run(),
+        Command::Ship(a) => {
+            let project = Project::discover(Path::new("."))?;
+            ship::run(
+                &project,
+                &ship::ShipOptions {
+                    host: a.host,
+                    bin: a.bin,
+                    name: a.name,
+                    port: a.port,
+                    health: a.health,
+                    target: a.target,
+                    static_build: a.static_build,
+                    ssh_port: a.ssh_port,
+                    identity: a.identity,
+                    env: a.env,
+                    keep: usize::from(a.keep),
+                    dry_run: a.dry_run,
+                    rollback: a.rollback,
+                },
+            )
+        }
         Command::Bench(a) => {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
             let cfg = bench::configure(&a.url, a.connections, &a.duration, a.threads, cpus)?;

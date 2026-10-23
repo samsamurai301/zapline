@@ -34,12 +34,15 @@ pub fn app(db: Database) -> App {
             Factory::new("todos").set("done", true).create(&db).await?;
             Ok(())
         })
-        .views("templates")
+        // templates/, static/ and migrations/ are compiled into release
+        // binaries, so the app deploys as one file (`zapline ship`). Debug
+        // builds read them from disk: edit a template, refresh the browser.
+        .views(zapline::embed!("templates"))
         // Pub/sub for live pages: see `/live/todos` in routes/todos.rs.
         .live(Live::new())
         // static/ at /static; asset("app.css") in templates gives a URL with a
         // content hash that browsers may cache for a year.
-        .assets("/static", "static")
+        .assets("/static", zapline::embed!("static"))
         .plugin(Health::new().check("database", DbCheck::new()))
         .openapi(OpenApi::new(
             env!("CARGO_PKG_NAME"),

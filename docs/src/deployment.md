@@ -16,9 +16,146 @@ cargo build --release
 
 Consider `mimalloc` as the global allocator for throughput-heavy services.
 
+## One binary, one command
+
+A zapline app can be a single executable: templates, static files, migrations,
+translations and config compiled in. `zapline ship` puts it on a Linux server
+and swaps it in without dropping a request.
+
+### Compile the directories in: `zapline::embed!`
+
+```rust,ignore
+App::new()
+    .views(zapline::embed!("templates"))
+    .assets("/static", zapline::embed!("static"))
+    .database(Database::from_env().migrations(zapline::embed!("migrations")))
+    .i18n(I18n::load(zapline::embed!("locales"))?)
+```
+
+`embed!("dir")` reads the directory (relative to the crate's `Cargo.toml`)
+at compile time and gives a [`Dir`](https://docs.rs/zapline/latest/zapline/embed/struct.Dir.html).
+Everything that takes a directory takes a `Dir`: `App::views`, `App::assets`,
+`ServeDir::new`, `Database::migrations`, `I18n::load` and
+`Config::builder().standard_in(..)` (for `config/`).
+
+- **Release builds** serve from memory. Fingerprinted asset URLs, ETags,
+  ranges and precompressed `.gz`/`.br` files work as they do from disk; the
+  hashes are computed at compile time, so startup reads nothing.
+  Migrations have the same checksums as the files, so a database migrated
+  from disk accepts the embedded copy.
+- **Debug builds** read the real directory while it exists, so editing a
+  template or a stylesheet still needs only a browser refresh.
+  `Dir::in_memory()` uses the compiled copy in debug too (for tests).
+
+Cargo rebuilds when an embedded file changes, but it doesn't watch for files
+that are added. The `fullstack` template has a `build.rs` for that; in your
+own project, add one:
+
+```rust,ignore
+// build.rs
+fn main() {
+    if std::env::var("PROFILE").as_deref() == Ok("release") {
+        for dir in ["templates", "static", "migrations"] {
+            println!("cargo:rerun-if-changed={dir}");
+        }
+    } else {
+        println!("cargo:rerun-if-changed=build.rs");
+    }
+}
+```
+
+(`zapline ship` also sets `ZAPLINE_EMBED_STAMP`, which forces the re-read.)
+
+### Deploy: `zapline ship`
+
+```sh
+zapline ship deploy@203.0.113.7 --dry-run   # every command and file, nothing runs
+zapline ship deploy@203.0.113.7             # build, upload, swap
+zapline ship deploy@203.0.113.7 --rollback  # the previous release, the same way
+```
+
+The server needs systemd and a login that is root or can `sudo`. Only the
+system `ssh` and `scp` are used, so keys, agents, `~/.ssh/config` hosts and
+known hosts work as in your terminal. One ssh connection is shared by
+the whole run.
+
+What one run does:
+
+1. `ssh host uname -sm` picks the build: a plain `cargo build --release` when
+   this machine has the same OS and CPU, otherwise an error that says what
+   to use. `--static` builds for `<cpu>-unknown-linux-musl`, which runs on
+   any Linux. It uses `musl-gcc` (`apt install musl-tools`), a
+   `<cpu>-linux-musl-gcc` cross compiler, or `cargo zigbuild`, whichever is
+   installed, and says what to install when none is. `--target <triple>`
+   picks the target yourself.
+2. With `styles/app.css`, Tailwind builds the minified `static/app.css` first.
+3. `scp` uploads the binary, its SHA-256, a systemd unit, the settings file
+   and the install script to a private directory in `/tmp`.
+4. The script installs and swaps:
+
+   | First run only | Every run |
+   |---|---|
+   | A system user named after the app | The binary in `/opt/<app>/releases/<id>/`, checked against its SHA-256 |
+   | `/etc/<app>/env` with `PORT`, `APP_ENV=production`, the database URL (SQLite in `/var/lib/<app>/`), and a generated value for each `*_SECRET`/`*_KEY` in `.env.example` | `--env KEY=VALUE` settings merged into `/etc/<app>/env` |
+   | `net.ipv4.tcp_migrate_req=1` (see below) | `/etc/systemd/system/<app>@.service` rewritten |
+
+   It then runs `systemctl start <app>@<id>` next to the running release. Both
+   bind the same port (`SO_REUSEPORT`). `systemctl start` returns only once
+   the new process has answered its own health check (`/health/ready` with
+   the `Health` plugin, otherwise `/`; `--health` picks another path) and
+   said `READY=1`. The script checks the port with curl, points
+   `/opt/<app>/current` at the new release, enables it for boot, and stops
+   the old one. The old release drains: it finishes its requests and closes
+   its connections. Only the newest three releases are kept (`--keep N`).
+
+Any failure before the old release stops leaves it serving. This covers a
+build error, a corrupted upload, a release that crashes on startup, a
+failing health check or a port that doesn't answer. The new release and its
+unit change are undone, and the script prints the new release's last log
+lines. If the new release dies right after the swap, the old one is started
+again.
+
+On the server:
+
+```sh
+journalctl -u 'myapp@*' -f            # logs
+sudoedit /etc/myapp/env               # settings; ship again (or restart) to apply
+systemctl status 'myapp@*'
+ls /opt/myapp/releases                # what --rollback can go back to
+```
+
+### Why no request is dropped
+
+- **The new process is ready before it takes traffic.** With
+  `ZAPLINE_READY_PATH` set, the server requests that path from itself,
+  in-process, before it binds the port. It retries until the answer is below
+  400, for up to `ZAPLINE_READY_TIMEOUT` seconds (default 30; the unit sets
+  60). A 404 fails at once. With `NOTIFY_SOCKET` set (systemd `Type=notify`),
+  it sends `READY=1` once it is listening and `STOPPING=1` when it starts to
+  drain.
+- **Two processes share the port.** `ZAPLINE_REUSE_PORT=1` makes every
+  listener use `SO_REUSEPORT`. The default thread-per-core runtime always
+  does on Linux.
+- **Queued connections move over.** When a listener closes, Linux drops the
+  connections still waiting in its accept queue. With
+  `net.ipv4.tcp_migrate_req=1` (Linux 5.14+, which `zapline ship` turns on),
+  it hands them to the other listener on the port instead.
+- **Keep-alive connections end cleanly.** For `ServerConfig::drain_grace`
+  (default 1s) after draining starts, a connection may still send its next
+  request. The response says `connection: close`, so the client opens its
+  next connection to the new release. Closing an idle keep-alive connection
+  right away would reset a request that is already on its way. Connections
+  still idle when the grace ends are closed.
+
+On a test server, 8 clients (half of them keeping connections alive) sent
+about 150,000 requests to a `fullstack` app through a swap, and none failed.
+
+The same environment variables work under any supervisor that can start a
+second instance before stopping the first.
+
 ## Container image
 
-Projects generated by `zapline new` (`api`, `full` and `fullstack` templates) include a two-stage Dockerfile. The first stage compiles your dependencies in their own cached layer, then your code. The runtime image is `debian:bookworm-slim` with CA certificates, running as a non-root user. The `fullstack` image also carries `templates/`, `static/` and `migrations/`, and keeps the SQLite file in `/home/app/data`, which is meant to be a volume.
+Projects generated by `zapline new` (`api`, `full` and `fullstack` templates) include a two-stage Dockerfile. The first stage compiles your dependencies in their own cached layer, then your code. The runtime image is `debian:bookworm-slim` with CA certificates, running as a non-root user. The `fullstack` binary has `templates/`, `static/` and `migrations/` compiled in ([`embed!`](#compile-the-directories-in-zaplineembed)), so the image holds just the binary, and it keeps the SQLite file in `/home/app/data`, which is meant to be a volume.
 
 The app listens on `ADDR` if set, otherwise on `0.0.0.0:$PORT` (the image sets `PORT=8080`). Hosts that choose the port, such as Railway and Render, override `PORT`.
 

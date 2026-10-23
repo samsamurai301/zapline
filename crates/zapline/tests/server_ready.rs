@@ -61,6 +61,67 @@ fn get(addr: SocketAddr) -> std::io::Result<String> {
     Ok(out.rsplit("\r\n\r\n").next().unwrap_or_default().to_owned())
 }
 
+/// A keep-alive client: requests on one connection until the server says
+/// `connection: close`, then on a new one.
+struct KeepAlive {
+    addr: SocketAddr,
+    conn: Option<std::io::BufReader<TcpStream>>,
+    reconnects: usize,
+}
+
+impl KeepAlive {
+    fn get(&mut self) -> std::io::Result<String> {
+        use std::io::BufRead;
+        if self.conn.is_none() {
+            let stream = TcpStream::connect_timeout(&self.addr, Duration::from_secs(2))?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            self.conn = Some(std::io::BufReader::new(stream));
+            self.reconnects += 1;
+        }
+        let conn = self.conn.as_mut().unwrap();
+        let result = (|| {
+            conn.get_mut()
+                .write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")?;
+            let (mut len, mut close, mut status) = (0, false, String::new());
+            loop {
+                let mut line = String::new();
+                if conn.read_line(&mut line)? == 0 {
+                    return Err(std::io::Error::other("closed before a response"));
+                }
+                let line = line.trim_end().to_ascii_lowercase();
+                if line.is_empty() {
+                    break;
+                }
+                if status.is_empty() {
+                    status = line;
+                } else if let Some(v) = line.strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap_or(0);
+                } else if line == "connection: close" {
+                    close = true;
+                }
+            }
+            let mut body = vec![0; len];
+            conn.read_exact(&mut body)?;
+            if !status.starts_with("http/1.1 200") {
+                return Err(std::io::Error::other(status));
+            }
+            Ok((String::from_utf8_lossy(&body).into_owned(), close))
+        })();
+        match result {
+            Ok((body, close)) => {
+                if close {
+                    self.conn = None;
+                }
+                Ok(body)
+            }
+            Err(e) => {
+                self.conn = None;
+                Err(e)
+            }
+        }
+    }
+}
+
 /// Whether the kernel hands connections queued on a closing listener to
 /// another one in its `SO_REUSEPORT` group (Linux 5.14+, off by default;
 /// `zapline ship` turns it on).
@@ -109,6 +170,29 @@ fn ready_after_self_check_and_swap_without_dropping_requests() {
             (ok, failed, seen_b)
         })
     };
+    // ... including on kept-alive connections: closing one while its next
+    // request is on the way would reset that request.
+    let kept_alive = {
+        let done = done.clone();
+        std::thread::spawn(move || {
+            let mut client = KeepAlive {
+                addr,
+                conn: None,
+                reconnects: 0,
+            };
+            let (mut ok, mut failed, mut seen_b) = (0, Vec::new(), false);
+            while !done.load(Ordering::SeqCst) {
+                match client.get() {
+                    Ok(body) => {
+                        ok += 1;
+                        seen_b |= body == "B";
+                    }
+                    Err(e) => failed.push(e.to_string()),
+                }
+            }
+            (ok, failed, seen_b, client.reconnects)
+        })
+    };
 
     // The new version binds the same port while the old one serves.
     let checks_b = Arc::new(AtomicUsize::new(0));
@@ -138,6 +222,18 @@ fn ready_after_self_check_and_swap_without_dropping_requests() {
         // those (at the close instant) may fail.
         assert!(failed.len() <= 3, "{} failed: {:?}", failed.len(), failed);
     }
+    let (ok, failed, seen_b, reconnects) = kept_alive.join().unwrap();
+    assert!(ok > 10 && seen_b, "{ok} requests, saw B: {seen_b}");
+    if migrates_requests() {
+        assert!(failed.is_empty(), "{} failed: {:?}", failed.len(), failed);
+    } else {
+        // The new connection can land in the queue of a listener of the old
+        // version that is about to close (see above).
+        assert!(failed.len() <= 3, "{} failed: {:?}", failed.len(), failed);
+    }
+    // The old version closed the connection after a response that said so
+    // (`connection: close`), and the client moved to a new one.
+    assert!(reconnects >= 2, "{reconnects}");
 
     stop_b.send(()).unwrap();
     assert_eq!(recv(&sock), "STOPPING=1");
@@ -162,4 +258,13 @@ fn ready_after_self_check_and_swap_without_dropping_requests() {
         "a failed start sent a notification"
     );
     assert!(get(addr).is_err(), "the port was bound");
+
+    // A path that isn't a route fails at once instead of after the timeout.
+    std::env::set_var(ENV_READY_PATH, "/missing");
+    std::env::set_var(ENV_READY_TIMEOUT, "30");
+    let started = Instant::now();
+    let (_stop, d) = start(instance("D", 0, Arc::new(AtomicUsize::new(0))), addr);
+    let err = d.join().unwrap().unwrap_err().to_string();
+    assert!(err.contains("GET /missing answered 404"), "{err}");
+    assert!(started.elapsed() < Duration::from_secs(5));
 }

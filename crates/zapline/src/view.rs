@@ -33,7 +33,7 @@
 //! templates.
 //!
 //! `App::views(zapline::embed!("templates"))` compiles the templates into
-//! the binary (see [`embed`](crate::embed)): release builds then need no
+//! the binary (see [`embed`](mod@crate::embed)): release builds then need no
 //! `templates/` directory next to them, and debug builds still read (and
 //! reload) the files on disk.
 //!

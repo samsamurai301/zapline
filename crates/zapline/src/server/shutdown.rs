@@ -8,7 +8,7 @@
 
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
@@ -198,20 +198,21 @@ pin_project! {
     /// Drives a connection and applies shutdown: on [`DRAINING`] it asks the
     /// connection to close after in-flight requests, on [`FORCED`] it drops it.
     ///
-    /// A connection that has not started a request yet (one accepted just
-    /// before draining) is first given the signal's grace period to send
-    /// it, instead of being closed under the client: closing it would reset
-    /// a request the client may already have sent, and clients only retry
-    /// requests on reused connections.
+    /// With `linger`, an HTTP/1.1 connection is first given the signal's
+    /// grace period instead of being closed under the client: closing an
+    /// idle connection resets a request the client may already have sent
+    /// (and clients don't retry a request on a fresh connection). Meanwhile
+    /// each response says `connection: close` (see `conn::Service`), so the
+    /// connection ends after the request that arrives, and only one that
+    /// sends nothing for the whole grace period is closed idle.
     pub(crate) struct Watched<C> {
         #[pin]
         conn: C,
         slot: Slot,
         draining: bool,
-        // Set by the service when the first request starts (HTTP/1.1 with a
-        // grace period only).
-        started: Option<Arc<AtomicBool>>,
-        // Armed when draining starts before the first request.
+        // Give the client the grace period on drain (HTTP/1.1 only).
+        linger: bool,
+        // Armed when draining starts.
         grace: Option<Pin<Box<tokio::time::Sleep>>>,
         // A `max_connections` permit, released with the connection.
         permit: Option<OwnedSemaphorePermit>,
@@ -224,16 +225,15 @@ impl<C> Watched<C> {
             conn,
             slot,
             draining: false,
-            started: None,
+            linger: false,
             grace: None,
             permit,
         }
     }
 
-    /// Wait for the first request (flagged in `started`) on drain, for up
-    /// to the grace period, before closing.
-    pub(crate) fn first_request(mut self, started: Option<Arc<AtomicBool>>) -> Self {
-        self.started = started;
+    /// On drain, keep serving for up to the grace period before closing.
+    pub(crate) fn linger(mut self, linger: bool) -> Self {
+        self.linger = linger;
         self
     }
 }
@@ -250,28 +250,15 @@ where
         match this.slot.poll_state(cx) {
             RUNNING => {}
             DRAINING if !*this.draining => {
-                let waiting = this
-                    .started
-                    .as_ref()
-                    .is_some_and(|s| !s.load(Ordering::Relaxed));
-                if waiting {
+                if *this.linger {
                     let grace = this.slot.signal.0.grace;
                     let timer = this
                         .grace
                         .get_or_insert_with(|| Box::pin(tokio::time::sleep(grace)));
                     if timer.as_mut().poll(cx).is_pending() {
-                        // Keep serving: once a request has started, close
-                        // after it (its response says `connection: close`).
-                        if this.conn.as_mut().poll(cx).is_ready() {
-                            return Poll::Ready(());
-                        }
-                        if !this
-                            .started
-                            .as_ref()
-                            .is_some_and(|s| s.load(Ordering::Relaxed))
-                        {
-                            return Poll::Pending;
-                        }
+                        // Keep serving; the connection ends by itself after
+                        // the next response (`connection: close`).
+                        return this.conn.as_mut().poll(cx).map(drop);
                     }
                 }
                 *this.grace = None;

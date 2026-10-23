@@ -31,6 +31,10 @@ in debug builds.
 | `migrations/` | SQL migrations, applied in order at startup |
 | `static/` | CSS, images and scripts served under `/static` |
 | `tests/` | In-process tests with `app(Database::sqlite_memory()).test()` |
+| `build.rs` | Makes release builds notice files added to the embedded directories |
+
+Release builds compile `templates/`, `static/` and `migrations/` into the
+binary (`zapline::embed!`): the executable is the whole app.
 
 ## Common tasks
 
@@ -48,6 +52,19 @@ Switch zapline's `sqlite` feature to `postgres` in `Cargo.toml` and set
 which both SQLite and Postgres understand. In the migration, write
 `id BIGSERIAL PRIMARY KEY` instead of `INTEGER PRIMARY KEY AUTOINCREMENT`, and
 point the tests at a Postgres with `Database::postgres(url)`.
+
+## Deploy
+
+To any Linux server with systemd you can ssh into (as root or with sudo):
+
+```sh
+zapline ship deploy@your-server --dry-run   # see every command first
+zapline ship deploy@your-server             # build, upload, swap with zero downtime
+zapline ship deploy@your-server --rollback  # back to the previous release
+```
+
+Settings live in `/etc/@@name@@/env` on the server; logs in
+`journalctl -u '@@name@@@*'`.
 
 ## Docker
 
