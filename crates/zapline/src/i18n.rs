@@ -414,7 +414,8 @@ impl FromRequestParts for Locale {
             Some(i18n) => Ok(i18n.negotiate(req)),
             None => Err(Error::internal(
                 "no translations registered: add `.i18n(I18n::load(\"locales\")?)` to the app",
-            )),
+            )
+            .diagnosed("ZL0076", None)),
         }
     }
 }

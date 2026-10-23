@@ -183,6 +183,7 @@ impl<DB: sqlx::Database> Database<DB> {
                     "the {var} environment variable is not set; set it to your database URL \
                      (for example sqlite://app.db?mode=rwc or postgres://user:pass@localhost/app)"
                 ))
+                .diagnosed("ZL0040", None)
             }),
         }
     }
@@ -192,6 +193,7 @@ impl<DB: sqlx::Database> Database<DB> {
         DB::Connection: sqlx::migrate::Migrate,
     {
         let url = self.resolve_url()?;
+        check_scheme(&url, DB::NAME)?;
         let max = self.max_connections.unwrap_or_else(|| {
             let cpus = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
             (cpus * 4).max(10)
@@ -203,7 +205,10 @@ impl<DB: sqlx::Database> Database<DB> {
             .idle_timeout(self.idle_timeout)
             .connect(&url)
             .await
-            .map_err(|e| Error::internal(format!("cannot connect to the database: {e}")))?;
+            .map_err(|e| {
+                Error::internal(format!("cannot connect to the database: {e}"))
+                    .diagnosed("ZL0041", None)
+            })?;
         if self.migrate {
             run_migrations(&pool, &self.migrations).await?;
         }
@@ -287,11 +292,12 @@ where
         .await
         .map_err(|e| {
             Error::internal(format!("cannot read migrations in {}: {e}", dir.display()))
+                .diagnosed("ZL0042", None)
         })?;
     migrator
         .run(pool)
         .await
-        .map_err(|e| Error::internal(format!("migration failed: {e}")))?;
+        .map_err(|e| Error::internal(format!("migration failed: {e}")).diagnosed("ZL0043", None))?;
     Ok(())
 }
 
@@ -314,7 +320,8 @@ impl App {
             if std::env::var_os(ENV_SEED).is_some() && !res.contains::<HasSeed>() {
                 return Err(Error::internal(
                     "no seed data: add `.seed(|db| async move { .. })` after `.database(..)`",
-                ));
+                )
+                .diagnosed("ZL0046", None));
             }
             res.insert(pool);
             Ok(())
@@ -352,12 +359,38 @@ impl App {
                 Error::internal(
                     "register the database before the seed: `.database(..)`, then `.seed(..)`",
                 )
+                .diagnosed("ZL0045", None)
             })?;
             seed(Db(pool)).await?;
             println!("seed data inserted");
             std::process::exit(0);
         })
     }
+}
+
+/// A `postgres://` URL for a SQLite pool (or the other way round) fails in
+/// sqlx with a vague error; say which backend the app was built for. (SQLite
+/// also takes plain file names, so only another backend's scheme is wrong.)
+fn check_scheme(url: &str, backend: &str) -> crate::Result<()> {
+    let scheme = url
+        .split_once("://")
+        .map_or("", |(s, _)| s)
+        .to_ascii_lowercase();
+    let (other, example) = match backend {
+        "PostgreSQL" => (["sqlite"].as_slice(), "postgres://user:pass@localhost/app"),
+        "SQLite" => (
+            ["postgres", "postgresql", "mysql"].as_slice(),
+            "sqlite://app.db?mode=rwc",
+        ),
+        _ => return Ok(()),
+    };
+    if !other.contains(&scheme.as_str()) {
+        return Ok(());
+    }
+    Err(Error::internal(format!(
+        "the database URL is for `{scheme}` but this `Database` is {backend}"
+    ))
+    .diagnosed("ZL0021", Some(example.to_owned())))
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +431,8 @@ impl<DB: sqlx::Database> FromRequestParts for Db<DB> {
                  (with both the postgres and sqlite features on, `Db` means Postgres; \
                  use `SqliteDb` for SQLite)",
                 DB::NAME
-            ))),
+            ))
+            .diagnosed("ZL0044", None)),
         }
     }
 }

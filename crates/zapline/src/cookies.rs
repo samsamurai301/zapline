@@ -108,6 +108,7 @@ fn key(req: &Request) -> Result<Key> {
     req.state::<Key>().cloned().ok_or_else(|| {
         Error::internal("no cookie key: register one with `App::cookie_key(Key::..)`")
             .with_code("cookie_key_missing")
+            .diagnosed("ZL0073", None)
     })
 }
 

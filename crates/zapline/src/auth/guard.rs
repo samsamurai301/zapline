@@ -271,6 +271,7 @@ impl Middleware for PolicyEnforcer {
                 route.path()
             ))
             .with_code("auth_misconfigured")
+            .diagnosed("ZL0078", None)
         };
         Box::pin(ready(err.into_response()))
     }
@@ -524,7 +525,8 @@ impl<U: Clone + Send + Sync + 'static> Middleware for Guard<U> {
             let err = Error::internal(
                 "`Guard` runs before routing: install it with `App::wrap_route` or `Routes::wrap`",
             )
-            .with_code("auth_misconfigured");
+            .with_code("auth_misconfigured")
+            .diagnosed("ZL0078", None);
             return Box::pin(ready(err.into_response()));
         };
         let policy = RoutePolicy::of(route);

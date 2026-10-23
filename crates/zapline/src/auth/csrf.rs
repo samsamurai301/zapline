@@ -457,6 +457,7 @@ impl FromRequestParts for CsrfToken {
         req.extensions().get::<CsrfToken>().cloned().ok_or_else(|| {
             Error::internal("no CSRF token: install the `Csrf` middleware")
                 .with_code("csrf_layer_missing")
+                .diagnosed("ZL0074", None)
         })
     }
 }

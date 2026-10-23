@@ -68,7 +68,7 @@
 //! | Realtime and content | [`live`] (pub/sub to browsers), [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
-//! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
+//! | Development | [`dev`]: routes, recent requests and errors, jobs and mail at `/_dev` ([`App::dev_console`]); the dev error page ([`App::dev_errors`]); [`codes`]: diagnostic codes such as `ZL0002` |
 //!
 //! # Cargo features
 //!
@@ -111,6 +111,7 @@
 // ---- core -----------------------------------------------------------------
 mod app;
 mod body;
+pub mod codes;
 pub mod dev;
 mod error;
 pub mod extract;

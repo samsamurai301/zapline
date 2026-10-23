@@ -279,6 +279,9 @@ impl App {
     /// Finalize routes and run build hooks. Synchronous: no I/O, no startup
     /// hooks — safe to call from tooling.
     pub(crate) fn prepare(mut self) -> Prepared {
+        // Dev errors wrap everything (installed here, so no per-request
+        // check when they are off).
+        crate::dev::install(&mut self);
         // Route middleware (`wrap_route`) also applies to routes that build
         // hooks add (docs, metrics, health), so it truly covers every route.
         let mut routes = std::mem::take(&mut self.routes);

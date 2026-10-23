@@ -229,7 +229,11 @@ pub(crate) fn check_config(config: &ServerConfig) -> io::Result<()> {
         return invalid("ServerConfig::max_connections must be at least 1");
     }
     if config.http2 && !cfg!(feature = "http2") {
-        return invalid("HTTP/2 requires zapline's `http2` feature");
+        return invalid(&crate::codes::with_help(
+            "ZL0020",
+            Some("http2"),
+            "HTTP/2 requires zapline's `http2` feature",
+        ));
     }
     if config.http2_max_concurrent_streams == Some(0) {
         return invalid("ServerConfig::http2_max_concurrent_streams must be at least 1");
@@ -491,7 +495,13 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
         Ok(running) => running,
         Err(e) => {
             system.shutdown_timeout(Duration::from_secs(1));
-            return Err(io::Error::other(format!("startup failed: {e}")));
+            let msg = format!("startup failed: {e}{}", e.help());
+            // `main` prints the returned error with `Debug`, which escapes
+            // the fix's line breaks; show the readable version first.
+            if e.diagnostic_code().is_some() {
+                eprintln!("{msg}");
+            }
+            return Err(io::Error::other(msg));
         }
     };
     #[cfg(unix)]
@@ -557,6 +567,9 @@ fn run_workers(
         _ => None,
     };
 
+    if let Ok(addr) = listeners[0].local_addr() {
+        crate::dev::announce(addr, config.is_tls());
+    }
     if config.banner {
         let url = match (&bind, &listeners[0]) {
             #[cfg(unix)]
@@ -800,8 +813,11 @@ pub(crate) async fn serve(
     } = prepared
         .start()
         .await
-        .map_err(|e| io::Error::other(format!("startup failed: {e}")))?;
+        .map_err(|e| io::Error::other(format!("startup failed: {e}{}", e.help())))?;
 
+    if let Ok(addr) = listener.local_addr() {
+        crate::dev::announce(addr, false);
+    }
     let signal = Signal::default();
     let driver = tokio::spawn(drive(shutdown, Trigger::new(vec![signal.clone()]), None));
     let worker = Worker::new(Arc::new(app), &Proto::new(&config), &config, signal);

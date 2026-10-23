@@ -807,6 +807,7 @@ impl App {
         let mut app = self.on_startup(move |res: Resources| async move {
             let pool: Pool<DB> = res.get().ok_or_else(|| {
                 Error::internal("jobs need a database: call `.database(..)` before `.jobs(..)`")
+                    .diagnosed("ZL0045", None)
             })?;
             DB::create_table(&pool).await?;
             res.insert(Jobs::<DB> {

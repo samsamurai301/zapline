@@ -425,6 +425,7 @@ impl FromRequestParts for Redis {
     async fn from_request_parts(req: &mut Request) -> Result<Self> {
         req.state::<Redis>().cloned().ok_or_else(|| {
             Error::internal("no Redis registered: add `.redis(Redis::from_env()?)` to the app")
+                .diagnosed("ZL0072", None)
         })
     }
 }

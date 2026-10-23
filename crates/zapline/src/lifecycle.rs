@@ -84,10 +84,9 @@ impl Resources {
     /// Like [`get`](Self::get) but with a descriptive error when missing.
     pub fn require<T: Clone + Send + Sync + 'static>(&self) -> Result<T, crate::Error> {
         self.get::<T>().ok_or_else(|| {
-            crate::Error::internal(format!(
-                "resource `{}` is not registered",
-                std::any::type_name::<T>()
-            ))
+            let name = std::any::type_name::<T>();
+            crate::Error::internal(format!("resource `{name}` is not registered"))
+                .diagnosed("ZL0004", Some(name.to_owned()))
         })
     }
 

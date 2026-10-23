@@ -9,6 +9,7 @@ zapline has a small, fast **core** (routing, extractors, responses, errors, serv
 3. **Enterprise-grade control.** Every default can be overridden: builder methods for the config, traits for the behavior (e.g. `RateLimitKey`, `SessionStore`, `HealthCheck`).
 4. **Zero `unsafe`** outside the core server, and no panics on request paths. Panics are only allowed on invalid *configuration* at startup.
 5. **Tested.** Every module has integration tests under `crates/zapline/tests/`. Tests use the in-process `TestClient` where possible, and a real socket where the feature needs one.
+6. **Mistakes have codes.** An error or startup panic caused by how the app is put together (a missing provider, a duplicate route, a feature that is off) gets a diagnostic code from `crates/zapline/src/codes.in` (`.diagnosed("ZL00xx", subject)` on the `Error`, `codes::with_help` in panic messages), whose fix is the code to add. Codes are never renumbered; add new ones at the end of their group, then run `./scripts/gen-llms.sh` and `ZAPLINE_BLESS=1 cargo test -p zapline-cli codes::` to refresh the CLI copy and the docs index.
 
 ## Request lifecycle
 
@@ -46,6 +47,8 @@ TCP accept (per-core runtime, SO_REUSEPORT)            server.rs
 | `ServerConfig` (`#[non_exhaustive]`, lives in `server.rs`) | Server tuning. Add new fields with defaults. |
 | `ENV_PRINT_ROUTES` (`ZAPLINE_PRINT_ROUTES=1`) | `App::run` prints the route table as JSON and exits. Used by the CLI. |
 | `ZAPLINE_EXPORT_OPENAPI=<path>` | The OpenAPI plugin writes the spec from its `on_build` hook and exits. Used by the CLI. |
+| `ZAPLINE_DEV=1`, `App::dev_errors`, `ZAPLINE_DEV_ADDR_FILE=<path>` | Debug builds: the dev error page (installed as the outermost middleware in `App::prepare`, only when on), and the file where the server writes its URL for `zapline mcp`. Both set by `zapline dev`. |
+| `zapline::codes` | The diagnostic code registry (`ALL`, `lookup`); `Error::diagnostic_code()`. |
 
 Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature module's own file. For example, `openapi/mod.rs` can add `App::openapi(...)`. That keeps each feature self-contained.
 
