@@ -5,6 +5,7 @@
 //! `ZAPLINE_FUZZ_SEED` and `ZAPLINE_FUZZ_CASES` environment variables, which
 //! `FuzzConfig` reads when the test does not set them itself.
 
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
@@ -52,11 +53,73 @@ pub fn run(project: &Project, seed: Option<u64>, cases: Option<u64>) -> Result<b
     if !project.root.join(FUZZ_TEST).is_file() {
         anyhow::bail!(MISSING);
     }
-    let status = command(project, seed, cases)
+    let mut child = command(project, seed, cases)
         .stdin(Stdio::null())
-        .status()
+        .stderr(Stdio::piped())
+        .spawn()
         .context("failed to run `cargo test --test fuzz`")?;
+    // The report is the test's panic message: pass stderr through as it
+    // comes and keep a copy for the MCP `last_results` tool.
+    let mut seen = Vec::new();
+    if let Some(mut err) = child.stderr.take() {
+        let mut buf = [0u8; 8192];
+        let mut out = std::io::stderr();
+        loop {
+            match err.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    let _ = out.write_all(&buf[..n]);
+                    seen.extend_from_slice(&buf[..n]);
+                }
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .context("failed to run `cargo test --test fuzz`")?;
+    let summary = summarize(&String::from_utf8_lossy(&seen), status.success());
+    crate::live::save_last_results(&project.root, "fuzz", &summary);
     Ok(status.success())
+}
+
+/// Most of a report `last_results` keeps.
+const SUMMARY_BUDGET: usize = 4_000;
+
+/// The fuzz report from the test's stderr, for `last_results`.
+///
+/// ```
+/// use zapline_cli::fuzz::summarize;
+/// let err = "thread 'x' panicked at tests/fuzz.rs:3:5:\nzapline fuzz: 2 operations, 90 requests, seed 1: 1 failure\n...\nnote: run with `RUST_BACKTRACE=1`";
+/// assert!(summarize(err, false).starts_with("zapline fuzz: 2 operations"));
+/// assert_eq!(summarize("", true), "ok: tests/fuzz.rs passed, no failures\n");
+/// ```
+pub fn summarize(stderr: &str, passed: bool) -> String {
+    if passed {
+        return "ok: tests/fuzz.rs passed, no failures\n".into();
+    }
+    let mut text = match stderr.rfind("zapline fuzz: ") {
+        Some(start) => {
+            let report = &stderr[start..];
+            let end = report.find("\nnote: run with").unwrap_or(report.len());
+            report[..end].trim_end().to_string()
+        }
+        None => {
+            // No report: it did not compile or the test failed another way.
+            let lines: Vec<&str> = stderr.lines().collect();
+            let tail = lines[lines.len().saturating_sub(20)..].join("\n");
+            format!("failed: `cargo test --test fuzz` did not finish with a report\n{tail}")
+        }
+    };
+    if text.len() > SUMMARY_BUDGET {
+        let mut cut = SUMMARY_BUDGET;
+        while !text.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        text.truncate(cut);
+        text.push_str("\n... (cut; run `zapline fuzz` for the whole report)");
+    }
+    text.push('\n');
+    text
 }
 
 #[cfg(test)]
@@ -104,6 +167,26 @@ mod tests {
         assert!(!cmd
             .get_envs()
             .any(|(k, _)| k == ENV_FUZZ_SEED || k == ENV_FUZZ_CASES));
+    }
+
+    #[test]
+    fn keeps_only_the_report() {
+        let err = "   Compiling demo v0.1.0\nthread 'fuzz' panicked at tests/fuzz.rs:4:40:\n\
+                   zapline fuzz: 1 operation, 40 requests, seed 9: 1 failure\n\
+                   GET /x -> 500\nnote: run with `RUST_BACKTRACE=1` to display a backtrace\n";
+        let s = summarize(err, false);
+        assert!(s.starts_with("zapline fuzz: 1 operation"), "{s}");
+        assert!(s.contains("GET /x -> 500"), "{s}");
+        assert!(
+            !s.contains("Compiling") && !s.contains("RUST_BACKTRACE"),
+            "{s}"
+        );
+
+        let s = summarize("error[E0425]: cannot find value `x`\n", false);
+        assert!(s.starts_with("failed:") && s.contains("E0425"), "{s}");
+
+        let long = format!("zapline fuzz: {}", "x".repeat(10_000));
+        assert!(summarize(&long, false).len() < SUMMARY_BUDGET + 100);
     }
 
     #[test]

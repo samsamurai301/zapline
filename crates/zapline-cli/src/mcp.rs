@@ -7,6 +7,11 @@
 //! return one line per problem (see [`crate::brief`]), and generators list the
 //! files they touched.
 //!
+//! The live tools (`recent_requests`, `recent_errors`, `call_route`) talk to
+//! the running dev app (see [`crate::live`]), and any answer that mentions a
+//! diagnostic code (`ZL0002`) ends with that code's fix, so the model never
+//! has to look it up.
+//!
 //! The transport is newline-delimited JSON-RPC 2.0 on stdin/stdout. Nothing
 //! else is written to stdout; logs and the app's own stderr go to stderr.
 //!
@@ -22,7 +27,7 @@ use serde_json::{json, Value};
 use crate::generate::{self, HandlerMethod, Report};
 use crate::project::Project;
 use crate::templates::Template;
-use crate::{brief, build, db, new, openapi, routes};
+use crate::{brief, build, codes, db, live, new, openapi, routes};
 
 /// The whole guide (docs/src/llms-full.txt, copied by scripts/gen-llms.sh).
 pub const GUIDE: &str = include_str!("../assets/guide.md");
@@ -37,7 +42,9 @@ cheatsheet, or `docs` with a topic (\"extractors\", \"database\", \"htmx\", \"er
 Conventions: handlers are `async fn` with extractor arguments (Path, Query, Json, Valid<Json<T>>, \
 State, Dep, Db); return `zapline::Result<T>`; errors are `Error::not_found()` etc.; no \
 #[tokio::main] (App::run owns the runtime). Prefer the generators over writing boilerplate, and \
-`check`/`test` over raw cargo: their output is condensed.";
+`check`/`test` over raw cargo: their output is condensed. While the app runs under `zapline dev`, \
+debug with `recent_errors` (each error has a ZL code and its fix), `call_route` and \
+`recent_requests`; `explain_error` explains any ZL code.";
 
 /// Runs the server until stdin closes.
 pub fn run() -> Result<()> {
@@ -110,6 +117,7 @@ fn initialize(params: &Value) -> Value {
 
 fn tool_list() -> Value {
     let bin = json!({ "type": "string", "description": "Binary target; default: the package's only binary" });
+    let url = json!({ "type": "string", "description": "The app's base URL; default: the address `zapline dev` recorded, else http://127.0.0.1:8080" });
     json!([
         {
             "name": "docs",
@@ -224,6 +232,49 @@ fn tool_list() -> Value {
             "description": "The app's OpenAPI 3.1 document (JSON). Large; prefer `routes` for an overview.",
             "inputSchema": { "type": "object", "properties": { "bin": bin }},
             "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "explain_error",
+            "description": "What a zapline diagnostic code (ZL0002) means and the code that fixes it.",
+            "inputSchema": { "type": "object", "required": ["code"], "properties": {
+                "code": { "type": "string", "description": "e.g. ZL0002" }
+            }},
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "recent_errors",
+            "description": "The running dev app's latest errors, newest first: ZL code, status, request, message, panic location, fix. Needs `.dev_console()` and the app running (zapline dev).",
+            "inputSchema": { "type": "object", "properties": {
+                "limit": { "type": "integer", "description": "Default 10" },
+                "url": url
+            }},
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "recent_requests",
+            "description": "The running dev app's latest requests, newest first: one `status METHOD path time [ZL code]` line each.",
+            "inputSchema": { "type": "object", "properties": {
+                "limit": { "type": "integer", "description": "Default 20" },
+                "url": url
+            }},
+            "annotations": { "readOnlyHint": true }
+        },
+        {
+            "name": "call_route",
+            "description": "Send one HTTP request to the running dev app. Returns the status, the useful headers and the body (JSON compacted, cut at 2000 bytes); 500s come back as problem+json with the ZL code and fix.",
+            "inputSchema": { "type": "object", "required": ["path"], "properties": {
+                "method": { "type": "string", "description": "Default GET" },
+                "path": { "type": "string", "description": "With the query, e.g. /todos?page=2" },
+                "body": { "type": "string", "description": "Sent as JSON when it parses as JSON" },
+                "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+                "url": url
+            }}
+        },
+        {
+            "name": "last_results",
+            "description": "The latest `test`, `check` and `zapline fuzz` results with their age, without running anything.",
+            "inputSchema": { "type": "object", "properties": {} },
+            "annotations": { "readOnlyHint": true }
         }
     ])
 }
@@ -233,10 +284,13 @@ fn call(params: &Value) -> Value {
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
     let empty = json!({});
     let args = params.get("arguments").unwrap_or(&empty);
-    let (text, is_error) = match run_tool(name, args) {
+    let (mut text, is_error) = match run_tool(name, args) {
         Ok(text) => (text, false),
         Err(e) => (format!("{e:#}"), true),
     };
+    if name != "explain_error" {
+        append_fixes(&mut text);
+    }
     json!({ "content": [{ "type": "text", "text": text }], "isError": is_error })
 }
 
@@ -373,7 +427,69 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             with_build_errors(&project, || crate::client::run(&project, s("bin"), &output))?;
             Ok(format!("wrote {}", output.display()))
         }
+        "explain_error" => live::explain_error(s("code").context("`code` is required")?),
+        "recent_errors" => live::recent_errors(&app_url(s("url")), limit(args, 10)),
+        "recent_requests" => live::recent_requests(&app_url(s("url")), limit(args, 20)),
+        "call_route" => {
+            let path = s("path").context("`path` is required")?;
+            let headers: Vec<(String, String)> = args
+                .get("headers")
+                .and_then(Value::as_object)
+                .map(|h| {
+                    h.iter()
+                        .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default();
+            live::call_route(
+                &app_url(s("url")),
+                s("method").unwrap_or("GET"),
+                path,
+                &headers,
+                s("body"),
+            )
+        }
+        "last_results" => {
+            let project = Project::discover(here)?;
+            Ok(live::last_results(&project.root))
+        }
         _ => bail!("unknown tool `{name}`"),
+    }
+}
+
+/// The running app's URL: the tool's `url`, or what the project recorded.
+fn app_url(given: Option<&str>) -> String {
+    let root = Project::discover(Path::new(".")).ok().map(|p| p.root);
+    live::app_url(given, root.as_deref())
+}
+
+fn limit(args: &Value, default: usize) -> usize {
+    args.get("limit")
+        .and_then(Value::as_u64)
+        .map_or(default, |n| n.clamp(1, 50) as usize)
+}
+
+/// Ends `text` with the fix of every diagnostic code it names but does not
+/// already explain (startup errors, panics, test failures).
+fn append_fixes(text: &mut String) {
+    // problem+json from the dev error page has its own `fix`.
+    if text.contains("\"fix\":") {
+        return;
+    }
+    let mut extra = String::new();
+    for code in codes::find_in(text) {
+        // The fix up to `{T}` is the same whatever the error named.
+        let known = code.fix.split("{T}").next().unwrap_or(code.fix);
+        if !text.contains(known) {
+            let fix = code.fix.replace("{T}", "T");
+            extra.push_str(&format!("{} {}: fix: {fix}\n", code.code, code.title));
+        }
+    }
+    if !extra.is_empty() {
+        if !text.ends_with('\n') {
+            text.push('\n');
+        }
+        text.push_str(&extra);
     }
 }
 
