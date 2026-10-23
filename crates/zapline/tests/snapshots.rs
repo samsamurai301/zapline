@@ -680,3 +680,62 @@ async fn secret_body_fields_are_redacted_and_filled_in_on_replay() {
         .await;
     assert!(report.passed(), "{report}");
 }
+
+#[cfg(feature = "cookies")]
+#[tokio::test]
+async fn csrf_protected_forms_and_htmx_requests_replay_with_a_fresh_token() {
+    use zapline::auth::{Csrf, CsrfToken};
+    let app = || {
+        App::new()
+            .dev_console()
+            .wrap(Csrf::new())
+            .get("/posts/new", |t: CsrfToken| async move {
+                Html(format!("<form method=post>{}</form>", t.hidden_input()))
+            })
+            .post("/posts", |Form(f): Form<Value>| async move {
+                Redirect::to(&format!(
+                    "/posts?title={}",
+                    f["title"].as_str().unwrap_or("")
+                ))
+            })
+            .delete("/posts/1", || async { "deleted" })
+    };
+    let browser = app().test().with_cookies();
+    browser.get("/posts/new").send().await.assert_status(200);
+    let token = browser.cookie("__Host-zapline.csrf").expect("csrf cookie");
+    // The console's own form posts are CSRF-checked too.
+    browser
+        .post("/_dev/recordings/start")
+        .header("x-csrf-token", token.as_str())
+        .send()
+        .await
+        .assert_status(303);
+    browser.get("/posts/new").send().await.assert_status(200);
+    browser
+        .post("/posts")
+        .header("content-type", "application/x-www-form-urlencoded")
+        .body(format!("title=x&csrf_token={token}"))
+        .send()
+        .await
+        .assert_status(303);
+    // htmx copies the cookie into a header.
+    browser
+        .delete("/posts/1")
+        .header("hx-request", "true")
+        .header("x-csrf-token", token.as_str())
+        .send()
+        .await
+        .assert_text("deleted");
+    let rec = recordings(&browser).await;
+    assert_eq!(
+        rec["exchanges"][1]["request"]["text"],
+        "title=x&csrf_token=%5Bredacted%5D"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    write(dir.path(), "posts", &rec);
+    // A new browser gets a new token; the replay sends it.
+    let report = app().test().replay_snapshots(dir.path()).report().await;
+    assert!(report.passed(), "{report}");
+    assert_eq!(report.exchanges, 3);
+}

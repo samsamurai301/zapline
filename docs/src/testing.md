@@ -280,7 +280,7 @@ Ids also carry forward. When the recording's `POST /users` answered `{"id": 7}` 
 
 ### Credentials and cookies
 
-`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token` and CSRF token headers are never recorded: the snapshot says `"[redacted]"` and the replay does not send them. Each snapshot file replays with a fresh cookie jar, like a new browser, so a recorded login sets the session cookie that the following requests use. For bearer tokens and API keys, give the replay a test credential:
+`Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token` and CSRF token headers are never recorded: the snapshot says `"[redacted]"` and the replay does not send them (CSRF headers carry the replay's own token, see below). Each snapshot file replays with a fresh cookie jar, like a new browser, so a recorded login sets the session cookie that the following requests use. For bearer tokens and API keys, give the replay a test credential:
 
 ```rust
 app().test()
@@ -297,6 +297,8 @@ app().test()
     .secret("password", "test-password")
     .await;
 ```
+
+CSRF tokens need nothing: a CSRF-protected app ([`Csrf`](sessions.md#csrf)) mints a new token for each replay's browser, so the replay sends the token from its CSRF cookie (a cookie whose name contains `csrf` or `xsrf`, such as `zapline.csrf`) in each recorded CSRF form field, JSON key and header (`x-csrf-token`, as htmx sends it), the way the page's form or script would.
 
 Other parts of a body (HTML pages, multipart uploads, plain text) are recorded as they are: record with throwaway dev accounts.
 

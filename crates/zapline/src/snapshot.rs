@@ -73,7 +73,8 @@ const KEPT_HEADERS: [&str; 9] = [
 ];
 
 /// Request headers whose values are credentials: recorded as `[redacted]`
-/// and not sent on replay (set them with [`Replay::header`]).
+/// and not sent on replay (set them with [`Replay::header`]; CSRF headers
+/// carry the replay's own token, see `RecordedRequest::with_csrf_token`).
 const SECRET_HEADERS: [&str; 7] = [
     "authorization",
     "cookie",
@@ -99,6 +100,13 @@ fn secret_field(name: &str) -> bool {
         || ["csrf", "xsrf", "api_key", "apikey", "api-key"]
             .iter()
             .any(|s| lower.contains(s))
+}
+
+/// A cookie, header or field that carries a CSRF token (`zapline.csrf`,
+/// `x-csrf-token`, `csrf_token`, `XSRF-TOKEN`, ...).
+fn csrf_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("csrf") || lower.contains("xsrf")
 }
 
 fn form_key(raw: &str) -> String {
@@ -378,6 +386,61 @@ impl RecordedRequest {
             if let Some(t) = &mut req.body.text {
                 *t = fill_form(t);
             }
+        }
+        req
+    }
+
+    /// The request carrying this run's CSRF `token` (the value of the
+    /// browser's CSRF cookie) wherever the recording carried one: CSRF form
+    /// fields and JSON keys (`csrf_token`, `_xsrf`, ...) and CSRF headers
+    /// (`x-csrf-token`). The token is minted afresh on every run, so the
+    /// recorded value (or `[redacted]`) can never pass the check. Fields in
+    /// `keep` (filled in with [`Replay::secret`]) are left alone.
+    fn with_csrf_token(&self, token: &str, keep: &dyn Fn(&str) -> bool) -> RecordedRequest {
+        let mut req = self.clone();
+        let replace = |name: &str| csrf_name(name) && !keep(name);
+        for (name, value) in req.headers.iter_mut() {
+            if csrf_name(name) {
+                *value = token.to_owned();
+            }
+        }
+        fn fill_json(v: &mut Value, token: &str, replace: &dyn Fn(&str) -> bool) {
+            match v {
+                Value::Object(map) => {
+                    for (k, item) in map.iter_mut() {
+                        if matches!(item, Value::String(_)) && replace(k) {
+                            *item = Value::String(token.to_owned());
+                        } else {
+                            fill_json(item, token, replace);
+                        }
+                    }
+                }
+                Value::Array(items) => items.iter_mut().for_each(|i| fill_json(i, token, replace)),
+                _ => {}
+            }
+        }
+        if let Some(v) = &mut req.body.json {
+            fill_json(v, token, &replace);
+        }
+        let form = req
+            .headers
+            .get("content-type")
+            .is_some_and(|ct| is_form(Some(ct)));
+        if let (true, Some(t)) = (form, &mut req.body.text) {
+            *t = t
+                .split('&')
+                .map(|pair| match pair.split_once('=') {
+                    Some((k, _)) if replace(&form_key(k)) => format!(
+                        "{k}={}",
+                        percent_encoding::utf8_percent_encode(
+                            token,
+                            percent_encoding::NON_ALPHANUMERIC
+                        )
+                    ),
+                    _ => pair.to_owned(),
+                })
+                .collect::<Vec<_>>()
+                .join("&");
         }
         req
     }
@@ -1303,7 +1366,21 @@ impl Replay {
         client: &TestClient,
         req: &RecordedRequest,
     ) -> Result<RecordedResponse, String> {
-        let req = &req.with_secrets(&self.secrets);
+        let mut req = req.with_secrets(&self.secrets);
+        // A CSRF-protected app minted a new token for this browser (the
+        // cookie set by an earlier page): send it where the recording sent
+        // its own (redacted) one, as the page's form or script would.
+        let token = client
+            .cookies()
+            .into_iter()
+            .rev()
+            .find(|c| csrf_name(&c.name))
+            .map(|c| c.value);
+        if let Some(token) = token {
+            let keep = |name: &str| self.secrets.iter().any(|(n, _)| n == name);
+            req = req.with_csrf_token(&token, &keep);
+        }
+        let req = &req;
         let method = Method::from_bytes(req.method.as_bytes())
             .map_err(|_| format!("invalid method {:?}", req.method))?;
         let uri = req.uri();
