@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD as B64};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use zapline::auth::{Authenticate, Claims, CurrentUser, Jwt, JwtAuthenticator, JwtConfig};
+use zapline::auth::{Authenticate, Claims, CurrentUser, Jwt, JwtAuthenticator, JwtConfig, JwtKey};
 use zapline::prelude::*;
 use zapline::test::TestResponse;
 
@@ -587,4 +587,278 @@ async fn optional_jwt_authentication_and_custom_claims() {
     assert_eq!(c.get("/open").send().await.text(), "anon");
     assert_eq!(c.get("/open").bearer(&t).send().await.text(), "ada");
     assert_eq!(c.get("/open").bearer("junk").send().await.status(), 401);
+}
+
+// ---------------------------------------------------------------------------
+// Key rings and rotation
+
+const OTHER_SECRET: &str = "another-test-secret-that-is-at-least-32-bytes";
+
+/// A token signed with HS256 and `key`, with header `kid`.
+fn forge_hs256_kid(payload: &Value, key: &[u8], kid: Option<&str>) -> String {
+    use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+    let mut header = Header::new(Algorithm::HS256);
+    header.kid = kid.map(str::to_owned);
+    encode(&header, payload, &EncodingKey::from_secret(key)).unwrap()
+}
+
+fn ec_key(kid: &str) -> JwtKey {
+    let kp = rcgen::KeyPair::generate().unwrap();
+    let (private, public) = (kp.serialize_pem(), kp.public_key_pem());
+    JwtKey::es256_pem(kid, public.as_str(), Some(private.as_str())).unwrap()
+}
+
+#[test]
+fn rotation_keeps_old_tokens_until_the_key_is_retired() {
+    let jwt = hs().key_id("2026-09");
+    let old = jwt.encode(&Claims::new("old")).unwrap();
+
+    jwt.rotate(JwtKey::hs256("2026-10", OTHER_SECRET).unwrap())
+        .unwrap();
+    let new = jwt.encode(&Claims::new("new")).unwrap();
+    assert_eq!(parts(&new).0["kid"], "2026-10");
+    assert_eq!(jwt.key_ids(), ["2026-10", "2026-09"]);
+
+    assert_eq!(jwt.decode::<Claims>(&old).unwrap().sub, "old");
+    assert_eq!(jwt.decode::<Claims>(&new).unwrap().sub, "new");
+
+    // The signing key can't be retired; the old one can.
+    assert!(!jwt.retire("2026-10"));
+    assert!(jwt.retire("2026-09"));
+    assert!(!jwt.retire("2026-09"));
+    assert_eq!(
+        err_code(&jwt.decode::<Claims>(&old).unwrap_err()),
+        (401, "invalid_token")
+    );
+    assert_eq!(jwt.decode::<Claims>(&new).unwrap().sub, "new");
+}
+
+#[test]
+fn rotation_across_algorithms() {
+    let jwt = hs().key_id("hs");
+    let hs_token = jwt.encode(&Claims::new("a")).unwrap();
+    jwt.rotate(ec_key("ec")).unwrap();
+    assert_eq!(jwt.algorithm(), jsonwebtoken::Algorithm::ES256);
+    let ec_token = jwt.encode(&Claims::new("b")).unwrap();
+    assert_eq!(parts(&ec_token).0["alg"], "ES256");
+    assert_eq!(jwt.decode::<Claims>(&hs_token).unwrap().sub, "a");
+    assert_eq!(jwt.decode::<Claims>(&ec_token).unwrap().sub, "b");
+
+    // A rotation to EdDSA, too.
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    let ed = JwtKey::ed25519_pem(
+        "ed",
+        kp.public_key_pem().as_str(),
+        Some(kp.serialize_pem().as_str()),
+    )
+    .unwrap();
+    jwt.rotate(ed).unwrap();
+    let ed_token = jwt.encode(&Claims::new("c")).unwrap();
+    assert_eq!(parts(&ed_token).0["alg"], "EdDSA");
+    for (t, sub) in [(&hs_token, "a"), (&ec_token, "b"), (&ed_token, "c")] {
+        assert_eq!(jwt.decode::<Claims>(t).unwrap().sub, sub);
+    }
+}
+
+#[test]
+fn rotate_needs_a_named_signing_key() {
+    let jwt = hs();
+    let verify_only = JwtKey::new(
+        "pub",
+        jsonwebtoken::Algorithm::HS256,
+        jsonwebtoken::DecodingKey::from_secret(OTHER_SECRET.as_bytes()),
+        None,
+    );
+    assert!(jwt.rotate(verify_only).is_err());
+    assert!(JwtKey::hs256("short", "too-short").is_err());
+}
+
+#[test]
+fn keys_are_chosen_by_kid() {
+    let jwt = hs().key_id("a");
+    jwt.add_key(JwtKey::hs256("b", OTHER_SECRET).unwrap());
+    let payload = json!({"sub": "x", "exp": now() + 600});
+
+    let by_b = forge_hs256_kid(&payload, OTHER_SECRET.as_bytes(), Some("b"));
+    assert_eq!(jwt.decode::<Claims>(&by_b).unwrap().sub, "x");
+    // The right secret under the wrong kid fails: the kid picks the key.
+    let mislabeled = forge_hs256_kid(&payload, SECRET.as_bytes(), Some("b"));
+    assert_eq!(
+        err_code(&jwt.decode::<Claims>(&mislabeled).unwrap_err()),
+        (401, "invalid_token")
+    );
+    for kid in [Some("unknown"), None] {
+        let t = forge_hs256_kid(&payload, SECRET.as_bytes(), kid);
+        assert_eq!(
+            err_code(&jwt.decode::<Claims>(&t).unwrap_err()),
+            (401, "invalid_token"),
+            "{kid:?}"
+        );
+    }
+    // add_key keeps the signing key first.
+    assert_eq!(jwt.key_ids(), ["a", "b"]);
+}
+
+#[test]
+fn an_unnamed_key_accepts_any_kid() {
+    // Configs without key ids keep working whatever `kid` a token carries.
+    let payload = json!({"sub": "x", "exp": now() + 600});
+    for kid in [None, Some("anything")] {
+        let t = forge_hs256_kid(&payload, SECRET.as_bytes(), kid);
+        assert_eq!(hs().decode::<Claims>(&t).unwrap().sub, "x");
+    }
+    // ...also next to named keys, when the algorithm fits.
+    let jwt = hs();
+    jwt.add_key(JwtKey::hs256("b", OTHER_SECRET).unwrap());
+    let t = forge_hs256_kid(&payload, SECRET.as_bytes(), Some("legacy"));
+    assert_eq!(jwt.decode::<Claims>(&t).unwrap().sub, "x");
+}
+
+#[test]
+fn ring_algorithm_confusion_is_rejected() {
+    // An RS256 key named "rsa": an HS256 token naming it, "signed" with the
+    // public key as an HMAC secret, must fail.
+    let jwt = hs().key_id("hs");
+    jwt.add_key(JwtKey::rs256_pem("rsa", RSA_PUBLIC, None).unwrap());
+    let payload = json!({"sub": "attacker", "exp": now() + 600});
+    let confused = forge_hs256_kid(&payload, RSA_PUBLIC.as_bytes(), Some("rsa"));
+    assert_eq!(
+        err_code(&jwt.decode::<Claims>(&confused).unwrap_err()),
+        (401, "invalid_token")
+    );
+    let none = format!(
+        "{}.{}.",
+        B64.encode(br#"{"alg":"none","kid":"rsa"}"#),
+        B64.encode(serde_json::to_vec(&payload).unwrap())
+    );
+    assert_eq!(
+        err_code(&jwt.decode::<Claims>(&none).unwrap_err()),
+        (401, "invalid_token")
+    );
+    // The real RS256 key verifies its own tokens.
+    let signer = JwtConfig::rs256_pem(RSA_PUBLIC, Some(RSA_PRIVATE)).key_id("rsa");
+    let t = signer.encode(&Claims::new("ok")).unwrap();
+    assert_eq!(jwt.decode::<Claims>(&t).unwrap().sub, "ok");
+}
+
+#[test]
+fn key_id_does_not_leak_into_the_config_it_was_cloned_from() {
+    let base = hs();
+    let a = base.clone().key_id("a");
+    assert!(base.key_ids().is_empty());
+    assert_eq!(a.key_ids(), ["a"]);
+    // Runtime changes are shared by clones.
+    let shared = a.clone();
+    a.add_key(JwtKey::hs256("b", OTHER_SECRET).unwrap());
+    assert_eq!(shared.key_ids(), ["a", "b"]);
+}
+
+#[test]
+fn public_jwks_has_only_public_asymmetric_keys() {
+    let jwt = hs().key_id("hs");
+    assert!(jwt.public_jwks().keys.is_empty());
+    jwt.rotate(ec_key("ec")).unwrap();
+    jwt.add_key(JwtKey::rs256_pem("rsa", RSA_PUBLIC, None).unwrap());
+    let kp = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+    jwt.add_key(JwtKey::ed25519_pem("ed", kp.public_key_pem().as_str(), None).unwrap());
+
+    let set = serde_json::to_value(jwt.public_jwks()).unwrap();
+    let keys = set["keys"].as_array().unwrap();
+    let mut summary: Vec<_> = keys
+        .iter()
+        .map(|k| {
+            (
+                k["kid"].as_str().unwrap(),
+                k["kty"].as_str().unwrap(),
+                k["alg"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    summary.sort();
+    assert_eq!(
+        summary,
+        [
+            ("ec", "EC", "ES256"),
+            ("ed", "OKP", "EdDSA"),
+            ("rsa", "RSA", "RS256"),
+        ]
+    );
+    for k in keys {
+        assert_eq!(k["use"], "sig");
+        assert!(k.get("d").is_none() && k.get("k").is_none(), "{k}");
+    }
+
+    // Each published JWK verifies tokens of its key.
+    let signer = JwtConfig::rs256_pem(RSA_PUBLIC, Some(RSA_PRIVATE)).key_id("rsa");
+    let t = signer.encode(&Claims::new("pub")).unwrap();
+    let jwk = jwt.public_jwks().find("rsa").unwrap().clone();
+    let verifier = JwtConfig::from_key(JwtKey::from_jwk(&jwk).unwrap());
+    assert_eq!(verifier.decode::<Claims>(&t).unwrap().sub, "pub");
+}
+
+#[test]
+fn from_jwk_refuses_symmetric_and_mismatched_keys() {
+    use zapline::auth::Jwk;
+    let jwk = |v: Value| serde_json::from_value::<Jwk>(v).unwrap();
+    let oct = jwk(json!({"kty": "oct", "kid": "s", "k": B64.encode(SECRET)}));
+    assert!(JwtKey::from_jwk(&oct).is_err());
+    let rsa = serde_json::to_value(
+        JwtConfig::rs256_pem(RSA_PUBLIC, None)
+            .key_id("r")
+            .public_jwks()
+            .keys[0]
+            .clone(),
+    )
+    .unwrap();
+    let mut hs_rsa = rsa.clone();
+    hs_rsa["alg"] = "HS256".into();
+    assert!(JwtKey::from_jwk(&jwk(hs_rsa)).is_err());
+    let mut ps = rsa.clone();
+    ps["alg"] = "PS256".into();
+    assert_eq!(
+        JwtKey::from_jwk(&jwk(ps)).unwrap().algorithm(),
+        jsonwebtoken::Algorithm::PS256
+    );
+    let mut enc = rsa;
+    enc["use"] = "enc".into();
+    assert!(JwtKey::from_jwk(&jwk(enc)).is_err());
+}
+
+#[tokio::test]
+async fn rotation_through_state_and_the_jwks_route() {
+    let app = App::new()
+        .jwt(hs().key_id("k1"))
+        .serve_jwks("/.well-known/jwks.json")
+        .post("/rotate", |State(jwt): State<JwtConfig>| async move {
+            jwt.rotate(ec_key("k2"))?;
+            Ok::<_, Error>("rotated")
+        })
+        .post("/token", |State(jwt): State<JwtConfig>| async move {
+            jwt.encode(&Claims::new("ada"))
+        })
+        .get("/me", |Jwt(c): Jwt| async move { c.sub });
+    let client = app.test();
+
+    let res = client.get("/.well-known/jwks.json").send().await;
+    res.assert_status(200);
+    assert_eq!(res.header("cache-control"), Some("public, max-age=300"));
+    assert_eq!(res.json::<Value>(), json!({"keys": []}));
+
+    let old = client.post("/token").send().await.text();
+    client.post("/rotate").send().await.assert_status(200);
+    let new = client.post("/token").send().await.text();
+    assert_eq!(parts(&new).0["kid"], "k2");
+
+    for t in [&old, &new] {
+        let res = client.get("/me").bearer(t).send().await;
+        res.assert_status(200);
+        assert_eq!(res.text(), "ada");
+    }
+    let keys = client
+        .get("/.well-known/jwks.json")
+        .send()
+        .await
+        .json::<Value>();
+    assert_eq!(keys["keys"][0]["kid"], "k2");
+    assert_eq!(keys["keys"].as_array().unwrap().len(), 1);
 }

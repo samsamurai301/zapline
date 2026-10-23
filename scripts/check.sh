@@ -23,7 +23,7 @@ cargo test -p zapline-cli
 
 step "feature matrix"
 cargo check -p zapline --no-default-features
-for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password mail storage s3 cache oauth i18n redis otlp; do
+for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis otlp; do
   echo "  - $f"
   cargo check -q -p zapline --no-default-features --features "$f"
 done

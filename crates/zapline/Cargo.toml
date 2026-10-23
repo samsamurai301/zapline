@@ -15,7 +15,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 [features]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
-    "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "cookies", "views",
+    "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views",
     "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "otlp",
 ]
 macros = ["dep:zapline-macros"]
@@ -36,6 +36,7 @@ fs = ["dep:mime_guess", "dep:tokio-util"]
 multipart = ["dep:multer"]
 compression = ["dep:async-compression", "dep:tokio-util"]
 jwt = ["json", "dep:jsonwebtoken"]
+jwks = ["jwt", "_http-client"]
 cookies = ["json", "dep:cookie", "dep:getrandom", "dep:hmac", "dep:sha2"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
@@ -46,7 +47,7 @@ cache = ["json"]
 storage = ["dep:mime_guess", "dep:hmac", "dep:sha2", "dep:getrandom"]
 s3 = ["storage", "_http-client"]
 oauth = ["json", "_http-client", "dep:sha2", "dep:getrandom"]
-# Internal: the HTTPS client behind `s3` and `oauth`.
+# Internal: the HTTPS client behind `s3`, `oauth`, `jwks` and `otlp`.
 _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 
 [dependencies]
