@@ -8,7 +8,7 @@
 cargo install --path crates/zapline-cli     # installs `zapline` and `cargo zapline`
 zapline new my-api                          # templates: minimal | api (default) | full
 cd my-api
-zapline dev                                 # build, run, and restart on every change
+zapline dev                                 # build, run, live-reload the browser on every change
 ```
 
 Open <http://localhost:8080/docs> for the interactive API docs, and run `cargo test` for the generated tests.
