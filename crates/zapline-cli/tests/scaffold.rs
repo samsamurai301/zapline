@@ -237,3 +237,89 @@ fn routes_and_openapi_work_on_a_real_project() {
     assert!(spec["paths"]["/users"]["post"].is_object(), "{spec}");
     assert!(spec["paths"]["/users/{id}"]["delete"].is_object(), "{spec}");
 }
+
+/// Schema evolution on a real fullstack app: `g resource`, then `g migration
+/// add_views_to_posts views:int=0` patches the module, page and test, and the
+/// project's own tests (which round-trip every column through the JSON API)
+/// pass with the new column; `db status` follows the database along.
+#[test]
+#[ignore = "slow: compiles zapline with sqlite and views"]
+fn added_columns_round_trip_and_db_status_tracks_them() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = generate(tmp.path(), "scaffold-evolve", "fullstack");
+    expect_success(&run_in(&project, &["g", "resource", "post", "title"]));
+    let log = expect_success(&run_in(
+        &project,
+        &["g", "migration", "add_views_to_posts", "views:int=0"],
+    ));
+    for file in [
+        "src/routes/posts.rs",
+        "templates/posts/index.html",
+        "tests/posts.rs",
+    ] {
+        assert!(log.contains(&format!("Modified {file}")), "{log}");
+    }
+    let migration = fs::read_dir(project.join("migrations"))
+        .unwrap()
+        .flatten()
+        .find(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .ends_with("_add_views_to_posts.sql")
+        })
+        .expect("the migration exists")
+        .path();
+    let sql = fs::read_to_string(&migration).unwrap();
+    assert!(
+        sql.contains("ALTER TABLE posts ADD COLUMN views BIGINT NOT NULL DEFAULT 0;"),
+        "{sql}"
+    );
+    let module = fs::read_to_string(project.join("src/routes/posts.rs")).unwrap();
+    assert!(module.contains("pub views: i64,"), "{module}");
+    assert!(
+        module.contains("INSERT INTO posts (title, views) VALUES ($1, $2)"),
+        "{module}"
+    );
+    let test = fs::read_to_string(project.join("tests/posts.rs")).unwrap();
+    assert!(test.contains("\"views\": 42,"), "{test}");
+
+    // `crud_round_trip` posts the sample (with views) and checks every field
+    // comes back from POST, GET, the list and PUT.
+    let tests = check_like_ci(&project);
+    assert!(tests.contains("crud_round_trip ... ok"), "{tests}");
+
+    let zapline_in = |args: &[&str]| {
+        zapline()
+            .args(args)
+            .current_dir(&project)
+            .env("CARGO_TARGET_DIR", target_dir())
+            .env("DATABASE_URL", "sqlite://status.db?mode=rwc")
+            .output()
+            .unwrap()
+    };
+    let out = zapline_in(&["db", "status"]);
+    expect_success(&out);
+    let table = stdout(&out);
+    assert!(table.contains("pending   add views to posts"), "{table}");
+    assert!(table.contains("0 applied, 3 pending"), "{table}");
+
+    expect_success(&zapline_in(&["db", "migrate"]));
+    let out = zapline_in(&["db", "status"]);
+    expect_success(&out);
+    assert!(
+        stdout(&out).contains("3 applied, 0 pending"),
+        "{}",
+        stdout(&out)
+    );
+
+    // Editing an applied migration is an error, with the file to restore.
+    fs::write(&migration, format!("{sql}-- edited\n")).unwrap();
+    let out = zapline_in(&["db", "status"]);
+    assert!(!out.status.success());
+    let table = stdout(&out);
+    assert!(table.contains("modified  add views to posts"), "{table}");
+    assert!(
+        table.contains("_add_views_to_posts.sql as it was"),
+        "{table}"
+    );
+}

@@ -326,7 +326,8 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
-| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate`; `zapline db status` lists applied/pending |
+| Add a column | `zapline g migration add_views_to_posts views:int=0`: the ALTER TABLE plus the `posts` resource's structs, queries, form and test |
 | Test data / seeds | `Factory::new("posts").set("title", "Hi").create(&pool).await?` fills the other required columns (and parent rows) from the schema; `.create_many(&pool, 10)`; record `.int("id")`, `.json()`, `.parse::<Post>()`; `App::seed(\|db\| async move { .. })` + `zapline db seed` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
@@ -354,7 +355,8 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 |---|---|
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, an htmx page (when `templates/base.html` exists) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
-| `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline g migration <name> [field:type[=default] ...]` (same as `zapline db new`) | Create a SQL migration. `add_<x>_to_<table> views:int=0` writes `ALTER TABLE .. ADD COLUMN` per field and carries the columns into the resource `g resource` made for that table: model structs, queries, list filters, htmx form and test. `remove_<x>_from_<table>` drops columns the same way. Any other name: an empty migration ([Changing a table](database.md#changing-a-table-zapline-g-migration)) |
+| `zapline db migrate` / `zapline db status` | Apply pending migrations / list which are applied, pending, or edited after being applied ([Migration status](database.md#migration-status-zapline-db-status)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
@@ -437,14 +439,16 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
 | `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
+| `generate_migration` | `add_<x>_to_<table>` / `remove_<x>_from_<table>`: the migration plus the resource files it updated, or the exact lines to change by hand. "Add a field to posts" is one call |
 | `db_new_migration` | Creates a migration, with its SQL if given |
 | `db_migrate` | Applies pending migrations |
+| `db_status` | The applied / pending / modified table; an error result when an applied migration was edited or deleted |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
 | `typescript_client` | Writes the TypeScript client |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
+When the app does not compile, `routes`, `openapi`, `db_migrate` and `db_status` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
 
 Register it from the project directory:
 
@@ -2656,11 +2660,50 @@ Migrations are plain SQL files in `migrations/`, applied in file-name order, eac
 ```sh
 zapline db new create_posts     # migrations/20261022062406_create_posts.sql
 zapline db migrate              # apply pending migrations, then exit
+zapline db status               # which are applied, pending, or edited since
 ```
 
 The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+### Changing a table: `zapline g migration`
+
+The migration's name says what it does, and the fields use the types of `generate resource` (`string`, `text`, `int`, `float`, `bool`, `?` for optional):
+
+```sh
+zapline g migration add_views_to_posts views:int=0         # ALTER TABLE posts ADD COLUMN ..
+zapline g migration add_details_to_posts summary:text? pinned:bool
+zapline g migration remove_views_from_posts                # ALTER TABLE posts DROP COLUMN views
+zapline db new backfill_slugs                              # any other name: an empty file
+```
+
+`add_<x>_to_<table>` writes one `ALTER TABLE <table> ADD COLUMN` per field (the part before `_to_` is only a description). The rows already in the table need a value for a required column, and SQLite refuses `NOT NULL` without one, so a required column always gets a `DEFAULT`: the one you give with `=` (`views:int=0`, `status=draft`, `pinned:bool=true`), or the type's zero value (`''`, `0`, `0.0`, `FALSE`) with a warning. Optional columns are NULL for existing rows. `remove_<x>_from_<table>` drops column `<x>`, or the columns you list; on SQLite that needs 3.35 or newer (sqlx bundles one), and a column that is indexed, `UNIQUE` or a key has to lose its index first. The statements are the same on SQLite and Postgres; `zapline g migration` reads which one the project uses from its zapline features.
+
+When `src/routes/<table>.rs` came from `zapline g resource`, the change goes through the code too, so the app keeps compiling and its tests keep passing:
+
+| File | What changes |
+|---|---|
+| `src/routes/<table>.rs` | The field in the model struct and the `New..` payload (with the same validation `g resource` would add); every `SELECT` / `RETURNING` column list; the `INSERT` and `UPDATE` columns, placeholders and `.bind(..)` calls; `listing()`'s sort, search and filter columns and its doc comment |
+| `templates/<table>/index.html` | A form input, a table header and a cell |
+| `tests/<table>.rs` | The column in `sample()`, which `crud_round_trip` sends through POST, GET, the list and PUT and checks field by field |
+
+The generator finds its place by the `// zapline:fields` comments in the structs and the test, `{# zapline:fields #}` in the form, and by the shape of the SQL it wrote. Keep those and edit everything else freely. A file that no longer has that shape (or a hand-written module, like the `fullstack` template's `todos`) is left untouched and you get the exact lines to add instead; a module is never half-patched.
+
+### Migration status: `zapline db status`
+
+```text
+$ zapline db status
+VERSION         STATUS    DESCRIPTION
+20260101000000  applied   create todos
+20261023094500  applied   create posts
+20261023101200  pending   add views to posts
+2 applied, 1 pending
+```
+
+A migration is `applied`, `pending` (the next start or `zapline db migrate` runs it), `modified` (its file changed after it ran) or `missing` (it ran but the file is gone). sqlx refuses to start in the last two cases, so `zapline db status` exits non-zero and names the file to restore; put the change in a new migration instead.
+
+Like `db migrate`, it runs your app, with `ZAPLINE_MIGRATE_STATUS=1`: `App::database` connects with the app's own URL and migrations directory, compares the files with sqlx's `_sqlx_migrations` table, prints one JSON line per migration (`{"version":..,"description":"..","applied":true,"checksum_ok":true,"missing":false}`) and exits without migrating or serving. On a database that has never been migrated it creates the empty `_sqlx_migrations` table, as the first migration run would.
 
 ## Seed data
 

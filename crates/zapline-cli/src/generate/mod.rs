@@ -8,6 +8,7 @@ pub mod auth;
 pub mod db_resource;
 pub mod deploy;
 pub mod job;
+pub mod migration;
 pub mod register;
 
 use std::fs;
@@ -33,6 +34,8 @@ pub struct Report {
     pub modified: Vec<PathBuf>,
     /// Follow-up instructions for things the generator cannot safely do itself.
     pub notes: Vec<String>,
+    /// Choices the generator made that the user should know about.
+    pub warnings: Vec<String>,
 }
 
 impl Report {
@@ -43,6 +46,9 @@ impl Report {
         }
         for p in &self.modified {
             ui::status("Modified", display(p));
+        }
+        for warning in &self.warnings {
+            ui::warn(warning);
         }
         for note in &self.notes {
             eprintln!();
@@ -322,6 +328,17 @@ pub fn resource_with_fields(
     resource(dir, name, plural, force)
 }
 
+/// The SQL dialect generated migrations use: Postgres when the project
+/// enables zapline's `postgres` feature and not `sqlite`, else SQLite.
+pub(crate) fn dialect_of(project: &Project) -> db_resource::Dialect {
+    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
+    if manifest.contains("\"postgres\"") && !manifest.contains("\"sqlite\"") {
+        db_resource::Dialect::Postgres
+    } else {
+        db_resource::Dialect::Sqlite
+    }
+}
+
 fn sql_resource(
     project: &Project,
     name: &str,
@@ -331,12 +348,7 @@ fn sql_resource(
 ) -> Result<Report> {
     let names = ResourceNames::parse(name, plural)?;
     let fields = db_resource::parse_fields(fields)?;
-    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
-    let dialect = if manifest.contains("\"postgres\"") && !manifest.contains("\"sqlite\"") {
-        db_resource::Dialect::Postgres
-    } else {
-        db_resource::Dialect::Sqlite
-    };
+    let dialect = dialect_of(project);
     let html = project.root.join("templates/base.html").is_file();
     let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
     let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");

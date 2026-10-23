@@ -6,7 +6,8 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 |---|---|
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, an htmx page (when `templates/base.html` exists) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
-| `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline g migration <name> [field:type[=default] ...]` (same as `zapline db new`) | Create a SQL migration. `add_<x>_to_<table> views:int=0` writes `ALTER TABLE .. ADD COLUMN` per field and carries the columns into the resource `g resource` made for that table: model structs, queries, list filters, htmx form and test. `remove_<x>_from_<table>` drops columns the same way. Any other name: an empty migration ([Changing a table](database.md#changing-a-table-zapline-g-migration)) |
+| `zapline db migrate` / `zapline db status` | Apply pending migrations / list which are applied, pending, or edited after being applied ([Migration status](database.md#migration-status-zapline-db-status)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
@@ -89,14 +90,16 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
 | `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
+| `generate_migration` | `add_<x>_to_<table>` / `remove_<x>_from_<table>`: the migration plus the resource files it updated, or the exact lines to change by hand. "Add a field to posts" is one call |
 | `db_new_migration` | Creates a migration, with its SQL if given |
 | `db_migrate` | Applies pending migrations |
+| `db_status` | The applied / pending / modified table; an error result when an applied migration was edited or deleted |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
 | `typescript_client` | Writes the TypeScript client |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
+When the app does not compile, `routes`, `openapi`, `db_migrate` and `db_status` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
 
 Register it from the project directory:
 

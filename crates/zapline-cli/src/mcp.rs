@@ -140,6 +140,14 @@ fn tool_list() -> Value {
             }}
         },
         {
+            "name": "generate_migration",
+            "description": "Change an existing table. `add_<x>_to_<table>` with fields writes ALTER TABLE .. ADD COLUMN and, when src/routes/<table>.rs came from generate_resource, adds the columns to its structs, queries, list filters, htmx form and test. `remove_<x>_from_<table>` drops columns the same way. Other names: an empty migration.",
+            "inputSchema": { "type": "object", "required": ["name"], "properties": {
+                "name": { "type": "string", "description": "e.g. add_views_to_posts, remove_views_from_posts" },
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type[=default] with type string|text|int|float|bool, `?` for optional, e.g. [\"views:int=0\", \"summary:text?\"]; for remove, column names" }
+            }}
+        },
+        {
             "name": "generate_handler",
             "description": "Generate one route handler module with a test and register it.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
@@ -184,6 +192,12 @@ fn tool_list() -> Value {
             "name": "db_migrate",
             "description": "Apply pending migrations using the app's DATABASE_URL.",
             "inputSchema": { "type": "object", "properties": { "bin": bin }}
+        },
+        {
+            "name": "db_status",
+            "description": "Which migrations the app's DATABASE_URL has applied, which are pending, and which were edited or deleted after being applied (an error: sqlx refuses to start). Does not migrate.",
+            "inputSchema": { "type": "object", "properties": { "bin": bin }},
+            "annotations": { "readOnlyHint": true }
         },
         {
             "name": "db_seed",
@@ -243,6 +257,17 @@ fn call(params: &Value) -> Value {
 fn run_tool(name: &str, args: &Value) -> Result<String> {
     let s = |key: &str| args.get(key).and_then(Value::as_str);
     let flag = |key: &str| args.get(key).and_then(Value::as_bool).unwrap_or(false);
+    let strings = |key: &str| -> Vec<String> {
+        args.get(key)
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     let here = Path::new(".");
     match name {
         "docs" => Ok(docs(s("topic"))),
@@ -267,26 +292,25 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             ))
         }
         "generate_resource" => {
-            let fields: Vec<String> = args
-                .get("fields")
-                .and_then(Value::as_array)
-                .map(|a| {
-                    a.iter()
-                        .filter_map(Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .unwrap_or_default();
             let name = s("name").context("`name` is required")?;
             let report = generate::resource_with_fields(
                 here,
                 name,
                 s("plural"),
-                &fields,
+                &strings("fields"),
                 flag("memory"),
                 flag("force"),
             )?;
             Ok(report_text(&report))
+        }
+        "generate_migration" => {
+            let name = s("name").context("`name` is required")?;
+            let project = Project::discover(here)?;
+            Ok(report_text(&generate::migration::generate(
+                &project,
+                name,
+                &strings("fields"),
+            )?))
         }
         "generate_handler" => {
             let method = match s("method") {
@@ -338,6 +362,16 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             let project = Project::discover(here)?;
             with_build_errors(&project, || db::migrate(&project, s("bin")))?;
             Ok("migrated: the database is up to date".to_string())
+        }
+        "db_status" => {
+            let project = Project::discover(here)?;
+            let (ok, table) =
+                with_build_errors(&project, || db::status_report(&project, s("bin"), false))?;
+            if ok {
+                Ok(table)
+            } else {
+                Err(anyhow!("{table}"))
+            }
         }
         "db_seed" => {
             let project = Project::discover(here)?;
@@ -399,6 +433,9 @@ fn report_text(report: &Report) -> String {
     }
     for p in &report.modified {
         out.push_str(&format!("modified {}\n", p.display()));
+    }
+    for warning in &report.warnings {
+        out.push_str(&format!("warning: {warning}\n"));
     }
     for note in &report.notes {
         out.push_str(&format!("note: {note}\n"));

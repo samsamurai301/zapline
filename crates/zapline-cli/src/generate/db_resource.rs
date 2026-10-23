@@ -4,6 +4,13 @@
 //!
 //! The code is built here rather than from a `.tmpl` file because its shape
 //! depends on the fields; it is formatted with rustfmt after writing.
+//!
+//! The model structs, the form and the test's sample body end with a
+//! [`FIELDS_MARKER`] (or [`TEMPLATE_MARKER`]) comment, where `zapline
+//! generate migration add_<column>_to_<table>` adds new columns (see
+//! [`super::migration`]). The code one field contributes is built by the
+//! `pub(crate)` helpers on [`Field`], which that generator shares, so a
+//! patched module reads like a freshly generated one.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -12,6 +19,13 @@ use anyhow::{bail, Result};
 
 use crate::naming::{is_keyword, snake_case, ResourceNames};
 use crate::render::OutputFile;
+
+/// Comment that ends the fields of the generated model structs and of the
+/// test's sample body: new columns go just above it.
+pub const FIELDS_MARKER: &str = "// zapline:fields";
+
+/// The same marker in the generated htmx page's form (a MiniJinja comment).
+pub const TEMPLATE_MARKER: &str = "{# zapline:fields #}";
 
 /// A column type on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,12 +66,24 @@ impl FieldType {
         }
     }
 
-    fn sql(self) -> &'static str {
+    /// The SQL column type (the same in SQLite and Postgres).
+    pub(crate) fn sql(self) -> &'static str {
         match self {
             FieldType::String | FieldType::Text => "TEXT",
             FieldType::Int => "BIGINT",
             FieldType::Float => "DOUBLE PRECISION",
             FieldType::Bool => "BOOLEAN",
+        }
+    }
+
+    /// The SQL literal of the type's zero value: the `DEFAULT` existing
+    /// rows get when a required column is added.
+    pub(crate) fn zero_default(self) -> &'static str {
+        match self {
+            FieldType::String | FieldType::Text => "''",
+            FieldType::Int => "0",
+            FieldType::Float => "0.0",
+            FieldType::Bool => "FALSE",
         }
     }
 }
@@ -110,7 +136,8 @@ impl Field {
         }
     }
 
-    fn label(&self) -> String {
+    /// The human label: `due_date` is `Due date`.
+    pub(crate) fn label(&self) -> String {
         let mut words = self.name.replace('_', " ");
         if let Some(first) = words.get_mut(0..1) {
             first.make_ascii_uppercase();
@@ -127,6 +154,79 @@ impl Field {
             FieldType::Float => "1.5",
             FieldType::Bool => "true",
         }
+    }
+}
+
+// ---- what one field contributes -----------------------------------------------
+//
+// Shared with `zapline generate migration`, which adds the same pieces to an
+// existing module.
+
+impl Field {
+    /// Its line in the model struct: `    pub title: String,\n`.
+    pub(crate) fn model_line(&self) -> String {
+        format!("    pub {}: {},\n", self.name, self.rust_type())
+    }
+
+    /// Its attribute (if any) and line in the `New<Model>` payload struct.
+    pub(crate) fn payload_lines(&self) -> String {
+        let attr = match (self.ty, self.optional) {
+            (FieldType::Bool, _) => {
+                "    #[serde(default, deserialize_with = \"zapline::extract::checkbox\")]\n"
+            }
+            (_, true) => {
+                "    #[serde(default, deserialize_with = \"zapline::extract::empty_as_none\")]\n"
+            }
+            (FieldType::String, false) => "    #[validate(length(min = 1, max = 200))]\n",
+            (FieldType::Text, false) => "    #[validate(length(max = 100000))]\n",
+            _ => "",
+        };
+        format!("{attr}{}", self.model_line())
+    }
+
+    /// Its `.bind(..)` call in the INSERT and UPDATE queries. Strings are
+    /// borrowed; numbers and booleans are Copy.
+    pub(crate) fn bind(&self) -> String {
+        let borrow = matches!(self.ty, FieldType::String | FieldType::Text);
+        format!(".bind({}new.{})", if borrow { "&" } else { "" }, self.name)
+    }
+
+    /// Whether `?sort=` accepts it (long text is not sortable).
+    pub(crate) fn sortable(&self) -> bool {
+        self.ty != FieldType::Text
+    }
+
+    /// Whether `?q=` searches it.
+    pub(crate) fn searchable(&self) -> bool {
+        matches!(self.ty, FieldType::String | FieldType::Text)
+    }
+
+    /// The `Listing` method that adds `?<name>=` filtering, if any.
+    pub(crate) fn filter_method(&self) -> Option<&'static str> {
+        match self.ty {
+            FieldType::Int => Some("filter_int"),
+            FieldType::Bool => Some("filter_bool"),
+            FieldType::String => Some("filter_text"),
+            FieldType::Text | FieldType::Float => None,
+        }
+    }
+
+    /// Its cell in the htmx page's table row.
+    pub(crate) fn cell(&self) -> String {
+        let value = match (self.ty, self.optional) {
+            (FieldType::Bool, _) => format!("{{{{ '✓' if item.{} }}}}", self.name),
+            (_, true) => format!(
+                "{{{{ item.{} if item.{} is not none }}}}",
+                self.name, self.name
+            ),
+            _ => format!("{{{{ item.{} }}}}", self.name),
+        };
+        format!("<td>{value}</td>")
+    }
+
+    /// Its entry in the test's sample body: `"title": "Example",`.
+    pub(crate) fn sample_entry(&self) -> String {
+        format!("\"{}\": {},", self.name, self.sample_json())
     }
 }
 
@@ -345,15 +445,7 @@ fn module(plan: &Plan<'_>) -> String {
     let binds: String = plan
         .fields
         .iter()
-        .map(|f| {
-            // Strings are borrowed; numbers and booleans are Copy.
-            let borrow = matches!(f.ty, FieldType::String | FieldType::Text);
-            format!(
-                "\n    .bind({}new.{})",
-                if borrow { "&" } else { "" },
-                f.name
-            )
-        })
+        .map(|f| format!("\n    {}", f.bind()))
         .collect();
 
     let mut s = String::new();
@@ -387,9 +479,9 @@ fn module(plan: &Plan<'_>) -> String {
     let _ = writeln!(s, "pub struct {} {{", n.pascal);
     s.push_str("    pub id: i64,\n");
     for f in plan.fields {
-        let _ = writeln!(s, "    pub {}: {},", f.name, f.rust_type());
+        s.push_str(&f.model_line());
     }
-    s.push_str("}\n\n");
+    let _ = writeln!(s, "    {FIELDS_MARKER}\n}}\n");
 
     // Input.
     let _ = writeln!(
@@ -400,34 +492,21 @@ fn module(plan: &Plan<'_>) -> String {
     s.push_str("#[model]\n");
     let _ = writeln!(s, "pub struct New{} {{", n.pascal);
     for f in plan.fields {
-        match (f.ty, f.optional) {
-            (FieldType::Bool, _) => s.push_str(
-                "    #[serde(default, deserialize_with = \"zapline::extract::checkbox\")]\n",
-            ),
-            (_, true) => s.push_str(
-                "    #[serde(default, deserialize_with = \"zapline::extract::empty_as_none\")]\n",
-            ),
-            (FieldType::String, false) => {
-                s.push_str("    #[validate(length(min = 1, max = 200))]\n");
-            }
-            (FieldType::Text, false) => s.push_str("    #[validate(length(max = 100000))]\n"),
-            _ => {}
-        }
-        let _ = writeln!(s, "    pub {}: {},", f.name, f.rust_type());
+        s.push_str(&f.payload_lines());
     }
-    s.push_str("}\n\n");
+    let _ = writeln!(s, "    {FIELDS_MARKER}\n}}\n");
 
     // What the list endpoint accepts.
     let sortable: Vec<String> = plan
         .fields
         .iter()
-        .filter(|f| f.ty != FieldType::Text)
+        .filter(|f| f.sortable())
         .map(|f| format!("\"{}\"", f.name))
         .collect();
     let searchable: Vec<String> = plan
         .fields
         .iter()
-        .filter(|f| matches!(f.ty, FieldType::String | FieldType::Text))
+        .filter(|f| f.searchable())
         .map(|f| format!("\"{}\"", f.name))
         .collect();
     let mut accepts = vec!["`?limit=&offset=`".to_owned(), "`?sort=-id`".to_owned()];
@@ -444,11 +523,8 @@ fn module(plan: &Plan<'_>) -> String {
         let _ = writeln!(chain, "        .search([{}])", searchable.join(", "));
     }
     for f in plan.fields {
-        let filter = match f.ty {
-            FieldType::Int => "filter_int",
-            FieldType::Bool => "filter_bool",
-            FieldType::String => "filter_text",
-            FieldType::Text | FieldType::Float => continue,
+        let Some(filter) = f.filter_method() else {
+            continue;
         };
         accepts.push(format!("`?{}=`", f.name));
         let _ = writeln!(chain, "        .{filter}(\"{}\")", f.name);
@@ -586,7 +662,8 @@ fn module(plan: &Plan<'_>) -> String {
     s.trim_end().to_string() + "\n"
 }
 
-fn input(f: &Field) -> String {
+/// The form control for `f` on the htmx page.
+pub(crate) fn input(f: &Field) -> String {
     let required = if f.optional { "" } else { " required" };
     match f.ty {
         FieldType::String => format!(
@@ -640,6 +717,7 @@ fn template(plan: &Plan<'_>) -> String {
     for f in plan.fields {
         let _ = writeln!(s, "  {}", input(f));
     }
+    let _ = writeln!(s, "  {TEMPLATE_MARKER}");
     s.push_str("  <button>Add</button>\n</form>\n\n");
     s.push_str("<table>\n  <thead><tr>");
     for f in plan.fields {
@@ -649,12 +727,7 @@ fn template(plan: &Plan<'_>) -> String {
     let _ = writeln!(s, "  <tbody id=\"{}\">", n.plural);
     s.push_str("  {% block list %}\n  {% for item in items %}\n    <tr>");
     for f in plan.fields {
-        let cell = match (f.ty, f.optional) {
-            (FieldType::Bool, _) => format!("{{{{ '✓' if item.{} }}}}", f.name),
-            (_, true) => format!("{{{{ item.{} if item.{} is not none }}}}", f.name, f.name),
-            _ => format!("{{{{ item.{} }}}}", f.name),
-        };
-        let _ = write!(s, "<td>{cell}</td>");
+        s.push_str(&f.cell());
     }
     let _ = writeln!(
         s,
@@ -675,13 +748,11 @@ fn template(plan: &Plan<'_>) -> String {
 fn test(plan: &Plan<'_>, krate: &str) -> String {
     let n = plan.names;
     let api = api_path(plan);
-    let body: Vec<String> = plan
+    let entries: String = plan
         .fields
         .iter()
-        .map(|f| format!("\"{}\": {}", f.name, f.sample_json()))
+        .map(|f| format!("        {}\n", f.sample_entry()))
         .collect();
-    let body = format!("{{{}}}", body.join(", "));
-    let first = &plan.fields[0];
     let mut s = String::new();
     let _ = writeln!(
         s,
@@ -691,55 +762,49 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
     );
     let _ = writeln!(
         s,
+        "/// A valid body: every column. `zapline g migration add_<column>_to_{t}`\n\
+         /// adds new columns here.\n\
+         fn sample() -> Value {{\n    json!({{\n{entries}        {FIELDS_MARKER}\n    }})\n}}\n",
+        t = n.plural,
+    );
+    let _ = writeln!(
+        s,
         "#[tokio::test]\nasync fn crud_round_trip() {{\n    \
          let client = app(Database::sqlite_memory()).test();\n\n    \
-         let res = client.post(\"{api}\").json(&json!({body})).send().await;\n    \
+         let res = client.post(\"{api}\").json(&sample()).send().await;\n    \
          assert_eq!(res.status(), 201, \"{{}}\", res.text());\n    \
          let created: Value = res.json();\n    \
+         for (field, value) in sample().as_object().unwrap() {{\n        \
+         assert_eq!(&created[field], value, \"`{{field}}` did not round-trip\");\n    }}\n    \
          let id = created[\"id\"].as_i64().unwrap();\n\n    \
          let res = client.get(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 200);\n    \
-         assert_eq!(res.json::<Value>()[\"{f}\"], created[\"{f}\"]);\n\n    \
+         assert_eq!(res.json::<Value>(), created);\n\n    \
          let list: Value = client.get(\"{api}\").send().await.json();\n    \
          assert_eq!(list[\"total\"], 1);\n    \
-         assert_eq!(list[\"items\"][0][\"id\"], id);\n\n    \
-         let res = client.put(&format!(\"{api}/{{id}}\")).json(&json!({body})).send().await;\n    \
-         assert_eq!(res.status(), 200);\n\n    \
+         assert_eq!(list[\"items\"][0], created);\n\n    \
+         let res = client.put(&format!(\"{api}/{{id}}\")).json(&sample()).send().await;\n    \
+         assert_eq!(res.status(), 200);\n    \
+         assert_eq!(res.json::<Value>(), created);\n\n    \
          let res = client.delete(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 204);\n    \
          let res = client.get(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 404);\n}}\n",
-        f = first.name,
     );
-    if plan
+    if let Some(required) = plan
         .fields
         .iter()
-        .any(|f| f.ty == FieldType::String && !f.optional)
+        .find(|f| f.ty == FieldType::String && !f.optional)
     {
-        let s_field = plan
-            .fields
-            .iter()
-            .find(|f| f.ty == FieldType::String && !f.optional)
-            .map(|f| f.name.as_str())
-            .unwrap_or("name");
-        let invalid: Vec<String> = plan
-            .fields
-            .iter()
-            .map(|f| {
-                if f.name == s_field {
-                    format!("\"{}\": \"\"", f.name)
-                } else {
-                    format!("\"{}\": {}", f.name, f.sample_json())
-                }
-            })
-            .collect();
         let _ = writeln!(
             s,
             "#[tokio::test]\nasync fn invalid_input_is_422() {{\n    \
              let client = app(Database::sqlite_memory()).test();\n    \
-             let res = client.post(\"{api}\").json(&json!({{{}}})).send().await;\n    \
+             let mut body = sample();\n    \
+             body[\"{f}\"] = json!(\"\");\n    \
+             let res = client.post(\"{api}\").json(&body).send().await;\n    \
              assert_eq!(res.status(), 422);\n}}\n",
-            invalid.join(", ")
+            f = required.name,
         );
     }
     if plan.html {

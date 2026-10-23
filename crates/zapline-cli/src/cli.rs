@@ -29,6 +29,9 @@ Examples:
   zapline routes                           Print the route table
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
   zapline db new create_posts              Add a SQL migration
+  zapline g migration add_views_to_posts views:int=0
+                                           Add a column, and to the posts resource's code
+  zapline db status                        List applied and pending migrations
   zapline db migrate                       Apply pending migrations
   zapline doctor                           Check your toolchain
   zapline bench http://localhost:8080/     Load test with wrk
@@ -131,6 +134,9 @@ Examples:
         after_long_help = "\
 Examples:
   zapline db new create_posts      Add migrations/<timestamp>_create_posts.sql
+  zapline db new add_views_to_posts views:int=0
+                                   ALTER TABLE posts, and update the posts resource
+  zapline db status                Which migrations are applied, pending or edited
   zapline db migrate               Apply pending migrations using the app's DATABASE_URL"
     )]
     Db(DbCommand),
@@ -178,8 +184,9 @@ Examples:
     /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
     #[command(after_long_help = "\
 Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
-new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
-db_migrate, check, test, routes, openapi. Start it from the project directory.
+new_project, generate_resource, generate_migration, generate_handler, generate_middleware,
+db_new_migration, db_migrate, db_status, check, test, routes, openapi. Start it from the
+project directory.
 
 Setup:
   Claude Code   claude mcp add zapline -- zapline mcp
@@ -270,6 +277,10 @@ Examples:
         #[arg(long)]
         memory: bool,
     },
+
+    /// A SQL migration; `add_<x>_to_<table>` / `remove_<x>_from_<table>` also update the resource
+    #[command(after_long_help = MIGRATION_HELP)]
+    Migration(MigrationArgs),
 
     /// A single route handler in src/routes/<name>.rs
     #[command(after_long_help = "\
@@ -416,13 +427,59 @@ pub struct ClientArgs {
     pub bin: Option<String>,
 }
 
+const MIGRATION_HELP: &str = "\
+Creates migrations/<timestamp>_<name>.sql. The name says what it does:
+
+  add_<x>_to_<table> FIELD:TYPE...    ALTER TABLE <table> ADD COLUMN ... per field
+  remove_<x>_from_<table> [COLUMN...]  ALTER TABLE <table> DROP COLUMN ... (column <x>
+                                       when none are listed; SQLite 3.35+)
+  anything else                        an empty migration to fill in
+
+Field types are those of `generate resource`: string, text, int, float, bool, `?` for
+optional. A required column needs a value for the rows already in the table: give one
+with `=` (`views:int=0`, `status=draft`), or it gets the type's zero value and a warning.
+
+When src/routes/<table>.rs came from `zapline g resource` (and still has its
+`// zapline:fields` markers), the change is carried through to the model structs,
+every SELECT/INSERT/UPDATE, the list filters, the htmx form and table, and the test's
+sample body. Otherwise the exact lines to change are printed.
+
+Examples:
+  zapline g migration add_views_to_posts views:int=0
+  zapline g migration add_details_to_posts summary:text? published:bool
+  zapline g migration remove_views_from_posts
+  zapline db new backfill_slugs";
+
+/// Arguments of `zapline generate migration` and `zapline db new`.
+#[derive(Debug, Args)]
+pub struct MigrationArgs {
+    /// What the migration does, e.g. `add_views_to_posts` or `create_index_on_posts`
+    pub name: String,
+    /// Columns to add (`views:int=0`, `bio:text?`) or to remove (`views`)
+    #[arg(value_name = "FIELD:TYPE")]
+    pub fields: Vec<String>,
+}
+
 /// `zapline db` subcommands.
 #[derive(Debug, Subcommand)]
 pub enum DbCommand {
-    /// Create an empty migration file in migrations/
-    New {
-        /// What the migration does, e.g. `create_posts`
-        name: String,
+    /// Create a migration in migrations/ (same as `zapline generate migration`)
+    #[command(after_long_help = MIGRATION_HELP)]
+    New(MigrationArgs),
+    /// List migrations: applied, pending, or edited after they were applied
+    #[command(after_long_help = "\
+Runs the app with ZAPLINE_MIGRATE_STATUS=1: `App::database` connects with the app's own
+DATABASE_URL and migrations directory, compares them with sqlx's _sqlx_migrations table,
+prints the result and exits without migrating. Exits non-zero when an applied migration
+was edited or deleted afterwards (sqlx refuses to start then).
+
+Examples:
+  zapline db status
+  DATABASE_URL=postgres://... zapline db status")]
+    Status {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
     },
     /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE_ONLY=1)
     Migrate {
@@ -541,6 +598,36 @@ mod tests {
             panic!()
         };
         assert!(matches!(g.kind, GenerateKind::Middleware { .. }));
+    }
+
+    #[test]
+    fn migrations_parse_under_generate_and_db() {
+        let Command::Generate(g) = parse(&[
+            "g",
+            "migration",
+            "add_views_to_posts",
+            "views:int=0",
+            "bio:text?",
+        ])
+        .command
+        else {
+            panic!()
+        };
+        let GenerateKind::Migration(m) = g.kind else {
+            panic!()
+        };
+        assert_eq!(m.name, "add_views_to_posts");
+        assert_eq!(m.fields, ["views:int=0", "bio:text?"]);
+        let Command::Db(DbCommand::New(m)) = parse(&["db", "new", "create_posts"]).command else {
+            panic!()
+        };
+        assert_eq!((m.name.as_str(), m.fields.len()), ("create_posts", 0));
+        let Command::Db(DbCommand::Status { bin }) =
+            parse(&["db", "status", "--bin", "server"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(bin.as_deref(), Some("server"));
     }
 
     #[test]

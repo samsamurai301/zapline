@@ -12,6 +12,8 @@ The first public release.
 - `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
 - `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
 - `zapline db new` / `zapline db migrate`.
+- Schema evolution: `zapline g migration add_<x>_to_<table> views:int=0` (or `zapline db new ..`) writes `ALTER TABLE .. ADD COLUMN` per field, with a `DEFAULT` for required columns (given with `=` or the type's zero value, with a warning), and carries the columns into the resource `g resource` generated: model structs, every SELECT/INSERT/UPDATE and its binds, the list endpoint's sort/search/filters, the htmx form and table, and the test's sample body (found by `// zapline:fields` markers; hand-edited files get the exact lines to add instead). `remove_<x>_from_<table>` drops columns the same way. MCP tool `generate_migration`.
+- `zapline db status` (MCP `db_status`): applied, pending and modified-after-apply migrations, read by the app itself with `ZAPLINE_MIGRATE_STATUS=1` (`zapline::db::ENV_MIGRATE_STATUS`); exits non-zero when an applied migration was edited or deleted.
 - `zapline g auth`: accounts in one command (users migration, sign-up/log-in/log-out as JSON API and htmx pages, `CurrentUser` extractor, tests).
 - `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing, and `new_token` / `hash_token` for single-use links.
 - `zapline g auth` includes password reset by email: hashed single-use tokens that expire after an hour, JSON endpoints and htmx pages, and tests.

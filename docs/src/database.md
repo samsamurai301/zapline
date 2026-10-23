@@ -105,11 +105,50 @@ Migrations are plain SQL files in `migrations/`, applied in file-name order, eac
 ```sh
 zapline db new create_posts     # migrations/20261022062406_create_posts.sql
 zapline db migrate              # apply pending migrations, then exit
+zapline db status               # which are applied, pending, or edited since
 ```
 
 The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+### Changing a table: `zapline g migration`
+
+The migration's name says what it does, and the fields use the types of `generate resource` (`string`, `text`, `int`, `float`, `bool`, `?` for optional):
+
+```sh
+zapline g migration add_views_to_posts views:int=0         # ALTER TABLE posts ADD COLUMN ..
+zapline g migration add_details_to_posts summary:text? pinned:bool
+zapline g migration remove_views_from_posts                # ALTER TABLE posts DROP COLUMN views
+zapline db new backfill_slugs                              # any other name: an empty file
+```
+
+`add_<x>_to_<table>` writes one `ALTER TABLE <table> ADD COLUMN` per field (the part before `_to_` is only a description). The rows already in the table need a value for a required column, and SQLite refuses `NOT NULL` without one, so a required column always gets a `DEFAULT`: the one you give with `=` (`views:int=0`, `status=draft`, `pinned:bool=true`), or the type's zero value (`''`, `0`, `0.0`, `FALSE`) with a warning. Optional columns are NULL for existing rows. `remove_<x>_from_<table>` drops column `<x>`, or the columns you list; on SQLite that needs 3.35 or newer (sqlx bundles one), and a column that is indexed, `UNIQUE` or a key has to lose its index first. The statements are the same on SQLite and Postgres; `zapline g migration` reads which one the project uses from its zapline features.
+
+When `src/routes/<table>.rs` came from `zapline g resource`, the change goes through the code too, so the app keeps compiling and its tests keep passing:
+
+| File | What changes |
+|---|---|
+| `src/routes/<table>.rs` | The field in the model struct and the `New..` payload (with the same validation `g resource` would add); every `SELECT` / `RETURNING` column list; the `INSERT` and `UPDATE` columns, placeholders and `.bind(..)` calls; `listing()`'s sort, search and filter columns and its doc comment |
+| `templates/<table>/index.html` | A form input, a table header and a cell |
+| `tests/<table>.rs` | The column in `sample()`, which `crud_round_trip` sends through POST, GET, the list and PUT and checks field by field |
+
+The generator finds its place by the `// zapline:fields` comments in the structs and the test, `{# zapline:fields #}` in the form, and by the shape of the SQL it wrote. Keep those and edit everything else freely. A file that no longer has that shape (or a hand-written module, like the `fullstack` template's `todos`) is left untouched and you get the exact lines to add instead; a module is never half-patched.
+
+### Migration status: `zapline db status`
+
+```text
+$ zapline db status
+VERSION         STATUS    DESCRIPTION
+20260101000000  applied   create todos
+20261023094500  applied   create posts
+20261023101200  pending   add views to posts
+2 applied, 1 pending
+```
+
+A migration is `applied`, `pending` (the next start or `zapline db migrate` runs it), `modified` (its file changed after it ran) or `missing` (it ran but the file is gone). sqlx refuses to start in the last two cases, so `zapline db status` exits non-zero and names the file to restore; put the change in a new migration instead.
+
+Like `db migrate`, it runs your app, with `ZAPLINE_MIGRATE_STATUS=1`: `App::database` connects with the app's own URL and migrations directory, compares the files with sqlx's `_sqlx_migrations` table, prints one JSON line per migration (`{"version":..,"description":"..","applied":true,"checksum_ok":true,"missing":false}`) and exits without migrating or serving. On a database that has never been migrated it creates the empty `_sqlx_migrations` table, as the first migration run would.
 
 ## Seed data
 

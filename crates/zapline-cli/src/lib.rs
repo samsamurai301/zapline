@@ -142,6 +142,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                     generate::handler(here, &name, method, path.as_deref(), g.force)?
                 }
                 GenerateKind::Middleware { name } => generate::middleware(here, &name, g.force)?,
+                GenerateKind::Migration(m) => {
+                    generate::migration::generate(&Project::discover(here)?, &m.name, &m.fields)?
+                }
                 GenerateKind::Auth => generate::auth::generate(&Project::discover(here)?, g.force)?,
                 GenerateKind::Job { name } => {
                     generate::job::generate(&Project::discover(here)?, &name, g.force)?
@@ -183,9 +186,14 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             openapi::run(&project, a.bin.as_deref(), &a.output)
         }
-        Command::Db(DbCommand::New { name }) => {
+        Command::Db(DbCommand::New(m)) => {
             let project = Project::discover(Path::new("."))?;
-            db::new(&project.root, &name)
+            generate::migration::generate(&project, &m.name, &m.fields)?.print();
+            Ok(())
+        }
+        Command::Db(DbCommand::Status { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::status(&project, bin.as_deref())
         }
         Command::Db(DbCommand::Migrate { bin }) => {
             let project = Project::discover(Path::new("."))?;

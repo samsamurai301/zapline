@@ -573,3 +573,53 @@ fn generate_job_registers_it_in_the_app() {
     let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
     assert!(log.contains("no migrations/ directory"), "{log}");
 }
+
+#[test]
+fn generate_migration_carries_new_columns_into_the_resource() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "blog", "fullstack");
+    expect_success(&run_in(&root, &["g", "resource", "post", "title"]));
+
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "add_views_to_posts", "views:int"],
+    ));
+    assert!(log.contains("_add_views_to_posts.sql"), "{log}");
+    assert!(log.contains("Modified src/routes/posts.rs"), "{log}");
+    // No default given: existing rows get the zero value, with a warning.
+    assert!(log.contains("existing rows get DEFAULT 0"), "{log}");
+    let module = fs::read_to_string(root.join("src/routes/posts.rs")).unwrap();
+    assert!(
+        module.contains("UPDATE posts SET title = $1, views = $2 WHERE id = $3"),
+        "{module}"
+    );
+    let page = fs::read_to_string(root.join("templates/posts/index.html")).unwrap();
+    assert!(
+        page.contains("<input name=\"views\" type=\"number\""),
+        "{page}"
+    );
+
+    // `db new` is the same generator; dropping the column undoes the patch.
+    let log = expect_success(&run_in(&root, &["db", "new", "remove_views_from_posts"]));
+    assert!(log.contains("Modified tests/posts.rs"), "{log}");
+    let module = fs::read_to_string(root.join("src/routes/posts.rs")).unwrap();
+    assert!(!module.contains("pub views: i64"), "{module}");
+    assert!(
+        module.contains("UPDATE posts SET title = $1 WHERE id = $2"),
+        "{module}"
+    );
+
+    // The starter `todos` module is hand-written: instructions instead.
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "add_priority_to_todos", "priority:int=1"],
+    ));
+    assert!(log.contains("src/routes/todos.rs was not changed"), "{log}");
+    assert!(log.contains("pub priority: i64,"), "{log}");
+
+    // Other names: an empty migration; fields there are a mistake.
+    let log = expect_success(&run_in(&root, &["db", "new", "backfill_slugs"]));
+    assert!(log.contains("_backfill_slugs.sql"), "{log}");
+    let log = expect_failure(&run_in(&root, &["g", "migration", "backfill", "x:int"]));
+    assert!(log.contains("add_<columns>_to_<table>"), "{log}");
+}
