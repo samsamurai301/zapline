@@ -12,7 +12,12 @@ RUN mkdir src \
     && cargo build --release \
     && rm -rf src
 
+COPY build.rs ./
 COPY src ./src
+# Compiled into the binary by `zapline::embed!`.
+COPY templates ./templates
+COPY static ./static
+COPY migrations ./migrations
 # Cargo decides what to rebuild by mtime; make sure the real sources are newer.
 RUN touch src/main.rs src/lib.rs && cargo build --release
 
@@ -24,11 +29,8 @@ RUN apt-get update \
     && useradd --system --uid 10001 --create-home --shell /usr/sbin/nologin app
 
 WORKDIR /home/app
+# One file: templates, static files and migrations are inside it.
 COPY --from=builder /app/target/release/@@name@@ /usr/local/bin/app
-# Read at runtime: templates, static files and SQL migrations.
-COPY templates ./templates
-COPY static ./static
-COPY migrations ./migrations
 
 USER app
 # Hosts that pick the port (Railway, Render, ...) override PORT.

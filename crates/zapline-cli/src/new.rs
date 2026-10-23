@@ -511,6 +511,7 @@ mod tests {
                     "static/app.css",
                     "tests/todos.rs",
                     "tests/fuzz.rs",
+                    "build.rs",
                     "Dockerfile",
                     ".dockerignore",
                     ".github/workflows/ci.yml",

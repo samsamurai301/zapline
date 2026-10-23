@@ -24,9 +24,16 @@
 //! kernel spreads connections across cores and a connection never migrates
 //! between threads (no work-stealing overhead, no cross-core cache traffic on
 //! the hot path).
+//!
+//! Under systemd (`Type=notify`) the server reports `READY=1` once it is
+//! listening, after an optional in-process health check; see
+//! [`ENV_READY_PATH`] for zero-downtime swaps.
 
 mod conn;
+mod ready;
 mod shutdown;
+
+pub use self::ready::{ENV_READY_PATH, ENV_READY_TIMEOUT, ENV_REUSE_PORT};
 
 use std::future::Future;
 use std::io;
@@ -164,6 +171,15 @@ pub struct ServerConfig {
     /// On shutdown, how long to wait for in-flight requests before closing
     /// the remaining connections. Default: 30s.
     pub shutdown_timeout: Duration,
+    /// On shutdown, how long an idle HTTP/1.1 connection may still send a
+    /// request (within `shutdown_timeout`). The listening socket closes at
+    /// once; this is for requests already on their way, from clients that
+    /// just connected or reuse a keep-alive connection: they get a response
+    /// (saying `connection: close`) instead of a reset, so a rolling restart
+    /// drops nothing. A connection closes right after that response, or
+    /// when the grace ends if it sends nothing. `Duration::ZERO` closes idle
+    /// connections at once. Default: 1s.
+    pub drain_grace: Duration,
     /// Abort TLS handshakes that take longer than this. Default: 10s.
     pub tls_handshake_timeout: Duration,
     /// Terminate TLS on every connection (see [`crate::tls`]).
@@ -189,6 +205,7 @@ impl Default for ServerConfig {
             http2_max_concurrent_streams: None,
             http2_keep_alive_interval: None,
             shutdown_timeout: Duration::from_secs(30),
+            drain_grace: Duration::from_secs(1),
             tls_handshake_timeout: Duration::from_secs(10),
             #[cfg(feature = "tls")]
             tls: None,
@@ -505,6 +522,12 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
             return Err(io::Error::other(msg));
         }
     };
+    // Before binding: a failing instance never takes connections.
+    if let Err(e) = system.block_on(ready::self_check(&app)) {
+        system.block_on(lifecycle.run_shutdown(&resources));
+        system.shutdown_timeout(Duration::from_secs(1));
+        return Err(io::Error::other(format!("startup failed: {e}")));
+    }
     #[cfg(unix)]
     let bind = options
         .unix
@@ -575,7 +598,7 @@ fn run_workers(
     let listeners = if per_core {
         bind_listeners(&bind, &config, workers, true)?
     } else {
-        bind_listeners(&bind, &config, 1, false)?
+        bind_listeners(&bind, &config, 1, ready::reuse_port_requested())?
     };
     // Identity of the socket file we created, so cleanup never unlinks a
     // replacement instance's socket bound at the same path while we drained.
@@ -626,7 +649,13 @@ fn run_workers(
         );
     }
 
-    let signals: Vec<Signal> = listeners.iter().map(|_| Signal::default()).collect();
+    // Listening (the kernel queues connections until the workers accept).
+    ready::notify("READY=1");
+
+    let signals: Vec<Signal> = listeners
+        .iter()
+        .map(|_| Signal::new(config.drain_grace))
+        .collect();
     let trigger = Trigger::new(signals.clone());
     let driver = system.spawn(drive(
         shutdown,
@@ -722,6 +751,7 @@ fn run_per_core(
 /// Wait for the shutdown signal, then tell every worker to drain.
 async fn drive(shutdown: Option<BoxFuture<()>>, trigger: Trigger, announce: Option<Duration>) {
     let announce = |msg: &str| {
+        ready::notify("STOPPING=1");
         if let Some(timeout) = announce {
             eprintln!("zapline: {msg} (waiting up to {timeout:?} for open connections)");
         }
@@ -854,7 +884,7 @@ pub(crate) async fn serve(
     if let Ok(addr) = listener.local_addr() {
         crate::dev::announce(addr, false);
     }
-    let signal = Signal::default();
+    let signal = Signal::new(config.drain_grace);
     let driver = tokio::spawn(drive(shutdown, Trigger::new(vec![signal.clone()]), None));
     let worker = Worker::new(Arc::new(app), &Proto::new(&config), &config, signal);
     let result = conn::serve(listener, worker).await;

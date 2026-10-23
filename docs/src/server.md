@@ -3,7 +3,7 @@
 `App::run(addr)` starts a production-ready server with no extra configuration:
 
 - **Thread-per-core.** One single-threaded Tokio runtime per CPU, each with its own `SO_REUSEPORT` listener. This is the default on Linux, Android and FreeBSD. Elsewhere, or with `.runtime(RuntimeMode::MultiThread)`, it uses one listener on a work-stealing runtime.
-- **Graceful shutdown.** On SIGINT or SIGTERM (Ctrl-C on Windows) it stops accepting connections, lets in-flight requests finish, closes idle keep-alive connections, waits up to `shutdown_timeout` (default 30s), then runs your [shutdown hooks](lifecycle.md). A second signal forces an immediate stop.
+- **Graceful shutdown.** On SIGINT or SIGTERM (Ctrl-C on Windows) it stops accepting connections, lets in-flight requests finish, closes keep-alive connections after their next response (or after `drain_grace`, 1s, if idle), waits up to `shutdown_timeout` (default 30s), then runs your [shutdown hooks](lifecycle.md). A second signal forces an immediate stop.
 - **HTTP/1.1** with keep-alive and pipelining. **HTTP/2** with the `http2` feature, using h2c prior knowledge and ALPN `h2` over TLS. Detection costs nothing for HTTP/1.1 connections.
 
 ```rust
@@ -55,6 +55,7 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `max_header_size`, `max_headers`, `max_buf_size` | hyper defaults | Request head limits |
 | `http2`, `http2_max_concurrent_streams`, `http2_keep_alive_interval` | true (feature on) | HTTP/2 tuning |
 | `shutdown_timeout` | 30s | Drain deadline |
+| `drain_grace` | 1s | How long an idle connection may still send a request once draining starts; its response says `connection: close` ([why](deployment.md#why-no-request-is-dropped)) |
 | `tls_handshake_timeout` | 10s | Abandon slow handshakes |
 | `backlog` | 4096 | Listen backlog |
 | `banner` | true | Print the startup line |

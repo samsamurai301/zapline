@@ -45,6 +45,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use crate::embed::Dir;
 use crate::extract::FromRequestParts;
 use crate::middleware::Next;
 use crate::{App, Error, Request, Response, Result};
@@ -70,6 +71,8 @@ impl I18n {
     /// Load every `*.toml` file in `dir`; the file name (`en`, `fr`,
     /// `pt-BR`) is the language. The default language is `en` when there is
     /// one, otherwise the first file in alphabetical order.
+    /// `I18n::load(zapline::embed!("locales"))` compiles them into the
+    /// binary.
     ///
     /// # Errors
     ///
@@ -80,23 +83,35 @@ impl I18n {
     /// let i18n = zapline::i18n::I18n::load("locales")?;
     /// # Ok::<(), zapline::Error>(())
     /// ```
-    pub fn load(dir: impl AsRef<Path>) -> Result<Self> {
-        let dir = dir.as_ref();
+    pub fn load(dir: impl Into<Dir>) -> Result<Self> {
+        let dir: Dir = dir.into();
         let read_err = |e: std::io::Error| {
-            Error::internal(format!("cannot read translations in {}", dir.display())).with_source(e)
+            Error::internal(format!(
+                "cannot read translations in {}",
+                dir.path().display()
+            ))
+            .with_source(e)
         };
         let mut i18n = I18n(Arc::default());
-        for (lang, path) in toml_files(dir).map_err(read_err)? {
-            let text = std::fs::read_to_string(&path).map_err(read_err)?;
-            i18n = i18n.messages(&lang, &text)?;
+        // Sorted, top level only.
+        let files = dir.files().map_err(read_err)?;
+        for name in files.iter().filter(|f| !f.contains('/')) {
+            let Some(lang) = name.strip_suffix(".toml") else {
+                continue;
+            };
+            let text = dir.read_to_string(name).map_err(read_err)?;
+            i18n = i18n.messages(lang, &text)?;
         }
         if i18n.0.langs.is_empty() {
             return Err(Error::internal(format!(
                 "no translations: add files like {}/en.toml",
-                dir.display()
+                dir.path().display()
             )));
         }
-        Arc::make_mut(&mut i18n.0).source = Some(dir.to_owned());
+        // Translations compiled into the binary can't change.
+        if !dir.is_embedded() {
+            Arc::make_mut(&mut i18n.0).source = Some(dir.path().to_path_buf());
+        }
         Ok(i18n)
     }
 

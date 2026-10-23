@@ -50,6 +50,8 @@ TCP accept (per-core runtime, SO_REUSEPORT)            server.rs
 | `ZAPLINE_RECORD=1` (`dev::ENV_RECORD`) | The dev console records request/response pairs from startup (debug builds); `zapline snap` saves them as snapshot tests that `TestClient::replay_snapshots` replays. Set by `zapline dev --record`. |
 | `ZAPLINE_DEV=1`, `App::dev_errors`, `ZAPLINE_DEV_ADDR_FILE=<path>` | Debug builds: the dev error page (installed as the outermost middleware in `App::prepare`, only when on), and the file where the server writes its URL for `zapline mcp`. Both set by `zapline dev`. |
 | `zapline::codes` | The diagnostic code registry (`ALL`, `lookup`); `Error::diagnostic_code()`. |
+| `ZAPLINE_READY_PATH`, `ZAPLINE_READY_TIMEOUT`, `ZAPLINE_REUSE_PORT`, `NOTIFY_SOCKET` (`server/ready.rs`) | Supervised zero-downtime swaps: an in-process health check before binding, `SO_REUSEPORT`, systemd `READY=1`/`STOPPING=1`. Read once in `run()`, never per request. Set by the unit `zapline ship` installs. |
+| `embed::Dir` (`embed.rs`, from `zapline::embed!`) | A directory on disk or compiled in. `views`, `assets`, `ServeDir`, `Database::migrations`, `I18n::load` and `standard_in` take `impl Into<Dir>`; embedded lookups are a hash-map hit with no blocking-pool hop. |
 
 Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature module's own file. For example, `openapi/mod.rs` can add `App::openapi(...)`. That keeps each feature self-contained.
 

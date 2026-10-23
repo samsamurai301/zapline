@@ -69,6 +69,7 @@
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
 //! | Development | [`dev`]: routes, recent requests and errors, jobs and mail at `/_dev` ([`App::dev_console`]); the dev error page ([`App::dev_errors`]); [`codes`]: diagnostic codes such as `ZL0002` |
+//! | Deployment | [`embed`](mod@embed): templates, static files, migrations and translations compiled into the binary (`embed!`) |
 //!
 //! # Cargo features
 //!
@@ -113,6 +114,7 @@ mod app;
 mod body;
 pub mod codes;
 pub mod dev;
+pub mod embed;
 mod error;
 pub mod extract;
 mod handler;
@@ -211,7 +213,7 @@ pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 
 #[cfg(feature = "macros")]
-pub use zapline_macros::{delete, get, head, model, options, patch, post, put, route};
+pub use zapline_macros::{delete, embed, get, head, model, options, patch, post, put, route};
 
 /// Everything a typical app needs: `use zapline::prelude::*;`
 ///

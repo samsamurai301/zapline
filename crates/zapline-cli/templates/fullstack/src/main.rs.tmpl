@@ -12,6 +12,8 @@ fn main() -> std::io::Result<()> {
     });
     // DATABASE_URL (e.g. postgres://... with the `postgres` feature), or a
     // local SQLite file so the app runs with zero setup.
-    let db = Database::from_env_or("sqlite://app.db?mode=rwc");
+    // migrations/ is compiled into release binaries (read from disk in debug).
+    let migrations = zapline::embed!("migrations");
+    let db = Database::from_env_or("sqlite://app.db?mode=rwc").migrations(migrations);
     @@crate_name@@::app(db).run(addr)
 }
