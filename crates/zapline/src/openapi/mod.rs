@@ -326,8 +326,14 @@ impl OpenApi {
         routes
             .meta_all(OperationDoc::hidden_route())
             .meta_all(AllowAnonymous)
+            .meta_all(ServedSpec(Arc::new(spec)))
     }
 }
+
+/// The spec an [`OpenApi`] plugin serves, kept on its routes so the test
+/// client's fuzzer checks the app against the same document.
+#[derive(Clone)]
+pub(crate) struct ServedSpec(pub(crate) Arc<Value>);
 
 /// A handler serving pre-rendered bytes: one refcount bump per request.
 fn static_page(

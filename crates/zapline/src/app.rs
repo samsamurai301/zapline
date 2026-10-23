@@ -428,6 +428,12 @@ pub(crate) struct AppInner {
 }
 
 impl AppInner {
+    /// The request body limit (see [`App::body_limit`]).
+    #[cfg(feature = "openapi")]
+    pub(crate) fn body_limit(&self) -> usize {
+        self.shared.body_limit
+    }
+
     /// A copy for one worker thread. Shares the router but gets its own
     /// `Arc` handles so per-request refcount traffic stays core-local.
     pub(crate) fn for_worker(&self) -> AppInner {
