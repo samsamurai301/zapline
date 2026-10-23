@@ -481,7 +481,7 @@ Examples:
         fields: Vec<String>,
     },
 
-    /// A single route handler in src/routes/<name>.rs
+    /// A single route handler in `src/routes/<name>.rs`
     #[command(after_long_help = "\
 Examples:
   zapline generate handler ping
@@ -493,12 +493,12 @@ Examples:
         /// HTTP method
         #[arg(short, long, value_enum, default_value = "get")]
         method: HandlerMethod,
-        /// Route path [default: /<name in kebab-case>]
+        /// Route path [default: `/<name in kebab-case>`]
         #[arg(short, long, value_name = "PATH")]
         path: Option<String>,
     },
 
-    /// A middleware function in src/middleware/<name>.rs
+    /// A middleware function in `src/middleware/<name>.rs`
     Middleware {
         /// Middleware name, e.g. `audit`
         name: String,
