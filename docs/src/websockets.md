@@ -213,7 +213,7 @@ ws.send("hello, room");
 - **Dead peers.** Idle proxies and NATs drop silent connections, and TCP won't tell you for a long time. Send a ping every 20 to 30 seconds with `socket.send(Message::ping(Bytes::new()))`, and treat a failed send as a closed connection.
 - **Reverse proxies** must forward the upgrade headers. For nginx: `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`, plus a long `proxy_read_timeout`.
 - **Shutdown.** Open sockets keep running while the server drains. If you use a worker, a job or `App::tasks_grace_period(..)`, `State<zapline::tasks::Shutdown>` is available: `select!` on `shutdown.wait()` in your loop and call `socket.close_with(close_code::AWAY, "restarting")`. See [Background tasks](tasks.md).
-- **HTTP/2.** WebSockets over HTTP/2 (RFC 8441 extended `CONNECT`) are not supported; clients use an HTTP/1.1 connection for the upgrade.
+- **HTTP/2.** With the `http2` feature, the same handler also serves WebSockets over HTTP/2 (RFC 8441), over TLS (ALPN `h2`) and h2c. The server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`; a client opens a socket with an extended `CONNECT` and `:protocol = websocket`. zapline routes it like the HTTP/1.1 `GET` (handlers and middleware see `GET`), validates `Sec-WebSocket-Version: 13`, negotiates subprotocols, and answers `200` instead of `101`. Each socket is one HTTP/2 stream, so many sockets share one connection. WebSockets over HTTP/3 (RFC 9220) are not supported yet.
 
 ## Testing
 

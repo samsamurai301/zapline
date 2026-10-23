@@ -35,5 +35,5 @@ Run `./scripts/check.sh` to verify everything locally.
 3. **Distributed stores:** pluggable rate-limit and session stores (Redis), and JWKS / key rotation for JWT.
 4. **Scheduling:** full cron expressions, with job metrics.
 5. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
-6. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.
+6. **Protocols:** done: WebSockets over HTTP/2 (RFC 8441) and experimental HTTP/3 (`http3` feature, quinn + h3, `Alt-Svc`). Next: WebSockets over HTTP/3 (RFC 9220), WebTransport, 0-RTT, and taking HTTP/3 out of experimental once `h3` reaches a stable release.
 7. **Database guides:** sqlx, SeaORM and Diesel examples with DI and health checks, and transactional patterns.

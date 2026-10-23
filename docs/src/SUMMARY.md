@@ -55,7 +55,7 @@
 # Operations
 
 - [Observability: tracing, metrics, health](observability.md)
-- [Server: TLS, HTTP/2, graceful shutdown](server.md)
+- [Server: TLS, HTTP/2, HTTP/3, graceful shutdown](server.md)
 - [Deployment](deployment.md)
 - [Running several instances (Redis)](scaling.md)
 - [Performance](performance.md)

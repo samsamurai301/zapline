@@ -41,7 +41,7 @@ Plugins such as [OpenAPI](openapi.md), [Metrics and Health](observability.md) an
 | Area | Modules | Chapter |
 |---|---|---|
 | Core | `app`, `router`, `request`, `response`, `extract`, `error`, `lifecycle`, `test` | [Routing](routing.md), [Extractors](extractors.md), [Responses](responses.md), [Errors](errors.md), [Lifecycle](lifecycle.md), [Testing](testing.md) |
-| Server | `server`, `tls` | [Server](server.md) |
+| Server | `server`, `tls`, `http3` | [Server](server.md) |
 | Middleware | `middleware/*` | [Middleware](middleware.md), [Hardening middleware](hardening.md) |
 | API docs and validation | `openapi/*`, `validate`, `zapline-macros` | [OpenAPI](openapi.md), [Validation](validation.md) |
 | Application structure | `di`, `config`, `tasks` | [Dependency injection](di.md), [Configuration](config.md), [Background tasks](tasks.md) |

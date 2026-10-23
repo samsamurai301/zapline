@@ -66,7 +66,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 ## Operations
 
 - [Observability: tracing, metrics, health](https://samsamurai301.github.io/zapline/observability.html): Three plugins give you logs, metrics and probes. Each is one line, and they work together:
-- [Server: TLS, HTTP/2, graceful shutdown](https://samsamurai301.github.io/zapline/server.html): `App::run(addr)` starts a production-ready server with no extra configuration:
+- [Server: TLS, HTTP/2, HTTP/3, graceful shutdown](https://samsamurai301.github.io/zapline/server.html): `App::run(addr)` starts a production-ready server with no extra configuration:
 - [Deployment](https://samsamurai301.github.io/zapline/deployment.html): lto = "fat"
 - [Running several instances (Redis)](https://samsamurai301.github.io/zapline/scaling.html): One zapline process goes a long way (see [Performance](performance.md)), but for zero-downtime deploys or more traffic you will run two or more instances behind
 - [Performance](https://samsamurai301.github.io/zapline/performance.html): zapline is designed so that the fastest configuration is also the default one.

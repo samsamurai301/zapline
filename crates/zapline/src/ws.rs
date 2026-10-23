@@ -43,7 +43,14 @@
 //! the callback is never run. Test the conversation itself over a real
 //! socket with [`App::serve`](crate::App::serve) and a WebSocket client.
 //!
-//! WebSockets over HTTP/2 (RFC 8441 extended `CONNECT`) are not supported.
+//! # HTTP/2
+//!
+//! With the `http2` feature, the same handler also accepts WebSockets over
+//! HTTP/2 (RFC 8441): the server advertises `SETTINGS_ENABLE_CONNECT_PROTOCOL`,
+//! and an extended `CONNECT` with `:protocol = websocket` is routed like the
+//! HTTP/1.1 `GET` (handlers and middleware see `GET`), answered with `200`
+//! instead of `101`, and runs on its own HTTP/2 stream, so many sockets share
+//! one TLS connection. Subprotocols and size limits work the same way.
 
 use std::fmt;
 use std::future::Future;
@@ -103,7 +110,8 @@ pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 << 20;
 /// }
 /// ```
 pub struct WebSocketUpgrade {
-    key: HeaderValue,
+    /// `None` for HTTP/2 extended CONNECT, which has no key.
+    key: Option<HeaderValue>,
     offered: Vec<String>,
     selected: Option<HeaderValue>,
     on_upgrade: Option<OnUpgrade>,
@@ -228,14 +236,24 @@ impl WebSocketUpgrade {
         Fut: Future + Send + 'static,
         Fut::Output: CallbackResult,
     {
-        let accept = ts::handshake::derive_accept_key(self.key.as_bytes());
-        let mut res = StatusCode::SWITCHING_PROTOCOLS.into_response();
+        let mut res = match &self.key {
+            // HTTP/1.1 (RFC 6455): `101` with the accept key.
+            Some(key) => {
+                let accept = ts::handshake::derive_accept_key(key.as_bytes());
+                let mut res = StatusCode::SWITCHING_PROTOCOLS.into_response();
+                let h = res.headers_mut();
+                h.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+                h.insert(UPGRADE, HeaderValue::from_static("websocket"));
+                if let Ok(v) = HeaderValue::from_str(&accept) {
+                    h.insert(SEC_WEBSOCKET_ACCEPT, v);
+                }
+                res
+            }
+            // HTTP/2 extended CONNECT (RFC 8441): a plain `200` opens the
+            // stream as the socket.
+            None => StatusCode::OK.into_response(),
+        };
         let h = res.headers_mut();
-        h.insert(CONNECTION, HeaderValue::from_static("upgrade"));
-        h.insert(UPGRADE, HeaderValue::from_static("websocket"));
-        if let Ok(v) = HeaderValue::from_str(&accept) {
-            h.insert(SEC_WEBSOCKET_ACCEPT, v);
-        }
         if let Some(p) = &self.selected {
             h.insert(SEC_WEBSOCKET_PROTOCOL, p.clone());
         }
@@ -271,8 +289,11 @@ impl FromRequestParts for WebSocketUpgrade {
                     .with_code("ws_invalid_method"),
             );
         }
+        let h2 = req.extensions().get::<Http2WebSocket>().is_some();
         let headers = req.headers();
-        if !has_token(headers, &CONNECTION, "upgrade") || !has_token(headers, &UPGRADE, "websocket")
+        if !h2
+            && (!has_token(headers, &CONNECTION, "upgrade")
+                || !has_token(headers, &UPGRADE, "websocket"))
         {
             return Err(Error::new(
                 StatusCode::UPGRADE_REQUIRED,
@@ -291,7 +312,9 @@ impl FromRequestParts for WebSocketUpgrade {
             .with_header(SEC_WEBSOCKET_VERSION, HeaderValue::from_static("13")));
         }
         let key = match headers.get(SEC_WEBSOCKET_KEY) {
-            Some(k) if valid_key(k.as_bytes()) => k.clone(),
+            // RFC 8441: no key (and no accept) over HTTP/2.
+            _ if h2 => None,
+            Some(k) if valid_key(k.as_bytes()) => Some(k.clone()),
             _ => {
                 return Err(Error::bad_request(
                     "missing or invalid `Sec-WebSocket-Key` (must be 16 base64-encoded bytes)",
@@ -322,6 +345,30 @@ impl FromRequestParts for WebSocketUpgrade {
             },
         })
     }
+}
+
+/// Marks a request that arrived as an HTTP/2 extended CONNECT with
+/// `:protocol = websocket` (RFC 8441). Only the server inserts it.
+#[derive(Clone, Copy)]
+#[cfg_attr(not(feature = "http2"), allow(dead_code))]
+struct Http2WebSocket;
+
+/// RFC 8441: an HTTP/2 WebSocket handshake is `CONNECT` with the
+/// `:protocol` pseudo-header `websocket`. Present it to the router as the
+/// `GET` that HTTP/1.1 uses, so the same `.get("/ws", handler)` route
+/// serves both.
+#[cfg(feature = "http2")]
+pub(crate) fn from_extended_connect<B>(mut req: http::Request<B>) -> http::Request<B> {
+    if req.method() == Method::CONNECT
+        && req
+            .extensions()
+            .get::<hyper::ext::Protocol>()
+            .is_some_and(|p| p.as_str().eq_ignore_ascii_case("websocket"))
+    {
+        *req.method_mut() = Method::GET;
+        req.extensions_mut().insert(Http2WebSocket);
+    }
+    req
 }
 
 /// Whether a comma-separated header (possibly repeated) contains `token`,
