@@ -69,6 +69,7 @@ The first public release.
 - Middleware at three levels: global (before routing), route (after routing) and group.
 - Lifecycle: async `on_startup` / `on_shutdown` hooks with a typed `Resources` registry, `Plugin`s, `on_build` hooks, and innermost `EndpointLayers`.
 - `App::test()`: an in-process test client with a cookie jar, multipart and query builders, and assertion helpers.
+- `app.test().fuzz()`: every route fuzzed from the app's OpenAPI document. Typical, boundary and invalid requests plus random ones; reports panics, 5xx, timeouts, undeclared statuses and 2xx bodies that break the declared schema, each shrunk to a minimal request with a `TestClient` line to replay it. Deterministic (`FuzzConfig`, `ZAPLINE_FUZZ_SEED`, `ZAPLINE_FUZZ_CASES`); `zapline fuzz` runs it, and every `zapline new` template includes `tests/fuzz.rs`. The templates and generators now declare `status = 201` / `status = 204` where routes return them.
 
 ### Server
 - Thread-per-core runtimes with `SO_REUSEPORT`, or a work-stealing runtime.
