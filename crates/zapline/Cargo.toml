@@ -31,6 +31,8 @@ otlp = ["tracing", "json", "_http-client"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 http2 = ["hyper/http2", "hyper-util/http2", "hyper-util/server-auto"]
 tls = ["dep:tokio-rustls"]
+# Experimental: HTTP/3 over QUIC next to HTTPS (see `zapline::http3`).
+http3 = ["tls", "dep:quinn", "dep:h3", "dep:h3-quinn"]
 ws = ["dep:tokio-tungstenite"]
 fs = ["dep:mime_guess", "dep:tokio-util"]
 multipart = ["dep:multer"]
@@ -93,6 +95,10 @@ hyper-rustls = { version = "0.27", optional = true, default-features = false, fe
 lettre = { version = "0.11.19", optional = true, default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1-rustls", "ring", "webpki-roots"] }
 minijinja = { version = "2.24", optional = true, features = ["loader"] }
 sqlx = { version = "0.8.6", optional = true, default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros"] }
+# HTTP/3 (experimental). h3 is pre-1.0, so pin exact versions.
+quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = { version = "=0.0.8", optional = true }
+h3-quinn = { version = "=0.0.10", optional = true }
 # Signed CSRF tokens; already in the tree through `cookie` (`signed`).
 hmac = { version = "0.12", optional = true }
 sha2 = { version = "0.10", optional = true }
@@ -109,6 +115,9 @@ rcgen = "0.14"
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
 tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }
+quinn = { version = "0.11.9", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+h3 = "=0.0.8"
+h3-quinn = "=0.0.10"
 
 [package.metadata.docs.rs]
 all-features = true

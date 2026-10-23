@@ -26,6 +26,8 @@
 //! the hot path).
 
 mod conn;
+#[cfg(feature = "http3")]
+mod h3;
 mod shutdown;
 
 use std::future::Future;
@@ -168,6 +170,10 @@ pub struct ServerConfig {
     /// Terminate TLS on every connection (see [`crate::tls`]).
     #[cfg(feature = "tls")]
     pub tls: Option<crate::tls::TlsConfig>,
+    /// Serve HTTP/3 over QUIC next to TLS (**experimental**; see
+    /// [`crate::http3`]). Requires `tls`. Default: `None`.
+    #[cfg(feature = "http3")]
+    pub http3: Option<crate::http3::Http3Config>,
 }
 
 impl Default for ServerConfig {
@@ -191,6 +197,8 @@ impl Default for ServerConfig {
             tls_handshake_timeout: Duration::from_secs(10),
             #[cfg(feature = "tls")]
             tls: None,
+            #[cfg(feature = "http3")]
+            http3: None,
         }
     }
 }
@@ -219,9 +227,13 @@ impl ServerConfig {
     }
 }
 
+fn invalid_input(msg: &str) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidInput, msg.to_owned())
+}
+
 /// Reject configurations that would fail (or panic) later.
 pub(crate) fn check_config(config: &ServerConfig) -> io::Result<()> {
-    let invalid = |msg: &str| Err(io::Error::new(io::ErrorKind::InvalidInput, msg.to_owned()));
+    let invalid = |msg: &str| Err(invalid_input(msg));
     if config.max_buf_size.is_some_and(|n| n < 8192) {
         return invalid("ServerConfig::max_buf_size must be at least 8192 bytes");
     }
@@ -233,6 +245,10 @@ pub(crate) fn check_config(config: &ServerConfig) -> io::Result<()> {
     }
     if config.http2_max_concurrent_streams == Some(0) {
         return invalid("ServerConfig::http2_max_concurrent_streams must be at least 1");
+    }
+    #[cfg(feature = "http3")]
+    if config.http3.is_some() && config.tls.is_none() {
+        return invalid("HTTP/3 requires TLS: call App::tls(..)");
     }
     Ok(())
 }
@@ -426,6 +442,9 @@ pub(crate) struct Options {
     /// Set by `App::run_unix`: listen here instead of on the TCP address.
     #[cfg(unix)]
     unix: Option<(PathBuf, ServeUnix)>,
+    /// Where the `Alt-Svc` middleware reads the HTTP/3 port from.
+    #[cfg(feature = "http3")]
+    alt_svc: Option<crate::http3::AltSvcSlot>,
 }
 
 /// Serves a Unix listener. Only `App::run_unix` creates one, so apps that
@@ -449,12 +468,21 @@ fn stash(app: &mut App, f: impl FnOnce(&mut Options)) {
     f(&mut opts.0.lock().unwrap_or_else(PoisonError::into_inner));
 }
 
-/// Remove the run options stashed by the builders (defaults if none).
+/// Remove the run options stashed by the builders (defaults if none), and
+/// install what the configured protocols need (the HTTP/3 `Alt-Svc`
+/// middleware).
 pub(crate) fn take_options(app: &mut App) -> Options {
-    app.extensions_mut()
+    #[allow(unused_mut)]
+    let mut options: Options = app
+        .extensions_mut()
         .remove::<RunOptions>()
         .map(|o| std::mem::take(&mut *o.0.lock().unwrap_or_else(PoisonError::into_inner)))
-        .unwrap_or_default()
+        .unwrap_or_default();
+    #[cfg(feature = "http3")]
+    {
+        options.alt_svc = crate::http3::install(app);
+    }
+    options
 }
 
 /// Where `App::run` listens.
@@ -500,7 +528,11 @@ pub(crate) fn run(prepared: Prepared, addr: SocketAddr, options: Options) -> io:
         .map_or(Bind::Tcp(addr), |(path, serve)| Bind::Unix(path, serve));
     #[cfg(not(unix))]
     let bind = Bind::Tcp(addr);
-    let result = run_workers(app, bind, config, options.shutdown, system.handle());
+    let extra = Extra {
+        #[cfg(feature = "http3")]
+        alt_svc: options.alt_svc,
+    };
+    let result = run_workers(app, bind, config, options.shutdown, system.handle(), extra);
     system.block_on(lifecycle.run_shutdown(&resources));
     // Don't hang on blocking tasks that ignore shutdown (plain drop would
     // wait for them forever).
@@ -534,12 +566,19 @@ impl StdListener {
     }
 }
 
+/// Run options for protocols beyond TCP.
+struct Extra {
+    #[cfg(feature = "http3")]
+    alt_svc: Option<crate::http3::AltSvcSlot>,
+}
+
 fn run_workers(
     app: AppInner,
     bind: Bind,
     config: ServerConfig,
     shutdown: Option<BoxFuture<()>>,
     system: &tokio::runtime::Handle,
+    extra: Extra,
 ) -> io::Result<()> {
     let workers = config.worker_count();
     let per_core = config.runtime == RuntimeMode::PerCore
@@ -549,6 +588,23 @@ fn run_workers(
     } else {
         bind_listeners(&bind, &config, 1, false)?
     };
+    #[cfg(feature = "http3")]
+    let h3_listener = match (&bind, &config.http3) {
+        (Bind::Tcp(_), _) => {
+            let tcp = listeners[0].local_addr()?;
+            h3::bind(&config, tcp, extra.alt_svc.as_ref())?
+        }
+        #[cfg(unix)]
+        (Bind::Unix(..), None) => None,
+        #[cfg(unix)]
+        (Bind::Unix(..), Some(_)) => {
+            return Err(invalid_input(
+                "HTTP/3 needs a UDP port: use App::run, not App::run_unix",
+            ))
+        }
+    };
+    #[cfg(not(feature = "http3"))]
+    let Extra {} = extra;
     // Identity of the socket file we created, so cleanup never unlinks a
     // replacement instance's socket bound at the same path while we drained.
     #[cfg(unix)]
@@ -571,13 +627,21 @@ fn run_workers(
         } else {
             "multi-threaded"
         };
-        eprintln!(
-            "zapline listening on {url} ({workers} workers, {mode}, {})",
-            config.protocols()
-        );
+        #[allow(unused_mut)]
+        let mut protocols = config.protocols().to_owned();
+        #[cfg(feature = "http3")]
+        if let Some(h3) = &h3_listener {
+            protocols.push_str(&format!(" + HTTP/3 on UDP {}", h3.local_addr()?));
+        }
+        eprintln!("zapline listening on {url} ({workers} workers, {mode}, {protocols})");
     }
 
     let signals: Vec<Signal> = listeners.iter().map(|_| Signal::default()).collect();
+    #[cfg(feature = "http3")]
+    let h3_signal = Signal::default();
+    #[cfg(feature = "http3")]
+    let trigger = Trigger::new(signals.iter().cloned().chain([h3_signal.clone()]).collect());
+    #[cfg(not(feature = "http3"))]
     let trigger = Trigger::new(signals.clone());
     let driver = system.spawn(drive(
         shutdown,
@@ -585,8 +649,21 @@ fn run_workers(
         config.banner.then_some(config.shutdown_timeout),
     ));
 
+    #[cfg(feature = "http3")]
+    let h3_thread = match h3_listener {
+        Some(listener) => Some(spawn_h3(
+            listener,
+            app.for_worker(),
+            workers,
+            h3_signal,
+            trigger.clone(),
+        )?),
+        None => None,
+    };
+
     let proto = Proto::new(&config);
-    let result = if per_core {
+    #[allow(unused_mut)]
+    let mut result = if per_core {
         run_per_core(app, listeners, signals, &trigger, &proto, &config)
     } else {
         let worker = Worker::new(Arc::new(app), &proto, &config, signals[0].clone());
@@ -601,6 +678,18 @@ fn run_workers(
         result
     };
 
+    #[cfg(feature = "http3")]
+    if let Some(thread) = h3_thread {
+        // The TCP workers have stopped: make sure HTTP/3 stops too.
+        trigger.drain();
+        let r = thread
+            .join()
+            .unwrap_or_else(|_| Err(io::Error::other("HTTP/3 thread panicked")));
+        if result.is_ok() {
+            result = r;
+        }
+    }
+
     driver.abort();
     #[cfg(unix)]
     if let Bind::Unix(path, _) = &bind {
@@ -609,6 +698,34 @@ fn run_workers(
         }
     }
     result
+}
+
+/// Serve HTTP/3 on its own multi-threaded runtime (QUIC connections are not
+/// spread by the kernel like `SO_REUSEPORT` TCP ones, so one endpoint feeds
+/// every thread).
+#[cfg(feature = "http3")]
+fn spawn_h3(
+    listener: h3::H3Listener,
+    app: AppInner,
+    workers: usize,
+    signal: Signal,
+    trigger: Trigger,
+) -> io::Result<std::thread::JoinHandle<io::Result<()>>> {
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(workers)
+        .thread_name("zapline-h3")
+        .enable_all()
+        .build()?;
+    std::thread::Builder::new()
+        .name("zapline-h3".into())
+        .spawn(move || {
+            let result = rt.block_on(h3::serve(listener, Arc::new(app), signal));
+            rt.shutdown_timeout(Duration::from_secs(1));
+            if result.is_err() {
+                trigger.drain();
+            }
+            result
+        })
 }
 
 /// `(device, inode)` of the file at `path`, if any.
@@ -790,8 +907,11 @@ fn bind_unix(path: &Path, backlog: i32) -> io::Result<std::os::unix::net::UnixLi
 pub(crate) async fn serve(
     prepared: Prepared,
     listener: TcpListener,
-    shutdown: Option<BoxFuture<()>>,
+    options: Options,
 ) -> io::Result<()> {
+    let shutdown = options.shutdown;
+    #[cfg(feature = "http3")]
+    let alt_svc = options.alt_svc;
     let Running {
         app,
         mut lifecycle,
@@ -803,9 +923,30 @@ pub(crate) async fn serve(
         .map_err(|e| io::Error::other(format!("startup failed: {e}")))?;
 
     let signal = Signal::default();
-    let driver = tokio::spawn(drive(shutdown, Trigger::new(vec![signal.clone()]), None));
+    #[cfg(feature = "http3")]
+    let (trigger, h3_task) = {
+        let h3_signal = Signal::default();
+        let trigger = Trigger::new(vec![signal.clone(), h3_signal.clone()]);
+        let task = h3::bind(&config, listener.local_addr()?, alt_svc.as_ref())?
+            .map(|h3| tokio::spawn(h3::serve(h3, Arc::new(app.for_worker()), h3_signal)));
+        (trigger, task)
+    };
+    #[cfg(not(feature = "http3"))]
+    let trigger = Trigger::new(vec![signal.clone()]);
+    let driver = tokio::spawn(drive(shutdown, trigger.clone(), None));
     let worker = Worker::new(Arc::new(app), &Proto::new(&config), &config, signal);
-    let result = conn::serve(listener, worker).await;
+    #[allow(unused_mut)]
+    let mut result = conn::serve(listener, worker).await;
+    #[cfg(feature = "http3")]
+    if let Some(task) = h3_task {
+        trigger.drain();
+        let r = task
+            .await
+            .unwrap_or_else(|_| Err(io::Error::other("HTTP/3 task panicked")));
+        if result.is_ok() {
+            result = r;
+        }
+    }
     driver.abort();
 
     lifecycle.run_shutdown(&resources).await;

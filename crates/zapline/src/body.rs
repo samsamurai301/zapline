@@ -14,6 +14,10 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 type BoxBody = Pin<Box<dyn http_body::Body<Data = Bytes, Error = BoxError> + Send>>;
 
+/// A boxed streaming request body (`Sync`, like the rest of `Request`).
+#[cfg(feature = "http3")]
+type BoxReqBody = Pin<Box<dyn http_body::Body<Data = Bytes, Error = BoxError> + Send + Sync>>;
+
 /// Outgoing response body.
 #[derive(Default)]
 pub enum Body {
@@ -107,9 +111,27 @@ impl http_body::Body for Body {
 }
 
 /// Incoming request body. `Full` is used by the in-process test client.
+///
+/// Handlers read it through extractors (`Bytes`, `Json<T>`, `BodyStream`)
+/// rather than by matching on it; middleware can take or replace it with
+/// [`Request::take_body`](crate::Request::take_body) and buffer it with
+/// [`collect_limited`](Self::collect_limited):
+///
+/// ```
+/// use zapline::{Bytes, ReqBody};
+///
+/// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+/// let body = ReqBody::Full(Bytes::from_static(b"hello"));
+/// assert_eq!(body.collect_limited(1024).await.unwrap(), "hello");
+/// # });
+/// ```
 pub enum ReqBody {
     Incoming(hyper::body::Incoming),
     Full(Bytes),
+    /// A body from a transport hyper does not serve: HTTP/3 request
+    /// streams (feature `http3`, experimental).
+    #[cfg(feature = "http3")]
+    Stream(BoxReqBody),
 }
 
 impl ReqBody {
@@ -137,6 +159,36 @@ impl ReqBody {
                     Err(e) => Err(crate::Error::bad_request(e.to_string())),
                 }
             }
+            #[cfg(feature = "http3")]
+            ReqBody::Stream(body) => collect_stream(body, limit).await,
         }
     }
+
+    /// What the body says about its length (exact for `Full`).
+    pub(crate) fn size_hint(&self) -> SizeHint {
+        match self {
+            ReqBody::Incoming(inc) => http_body::Body::size_hint(inc),
+            ReqBody::Full(b) => SizeHint::with_exact(b.len() as u64),
+            #[cfg(feature = "http3")]
+            ReqBody::Stream(body) => body.size_hint(),
+        }
+    }
+}
+
+#[cfg(feature = "http3")]
+async fn collect_stream(mut body: BoxReqBody, limit: usize) -> Result<Bytes, crate::Error> {
+    if body.size_hint().upper().is_some_and(|n| n > limit as u64) {
+        return Err(crate::Error::payload_too_large());
+    }
+    let mut buf = bytes::BytesMut::new();
+    while let Some(frame) = body.frame().await {
+        let frame = frame.map_err(|e| crate::Error::bad_request(e.to_string()))?;
+        if let Ok(data) = frame.into_data() {
+            if buf.len() + data.len() > limit {
+                return Err(crate::Error::payload_too_large());
+            }
+            buf.extend_from_slice(&data);
+        }
+    }
+    Ok(buf.freeze())
 }

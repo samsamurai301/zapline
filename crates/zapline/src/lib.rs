@@ -84,6 +84,7 @@
 //! | `tracing` | yes | [`telemetry`]: logging setup and per-request spans with `tracing` |
 //! | `http2` | | HTTP/2 in the server |
 //! | `tls` | | [`tls`]: HTTPS with rustls |
+//! | `http3` | | [`http3`]: HTTP/3 over QUIC next to HTTPS (experimental) |
 //! | `ws` | | [`ws`]: WebSockets |
 //! | `fs` | | [`fs`]: static files with ranges, ETags, precompressed variants and content-hashed URLs |
 //! | `multipart` | | [`multipart`]: `multipart/form-data` uploads |
@@ -135,6 +136,8 @@ pub mod validate;
 // ---- protocols & content -----------------------------------------------------
 #[cfg(feature = "fs")]
 pub mod fs;
+#[cfg(feature = "http3")]
+pub mod http3;
 pub mod live;
 #[cfg(feature = "multipart")]
 pub mod multipart;

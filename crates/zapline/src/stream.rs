@@ -145,11 +145,7 @@ impl Stream for BodyStream {
         let this = &mut *self;
         if !this.started {
             this.started = true;
-            let declared = match &this.body {
-                Some(ReqBody::Incoming(inc)) => inc.size_hint().lower(),
-                Some(ReqBody::Full(b)) => b.len() as u64,
-                None => 0,
-            };
+            let declared = this.body.as_ref().map_or(0, |b| b.size_hint().lower());
             if declared > this.limit as u64 {
                 return this.too_large();
             }
@@ -177,6 +173,21 @@ impl Stream for BodyStream {
                     Some(Ok(frame)) => match frame.into_data() {
                         Ok(data) if !data.is_empty() => data,
                         // Trailers and empty frames carry no body bytes.
+                        _ => continue,
+                    },
+                },
+                #[cfg(feature = "http3")]
+                Some(ReqBody::Stream(body)) => match ready!(body.as_mut().poll_frame(cx)) {
+                    None => {
+                        this.body = None;
+                        return Poll::Ready(None);
+                    }
+                    Some(Err(e)) => {
+                        return this
+                            .fail(Error::bad_request("failed to read request body").with_source(e))
+                    }
+                    Some(Ok(frame)) => match frame.into_data() {
+                        Ok(data) if !data.is_empty() => data,
                         _ => continue,
                     },
                 },
