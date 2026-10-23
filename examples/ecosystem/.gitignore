@@ -1,0 +1,5 @@
+/target
+# Databases created by `cargo run`.
+*.db
+*.db-shm
+*.db-wal

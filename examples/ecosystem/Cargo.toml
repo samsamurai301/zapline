@@ -1,0 +1,30 @@
+# Ecosystem examples: zapline with sqlx, SeaORM, Diesel and Leptos.
+#
+# A workspace of its own (with its own Cargo.lock), so the ORMs and UI
+# frameworks here never slow down or change the main workspace's build.
+#
+#   cd examples/ecosystem && cargo test            # every example
+#   cargo test -p seaorm-blog                      # one of them
+#   ./scripts/check.sh ecosystem                   # from the repository root
+[workspace]
+resolver = "2"
+members = ["sqlx-transactions", "seaorm", "diesel", "leptos-ssr"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[workspace.dependencies]
+zapline = { path = "../../crates/zapline" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+# Same as the main workspace: small debug builds.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
