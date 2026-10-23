@@ -559,6 +559,12 @@ pub fn handler_files(
     let method_lower = method.lower();
     let method_upper = method_lower.to_uppercase();
     let sample = sample_path(path);
+    // Document statuses other than 200 so the OpenAPI spec (and the fuzzer)
+    // expect what the handler answers.
+    let route_status = match shape.status {
+        "200" => String::new(),
+        code => format!(", status = {code}"),
+    };
     let vars = [
         ("name", module),
         ("method", method_lower),
@@ -568,6 +574,7 @@ pub fn handler_files(
         ("ret", shape.ret.as_str()),
         ("body", shape.body.as_str()),
         ("status", shape.status),
+        ("route_status", route_status.as_str()),
         ("sample_path", sample.as_str()),
         ("crate_name", crate_name),
     ];

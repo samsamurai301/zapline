@@ -17,6 +17,7 @@ pub mod client;
 pub mod db;
 pub mod dev;
 pub mod doctor;
+pub mod fuzz;
 pub mod generate;
 pub mod mcp;
 pub mod naming;
@@ -236,6 +237,14 @@ pub fn execute(cli: Cli) -> Result<()> {
             };
             let project = project_or_script(file.as_deref())?;
             finish(brief::test(&project, filter.as_deref())?)
+        }
+        Command::Fuzz { seed, cases } => {
+            let project = Project::discover(Path::new("."))?;
+            if fuzz::run(&project, seed, cases)? {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
         }
         Command::Client(a) => {
             let project = Project::discover(Path::new("."))?;

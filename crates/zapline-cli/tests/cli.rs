@@ -122,7 +122,8 @@ fn new_minimal_project() {
             "README.md",
             "src/lib.rs",
             "src/main.rs",
-            "tests/api.rs"
+            "tests/api.rs",
+            "tests/fuzz.rs"
         ]
     );
     let manifest = read_toml(&root.join("Cargo.toml"));
@@ -153,6 +154,7 @@ fn new_api_is_the_default_template() {
         "src/routes/health.rs",
         "src/routes/users.rs",
         "tests/users.rs",
+        "tests/fuzz.rs",
     ] {
         assert!(files.iter().any(|g| g == f), "missing {f} in {files:?}");
     }
@@ -439,7 +441,10 @@ fn generate_handler_and_middleware() {
     ));
     assert!(log.contains("src/routes/send_email.rs"), "{log}");
     let src = fs::read_to_string(root.join("src/routes/send_email.rs")).unwrap();
-    assert!(src.contains("#[post(\"/emails/{id}\")]"), "{src}");
+    assert!(
+        src.contains("#[post(\"/emails/{id}\", status = 201)]"),
+        "{src}"
+    );
     assert!(fs::read_to_string(root.join("src/routes/mod.rs"))
         .unwrap()
         .contains("app = app.plugin(send_email::mount);"));

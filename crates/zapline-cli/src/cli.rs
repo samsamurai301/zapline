@@ -214,6 +214,30 @@ Examples:
         filter: Option<String>,
     },
 
+    /// Fuzz every route from its OpenAPI schemas (runs tests/fuzz.rs)
+    #[command(after_long_help = "\
+Runs `cargo test --test fuzz`: the test calls `app().test().fuzz()`, which sends typical,
+boundary and invalid requests generated from each operation's parameter and body schemas,
+then random ones. It fails on panics, 5xx responses, timeouts, statuses the OpenAPI document
+does not declare and 2xx JSON bodies that break their schema, and prints a minimal request
+that reproduces each failure. Projects from `zapline new` include tests/fuzz.rs.
+
+The same seed sends the same requests; `--seed` and `--cases` override the test's defaults
+(through ZAPLINE_FUZZ_SEED and ZAPLINE_FUZZ_CASES) unless it sets them itself.
+
+Examples:
+  zapline fuzz
+  zapline fuzz --cases 1000
+  zapline fuzz --seed 7")]
+    Fuzz {
+        /// Seed for the generated requests [default: the test's, or 24301]
+        #[arg(long, value_name = "N")]
+        seed: Option<u64>,
+        /// Requests per operation [default: the test's, or 100]
+        #[arg(long, value_name = "N")]
+        cases: Option<u64>,
+    },
+
     /// Compile styles/app.css to static/app.css with Tailwind (see `zapline g tailwind`)
     Css {
         /// Minify the output

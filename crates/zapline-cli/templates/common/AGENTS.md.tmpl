@@ -9,6 +9,7 @@ tests expect.
 
 ```sh
 zapline test [name]                 # tests; prints only totals + failures
+zapline fuzz                        # every route vs. its OpenAPI schemas (tests/fuzz.rs)
 zapline check [--clippy]            # one line per error/warning, with the fix
 cargo fmt
 zapline dev                         # run with live reload on :8080

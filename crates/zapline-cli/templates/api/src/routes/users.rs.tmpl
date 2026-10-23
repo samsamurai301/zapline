@@ -128,7 +128,7 @@ async fn get_user(State(store): State<UserStore>, Path(id): Path<u64>) -> Result
 }
 
 /// Create a user. Responds 409 if the email is already registered.
-#[post("/users")]
+#[post("/users", status = 201)]
 async fn create_user(
     State(store): State<UserStore>,
     Valid(Json(new)): Valid<Json<NewUser>>,
@@ -147,7 +147,7 @@ async fn replace_user(
 }
 
 /// Delete a user.
-#[delete("/users/{id}")]
+#[delete("/users/{id}", status = 204)]
 async fn delete_user(State(store): State<UserStore>, Path(id): Path<u64>) -> Result<StatusCode> {
     store.delete(id)?;
     Ok(StatusCode::NO_CONTENT)

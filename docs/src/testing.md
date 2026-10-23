@@ -75,6 +75,90 @@ assert_eq!(browser.cookie("zapline.sid"), None);
 
 Every request counts as same-site and secure, so `Secure` session cookies are sent too. Calling `.with_cookies()` again starts a separate store, e.g. for a second user.
 
+## Fuzz every route
+
+Your OpenAPI document already says what every route accepts and returns, so zapline can write the tedious tests for you. `client.fuzz()` walks the document and sends each operation a few hundred requests generated from its own JSON Schemas:
+
+```rust
+#[tokio::test]
+async fn every_route_survives_fuzzing() {
+    app().test().fuzz().await.assert_clean();
+}
+```
+
+For every operation it sends, in this order:
+
+- **a typical valid request**, using schema examples when there are some;
+- **boundary values that are still valid**: empty and maximum-length strings, unicode (combining marks, emoji, right-to-left text, NUL), `0`, `-1` and the limits of each integer type (`u8::MAX`, `i32::MIN`...), tiny and huge floats, empty and long arrays, objects with only their required fields or with all of them;
+- **invalid input**: each required parameter and field missing, wrong types, numbers out of range, strings shorter than `minLength` or longer than `maxLength`, unknown enum variants and properties, malformed and deeply nested JSON, the wrong content type, a body one byte over the size limit;
+- **random requests** (a third of their values at the boundaries) until the budget of 100 requests per operation is spent.
+
+A response is a **failure** when:
+
+| Failure | Meaning |
+|---|---|
+| `panicked` | The handler (or a middleware) panicked. Panics caught by `CatchPanic` count too. |
+| `server error` | Any 5xx. |
+| `timed out` | No response within the timeout (5 s). |
+| `undeclared status` | A status the operation does not declare: its code, its range (`4XX`) or, for errors, `default`. A `201` from a route documented as `200` is caught here; declare it with `#[post("/items", status = 201)]`. Invalid requests may also get the framework's rejections (`400`, `404`, `405`, `411`, `413`, `414`, `415`, `422`, `431`). |
+| `response does not match its schema` | A 2xx JSON body that breaks the declared response schema, with every mismatch listed by JSON pointer. |
+
+Each failure is reported once per operation and kind, after **shrinking**: optional parameters and fields are dropped and strings and arrays shortened for as long as the same failure reproduces. The report gives the minimal request and a line of test code that replays it:
+
+```text
+zapline fuzz: 6 operations, 642 requests, seed 24301: 2 failures
+
+1) GET /ratio/{n} (ratio): panicked: attempt to divide by zero at src/routes/math.rs:12:5
+   case: boundary integer for path parameter `n` (hit by 8 requests)
+   request: GET /ratio/0
+   response: none
+   reproduce: client.request(Method::GET, "/ratio/0").send().await
+
+2) GET /stats (stats): response does not match its schema (1 error)
+   - /count: expected integer, got string "many"
+   case: valid request (hit by 100 requests)
+   request: GET /stats
+   response: 200 OK {"count":"many"}
+   reproduce: client.request(Method::GET, "/stats").send().await
+
+rerun the same requests with ZAPLINE_FUZZ_SEED=24301
+```
+
+Paste the `reproduce:` line into a regular test to keep the bug fixed. The fuzzer checks the app against the document its `OpenApi` plugin serves (including `.modify(..)` hooks), or one generated with the default settings when there is no plugin, so a failure is either a bug in the handler or a gap in the docs: both are worth fixing.
+
+### Configuration
+
+```rust
+use std::time::Duration;
+use zapline::test::FuzzConfig;
+
+let report = app()
+    .test()
+    .fuzz()
+    .config(
+        FuzzConfig::new()
+            .seed(7)                        // same seed, same requests
+            .cases(500)                     // requests per operation
+            .bearer("test-token")           // sent with every request
+            .header("x-tenant", "acme")
+            .timeout(Duration::from_secs(1))
+            .allow_status(409)              // accepted from every operation
+            .only("/admin")                 // operation id, `METHOD /path` or path prefix
+            .skip("POST /webhooks"),
+    )
+    .await;
+for failure in report.failures() {
+    println!("{} -> {}", failure.request(), failure.kind());
+}
+report.assert_clean();
+```
+
+Runs are deterministic: the requests depend only on the seed and the document, and each operation has its own stream of cases, so adding a route does not change what the others get. When the test does not set them, the `ZAPLINE_FUZZ_SEED` and `ZAPLINE_FUZZ_CASES` environment variables choose the seed and the budget, which is how `zapline fuzz --seed 7 --cases 1000` explores further without editing the test.
+
+The app keeps its state across cases, as a real server would: requests that create things create them, so later `GET`s see real data. Each request comes from its own peer address, so per-IP rate limits don't turn the run into a wall of `429`s. Operations documented as WebSocket upgrades or server-sent event streams are skipped and listed in the report; an undocumented event stream is recognized by its `text/event-stream` content type and not read past its headers. After its first timeout an operation gets no further cases. Request schemas use the JSON Schema subset schemars emits; `pattern` and string `format`s are not checked by the validator (values for common formats such as `email`, `uuid` and `date-time` are still generated correctly).
+
+Projects created with `zapline new` include this test as `tests/fuzz.rs`; `zapline fuzz` runs it and prints the report.
+
 ## Lifecycle in tests
 
 Startup hooks run on the first request. Use `client.start().await` to run them up front, `client.resources().await` to inspect state, and `client.shutdown().await` to run shutdown hooks. To swap real dependencies for fakes, register replacements before calling `.test()`. Registering the same type again replaces the earlier value:

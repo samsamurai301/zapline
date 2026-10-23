@@ -21,7 +21,8 @@ A handler can return anything that implements `IntoResponse`:
 use zapline::prelude::*;
 use zapline::header;
 
-#[post("/users")]
+// `status = 201` documents the status the handler picks at run time.
+#[post("/users", status = 201)]
 async fn create(Json(u): Json<NewUser>) -> Result<(StatusCode, Json<User>)> {
     let user = save(u).await?;
     Ok((StatusCode::CREATED, Json(user)))
