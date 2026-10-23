@@ -182,26 +182,40 @@ pub fn execute(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Dev(a) => {
+            // A one-file app has no project to configure clients in: only
+            // `--client` applies there.
+            let project = match &a.file {
+                Some(_) => None,
+                None => Some(Project::discover(Path::new("."))?),
+            };
+            let clients = match (a.no_client, a.client, &project) {
+                (true, _, _) => client::Configured::default(),
+                (false, Some(c), _) => client::Configured {
+                    paths: vec![openapi::resolve_output(
+                        &std::env::current_dir()
+                            .context("cannot determine the current directory")?,
+                        &c,
+                    )],
+                    explicit: true,
+                },
+                (false, None, Some(project)) => client::configured(project)?,
+                (false, None, None) => client::Configured::default(),
+            };
             let opts = dev::DevOptions {
                 bin: a.bin,
                 release: a.release,
                 app_args: a.app_args,
                 debounce: Duration::from_millis(a.debounce_ms),
                 proxy: !a.no_proxy,
-                client: match a.client {
-                    Some(c) => Some(openapi::resolve_output(
-                        &std::env::current_dir()
-                            .context("cannot determine the current directory")?,
-                        &c,
-                    )),
-                    None => None,
-                },
+                clients: clients.paths,
+                clients_explicit: clients.explicit,
                 record: a.record,
                 ..dev::DevOptions::default()
             };
-            match &a.file {
-                Some(file) => dev::run_script(&script::open(file)?, &opts),
-                None => dev::run(&Project::discover(Path::new("."))?, &opts),
+            match (&a.file, &project) {
+                (Some(file), _) => dev::run_script(&script::open(file)?, &opts),
+                (None, Some(project)) => dev::run(project, &opts),
+                (None, None) => unreachable!("a project was discovered above"),
             }
         }
         Command::Snap(a) => {
@@ -258,7 +272,7 @@ pub fn execute(cli: Cli) -> Result<()> {
         }
         Command::Client(a) => {
             let project = Project::discover(Path::new("."))?;
-            client::run(&project, a.bin.as_deref(), &a.output)
+            client::run(&project, a.bin.as_deref(), a.output.as_deref())
         }
         Command::Css { minify, watch } => {
             let project = Project::discover(Path::new("."))?;

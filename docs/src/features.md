@@ -20,7 +20,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `json` | yes | `Json<T>` as an extractor and a response, structured error `details`, `Ndjson`, `Sse::json_data`, `Message::json` and `Field::json` for WebSockets and uploads, and the test client's `.json()` | | `serde_json` |
 | `query` | yes | The `Query<T>` extractor | | `serde_urlencoded` |
 | `form` | yes | The `Form<T>` extractor and the test client's `.form()` | | `serde_urlencoded` |
-| `openapi` | yes | `zapline::openapi`: the `OpenApi` plugin, Swagger UI, Scalar and Redoc, the builder methods and `JsonSchema` ([OpenAPI](openapi.md)) | `json` | `schemars` |
+| `openapi` | yes | `zapline::openapi`: the `OpenApi` plugin, Swagger UI, Scalar and Redoc, the builder methods, `JsonSchema`, and typed clients (`client_js`, `codegen`) ([OpenAPI](openapi.md), [Typed frontends](frontend.md)) | `json` | `schemars`, `zapline-codegen` |
 | `validate` | yes | `zapline::validate`: `Valid<T>` and the 422 error format ([Validation](validation.md)) | `json` | `validator` (with `derive`) |
 | `config` | yes | `zapline::config`: `Config`, `Secret<T>` and `App::config` ([Configuration](config.md)) | | `toml` |
 | `tracing` | yes | `zapline::telemetry`: `Telemetry`, `init()` and `Trace` ([Observability](observability.md)). With it, framework logs (failed requests, panics, jobs) go through `tracing`; without it they go to stderr. | | `tracing`, `tracing-subscriber` (`env-filter`, `fmt`, `json`) |

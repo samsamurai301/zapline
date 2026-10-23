@@ -17,6 +17,10 @@ use crate::ui;
 /// Environment variable that makes the OpenAPI plugin write the spec and exit.
 pub const ENV_EXPORT_OPENAPI: &str = "ZAPLINE_EXPORT_OPENAPI";
 
+/// The exit code of a zapline app asked for a spec it doesn't have (no
+/// OpenAPI plugin).
+pub const EXIT_NO_SPEC: i32 = 78;
+
 /// How long the app may take to export once built.
 const RUN_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -115,6 +119,12 @@ pub fn export(project: &Project, bin: Option<&str>, target: &Path) -> Result<()>
             &[(ENV_EXPORT_OPENAPI, tmp.as_os_str())],
             RUN_TIMEOUT,
         )?;
+        if captured.status.code() == Some(EXIT_NO_SPEC) {
+            bail!(
+                "the app has no OpenAPI document\n\
+                 hint: add `.openapi(OpenApi::new(\"My API\", \"1.0.0\"))` to the App"
+            );
+        }
         if !captured.status.success() {
             return Err(captured.failure("before exporting the spec"));
         }

@@ -330,7 +330,11 @@ fn health_is_documented() {
 }
 ```
 
-`zapline::openapi::export_spec(&spec, path)` is the function behind the environment variable.
+`zapline::openapi::export_spec(&spec, path)` is the function behind the environment variable. An app asked for a spec without the OpenAPI plugin exits with code 78 instead of starting to serve.
+
+## Typed clients
+
+The spec also drives typed clients for your frontend: a TypeScript file that `zapline dev` keeps current, and, with `OpenApi::new(..).client_js()`, an ES module with JSDoc types served at `/_zapline/api.js` for pages without a build step. `zapline::openapi::codegen::{typescript, javascript}` are the generators. See [Typed frontends](frontend.md).
 
 ## Limitations
 

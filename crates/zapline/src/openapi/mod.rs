@@ -74,6 +74,22 @@ pub use describe::{ApiInput, ApiOutput};
 pub use doc::{AuthKind, GroupDoc, OperationDoc, ParamIn};
 pub use schemars::{self, JsonSchema};
 pub use ui::DocsUi;
+/// Typed TypeScript and JavaScript clients from a spec: what
+/// [`OpenApi::client_js`] serves and `zapline client` writes. Handy in a
+/// test that keeps a checked-in client current:
+///
+/// ```no_run
+/// use zapline::openapi::{codegen, spec_for, OpenApi};
+/// use zapline::prelude::*;
+///
+/// let spec = spec_for(App::new(), OpenApi::new("My API", "1.0.0"));
+/// let ts = codegen::typescript(&spec).unwrap().source;
+/// assert_eq!(std::fs::read_to_string("frontend/src/api.ts").unwrap(), ts);
+/// ```
+pub use zapline_codegen as codegen;
+
+/// Where [`OpenApi::client_js`] serves the JavaScript client.
+pub const CLIENT_JS_PATH: &str = "/_zapline/api.js";
 
 use crate::auth::AllowAnonymous;
 use crate::{App, Plugin, RouteInfo, Routes};
@@ -117,6 +133,7 @@ pub struct OpenApi {
     spec_url: Option<String>,
     cdn: String,
     uis: Option<Vec<(DocsUi, String)>>,
+    client_js: bool,
 }
 
 impl fmt::Debug for OpenApi {
@@ -126,6 +143,7 @@ impl fmt::Debug for OpenApi {
             .field("version", &self.version)
             .field("json_path", &self.json_path)
             .field("docs", &self.docs_pages())
+            .field("client_js", &self.client_js)
             .finish_non_exhaustive()
     }
 }
@@ -163,6 +181,7 @@ impl OpenApi {
             spec_url: None,
             cdn: ui::DEFAULT_CDN.to_owned(),
             uis: None,
+            client_js: false,
         }
     }
 
@@ -280,6 +299,30 @@ impl OpenApi {
         self
     }
 
+    /// Also serve a typed JavaScript client of the API at
+    /// [`CLIENT_JS_PATH`] (`/_zapline/api.js`): an ES module with a `fetch`
+    /// wrapper per operation and JSDoc types, for pages without a build
+    /// step. It is generated once, from this spec, when the app is built.
+    ///
+    /// ```no_run
+    /// use zapline::prelude::*;
+    ///
+    /// let app = App::new()
+    ///     .get("/", || async { Html(r#"<script type="module">
+    ///         import { api, isValidationError } from "/_zapline/api.js";
+    ///         const user = await api.getUser(1);
+    ///     </script>"#) })
+    ///     .openapi(OpenApi::new("My API", "1.0.0").client_js());
+    /// ```
+    ///
+    /// The same module and its TypeScript twin can be written to disk with
+    /// `zapline client` (and are kept current by `zapline dev`); see
+    /// [`codegen`].
+    pub fn client_js(mut self) -> Self {
+        self.client_js = true;
+        self
+    }
+
     /// Post-process the generated spec (add extensions, examples, webhooks...).
     pub fn modify(mut self, f: impl Fn(&mut Value) + Send + Sync + 'static) -> Self {
         self.hooks.push(Arc::new(f));
@@ -322,6 +365,22 @@ impl OpenApi {
         for (ui, path) in self.docs_pages() {
             let html = Bytes::from(ui.page(&self.title, spec_url, &self.cdn));
             routes = routes.get(&path, static_page(html, "text/html; charset=utf-8"));
+        }
+        if self.client_js {
+            let js = match codegen::javascript(&spec) {
+                Ok(client) => client.source,
+                Err(e) => {
+                    eprintln!("zapline: cannot generate {CLIENT_JS_PATH}: {e}");
+                    format!(
+                        "throw new Error({});\n",
+                        Value::from(format!("zapline could not generate this client: {e}"))
+                    )
+                }
+            };
+            routes = routes.get(
+                CLIENT_JS_PATH,
+                static_page(Bytes::from(js), "text/javascript; charset=utf-8"),
+            );
         }
         routes
             .meta_all(OperationDoc::hidden_route())

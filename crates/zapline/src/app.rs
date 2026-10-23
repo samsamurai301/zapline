@@ -399,6 +399,16 @@ impl Prepared {
     }
 
     fn maybe_print_routes(&self) {
+        // The OpenAPI plugin exits while the app is built when asked for its
+        // spec; still running means there is none. Say so instead of serving.
+        if std::env::var_os("ZAPLINE_EXPORT_OPENAPI").is_some() {
+            eprintln!(
+                "zapline: ZAPLINE_EXPORT_OPENAPI is set but the app has no OpenAPI document\n\
+                 hint: add `.openapi(OpenApi::new(\"My API\", \"1.0.0\"))` to the App"
+            );
+            // EX_CONFIG: `zapline dev` tells this apart from a crash.
+            std::process::exit(78);
+        }
         if std::env::var_os(ENV_PRINT_ROUTES).is_none() {
             return;
         }

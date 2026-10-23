@@ -143,6 +143,8 @@ fn is_kind(scheme: &Value, kind: AuthKind) -> bool {
 struct Op<'a> {
     path: String,
     params: Vec<String>,
+    /// The `{*name}` parameter, which matches several segments.
+    catch_all: Option<String>,
     method: &'static str,
     doc: &'a OperationDoc,
     group: Option<&'a GroupDoc>,
@@ -165,6 +167,7 @@ pub(crate) fn generate(api: &OpenApi, routes: &[&'static RouteInfo]) -> Value {
             }
             let (path, params) = openapi_path(r.path());
             Some(Op {
+                catch_all: catch_all_param(r.path()),
                 path,
                 params,
                 method,
@@ -300,6 +303,13 @@ pub(crate) fn openapi_path(pattern: &str) -> (String, Vec<String>) {
         }
     }
     (out, names)
+}
+
+/// The name of a route's `{*name}` parameter, if it has one.
+fn catch_all_param(pattern: &str) -> Option<String> {
+    let start = pattern.find("{*")? + 2;
+    let len = pattern[start..].find('}')?;
+    Some(pattern[start..start + len].to_owned())
 }
 
 /// `GET /users/{id}` -> `get_users_id`.
@@ -552,7 +562,12 @@ fn parameters(s: &mut Schemas, op: &Op<'_>) -> Vec<Value> {
             (None, Some(t)) => t,
             (None, None) => json!({ "type": "string" }),
         };
-        out.push(param(name, ParamIn::Path, true, schema));
+        let mut p = param(name, ParamIn::Path, true, schema);
+        if op.catch_all.as_ref() == Some(name) {
+            // Clients must keep its slashes: `zapline client` reads this.
+            p["x-zapline-catch-all"] = true.into();
+        }
+        out.push(p);
         seen.insert((name.clone(), ParamIn::Path));
     }
 

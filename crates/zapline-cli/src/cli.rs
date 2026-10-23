@@ -133,7 +133,14 @@ Examples:
   zapline dev --bin server
   zapline dev --client web/src/api.ts   Also keep a typed TypeScript client up to date
   zapline dev --record                  Record requests for `zapline snap` (ZAPLINE_RECORD=1)
-  zapline dev -- --port 9000")]
+  zapline dev -- --port 9000
+
+Typed clients: with a frontend/ directory, frontend/src/api.ts is regenerated after every
+build (only rewritten when it changes, so vite or tsc --watch flag type errors at once).
+Configure other files in zapline.toml (or [package.metadata.zapline.client] in Cargo.toml):
+  [client]
+  ts = \"web/src/api.ts\"     # TypeScript client
+  js = \"static/api.js\"      # ES module with JSDoc types, for pages without a build step")]
     Dev(DevArgs),
 
     /// Save the requests the running app recorded as snapshot tests
@@ -173,15 +180,21 @@ Examples:
   zapline openapi -o docs/openapi.json")]
     Openapi(OpenapiArgs),
 
-    /// Generate a typed TypeScript client for the app's JSON API
+    /// Generate a typed TypeScript (or JavaScript) client for the app's JSON API
     #[command(after_long_help = "\
 Exports the OpenAPI document (like `zapline openapi`) and turns it into one dependency-free
-TypeScript file: an interface per schema, and `createClient()` with one typed method per
-operation, named after its operationId. Non-2xx responses throw `ApiError` (status, code,
-details). Routes that answer with HTML are skipped. The file is only rewritten when it changes.
+file: an interface per schema, and `createClient()` with one typed method per operation,
+named after its operationId. Non-2xx responses throw `ApiError` (status, code, details); a 422
+with field errors throws `ValidationError`, typed by the body's field names. A `.js`/`.mjs`
+output gets the same client as an ES module with JSDoc types. Routes that answer with HTML are
+skipped. Files are only rewritten when they change.
+
+Without -o, writes the clients configured in zapline.toml ([client] ts/js), else
+frontend/src/api.ts when there is a frontend/ directory, else client.ts.
 
 Examples:
   zapline client -o web/src/api.ts
+  zapline client -o static/api.js          JavaScript module with JSDoc types
   zapline dev --client web/src/api.ts      Regenerate after every rebuild")]
     Client(ClientArgs),
 
@@ -520,8 +533,8 @@ pub struct DevArgs {
     #[arg(long)]
     pub release: bool,
 
-    /// Keep a TypeScript client of the API up to date (see `zapline client`)
-    #[arg(long, value_name = "FILE")]
+    /// Keep a typed client of the API up to date (see `zapline client`)
+    #[arg(long, value_name = "FILE", conflicts_with = "no_client")]
     pub client: Option<PathBuf>,
 
     /// Run the app directly: no proxy, no browser live reload, no error
@@ -531,6 +544,9 @@ pub struct DevArgs {
     /// Record requests and responses from startup, for `zapline snap`
     #[arg(long)]
     pub record: bool,
+    /// Don't regenerate typed clients, even when zapline.toml or frontend/ asks for one
+    #[arg(long)]
+    pub no_client: bool,
 
     /// How long (ms) files must stay quiet before rebuilding
     #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]
@@ -584,9 +600,10 @@ pub struct OpenapiArgs {
 /// Arguments of `zapline client`.
 #[derive(Debug, Args)]
 pub struct ClientArgs {
-    /// Where to write the client
-    #[arg(short, long, value_name = "FILE", default_value = "client.ts")]
-    pub output: PathBuf,
+    /// Where to write the client (`.ts`, or `.js`/`.mjs` for JavaScript) [default: from
+    /// zapline.toml, else frontend/src/api.ts with a frontend/ directory, else client.ts]
+    #[arg(short, long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
 
     /// Binary to run [default: the package's only binary]
     #[arg(long, value_name = "NAME")]

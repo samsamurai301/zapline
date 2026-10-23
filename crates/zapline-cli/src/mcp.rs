@@ -221,9 +221,9 @@ fn tool_list() -> Value {
         },
         {
             "name": "typescript_client",
-            "description": "Write a typed, dependency-free TypeScript client for the app's JSON API (one method per operation, interfaces per schema).",
+            "description": "Write a typed, dependency-free TypeScript client for the app's JSON API (one method per operation, interfaces per schema, typed 422 field errors). A .js/.mjs output gets an ES module with JSDoc types.",
             "inputSchema": { "type": "object", "properties": {
-                "output": { "type": "string", "description": "File to write; default: client.ts" },
+                "output": { "type": "string", "description": "File to write; default: the clients in zapline.toml, else frontend/src/api.ts with a frontend/ directory, else client.ts" },
                 "bin": bin
             }}
         },
@@ -423,9 +423,14 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
         }
         "typescript_client" => {
             let project = Project::discover(here)?;
-            let output = PathBuf::from(s("output").unwrap_or("client.ts"));
-            with_build_errors(&project, || crate::client::run(&project, s("bin"), &output))?;
-            Ok(format!("wrote {}", output.display()))
+            let output = s("output").map(PathBuf::from);
+            with_build_errors(&project, || {
+                crate::client::run(&project, s("bin"), output.as_deref())
+            })?;
+            Ok(match output {
+                Some(o) => format!("wrote {}", o.display()),
+                None => "wrote the configured clients".to_string(),
+            })
         }
         "explain_error" => live::explain_error(s("code").context("`code` is required")?),
         "recent_errors" => live::recent_errors(&app_url(s("url")), limit(args, 10)),

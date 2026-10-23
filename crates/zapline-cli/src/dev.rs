@@ -29,6 +29,11 @@
 //! running alongside, rebuilding `static/app.css` as templates change, which
 //! the browsers then pick up as a CSS hot swap.
 //!
+//! Typed API clients (`--client`, `[client]` in `zapline.toml`, or
+//! `frontend/src/api.ts` when there is a `frontend/`) are regenerated from
+//! each new binary before it starts, and only rewritten when they change, so
+//! a frontend's `tsc --watch` or vite flags a Rust signature change at once.
+//!
 //! A one-file app (`zapline dev app.rs`, see [`crate::script`]) works the same
 //! way with the file itself as the only watched path: each save regenerates
 //! its hidden project (so header changes take effect) and rebuilds.
@@ -94,8 +99,13 @@ pub struct DevOptions {
     pub debounce: Duration,
     /// How long the old process gets to exit after SIGTERM before it is killed.
     pub grace: Duration,
-    /// Regenerate this TypeScript client after every successful build.
-    pub client: Option<PathBuf>,
+    /// Typed clients (`.ts`, or `.js` modules) to regenerate after every
+    /// successful build; see [`crate::client::configured`].
+    pub clients: Vec<PathBuf>,
+    /// Whether `clients` were asked for (`--client`, `zapline.toml`) rather
+    /// than found (`frontend/`). Found ones turn off quietly when the app has
+    /// no OpenAPI document.
+    pub clients_explicit: bool,
     /// Run the live reload proxy (browser reload, CSS hot swap, error
     /// overlay, zero-downtime swaps). `false` runs the app directly.
     pub proxy: bool,
@@ -112,7 +122,8 @@ impl Default for DevOptions {
             app_args: Vec::new(),
             debounce: Duration::from_millis(300),
             grace: Duration::from_secs(5),
-            client: None,
+            clients: Vec::new(),
+            clients_explicit: false,
             proxy: true,
             record: false,
         }
@@ -502,6 +513,8 @@ struct Dev<'a> {
     spawned: u64,
     /// The executable known to speak the proxy handshake.
     speaks: Option<PathBuf>,
+    /// Typed clients regenerated after each build.
+    clients: crate::client::Live,
 }
 
 impl Dev<'_> {
@@ -608,13 +621,9 @@ impl Dev<'_> {
                     ui::status_info("Changed", "files changed during the build, rebuilding");
                     return;
                 }
-                if let Some(target) = &self.opts.client {
-                    let shown = target.strip_prefix(&self.project.root).unwrap_or(target);
-                    match crate::client::regenerate(self.project, &exe, target) {
-                        Ok(true) => ui::status("Client", format!("updated {}", shown.display())),
-                        Ok(false) => {}
-                        Err(e) => ui::status_warn("Client", format!("not updated: {e:#}")),
-                    }
+                if !self.clients.is_empty() {
+                    self.clients
+                        .refresh_and_report(self.project, &exe, self.opts.clients_explicit);
                 }
                 self.launch(&exe);
             }
@@ -1170,6 +1179,7 @@ impl<'a> Dev<'a> {
             direct: false,
             spawned: 0,
             speaks: None,
+            clients: crate::client::Live::new(opts.clients.clone()),
         }
     }
 

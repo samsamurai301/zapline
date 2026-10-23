@@ -60,13 +60,14 @@ Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature
 | `app`, `router`, `request`, `response`, `extract`, `handler`, `body`, `error`, `lifecycle`, `test` | core | The framework core |
 | `server`, `tls` | core, `tls`, `http2` | Thread-per-core server, graceful shutdown, TLS, HTTP/2 |
 | `middleware/*` | core, `compression` | Logger, CORS, Timeout, DefaultHeaders, compression, rate limiting, request IDs, security headers, catch-panic, concurrency limit, path normalization |
-| `openapi/*`, `validate`, `__private` | `openapi`, `validate`, `macros` | OpenAPI 3.1 generation, docs UIs, `Valid<T>` |
+| `openapi/*`, `validate`, `__private` | `openapi`, `validate`, `macros` | OpenAPI 3.1 generation, docs UIs, the `/_zapline/api.js` client, `Valid<T>` |
 | `ws`, `sse`, `fs`, `multipart` | `ws`, —, `fs`, `multipart` | Realtime and content |
 | `auth/*`, `cookies`, `session` | core, `jwt`, `cookies` | Bearer/Basic/API-key/JWT auth, guards, cookies, sessions |
 | `di`, `config`, `tasks` | core, `config` | Dependency injection, layered config, background tasks and jobs |
 | `telemetry`, `metrics`, `health` | `tracing`, core | Tracing, Prometheus metrics, health checks |
 | `zapline-macros` | `macros` | Route attribute macros |
-| `zapline-cli` | — | `zapline new / generate / dev / routes / openapi / bench / doctor` |
+| `zapline-codegen` | `openapi` | Typed TypeScript and JavaScript clients from an OpenAPI document (pure functions, shared with the CLI) |
+| `zapline-cli` | — | `zapline new / generate / dev / routes / openapi / client / bench / doctor` |
 
 ## Testing and checks
 

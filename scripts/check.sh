@@ -16,6 +16,7 @@ cargo clippy --workspace --exclude bench-servers --all-features --all-targets --
 
 step "tests (all features)"
 cargo test -p zapline --all-features
+cargo test -p zapline-codegen
 cargo test -p zapline-cli
 
 [[ "${1:-}" == "quick" ]] && exit 0
