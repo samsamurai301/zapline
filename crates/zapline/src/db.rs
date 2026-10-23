@@ -53,7 +53,9 @@
 //! each at most once; turn that off with [`Database::migrate`]`(false)`, or
 //! point elsewhere with [`Database::migrations`]. `zapline db migrate` applies
 //! them without starting the server: it runs the app with
-//! [`ENV_MIGRATE_ONLY`] set.
+//! [`ENV_MIGRATE_ONLY`] set. `zapline db status` lists which are applied,
+//! pending or edited after being applied: it runs the app with
+//! [`ENV_MIGRATE_STATUS`] set.
 //!
 //! [sqlx]: https://docs.rs/sqlx
 
@@ -88,6 +90,29 @@ pub type DefaultDb = sqlx::Sqlite;
 /// When this environment variable is set, the app applies its migrations
 /// during startup and exits instead of serving. Used by `zapline db migrate`.
 pub const ENV_MIGRATE_ONLY: &str = "ZAPLINE_MIGRATE_ONLY";
+
+/// When this environment variable is set, the app connects to its database
+/// without migrating, prints one JSON line per migration and exits instead of
+/// serving. Used by `zapline db status`.
+///
+/// Each line is `{"version":20260101000000,"description":"create todos",
+/// "applied":true,"checksum_ok":true,"missing":false}`: `applied` says
+/// whether the database has run it, `checksum_ok` is `false` when an applied
+/// file was edited afterwards (sqlx refuses to start then), and `missing` is
+/// `true` for a version the database has applied but `migrations/` no longer
+/// holds. A last line, `migration status: <n> migrations`, marks the end.
+///
+/// ```no_run
+/// # #[cfg(feature = "sqlite")] {
+/// use zapline::db::{Database, ENV_MIGRATE_STATUS};
+/// use zapline::prelude::*;
+///
+/// // ZAPLINE_MIGRATE_STATUS=1 cargo run   prints the status and exits
+/// assert_eq!(ENV_MIGRATE_STATUS, "ZAPLINE_MIGRATE_STATUS");
+/// App::new().database(Database::from_env()).run("0.0.0.0:8080").unwrap();
+/// # }
+/// ```
+pub const ENV_MIGRATE_STATUS: &str = "ZAPLINE_MIGRATE_STATUS";
 
 /// When this environment variable is set, the app applies its migrations,
 /// runs the function given to [`App::seed`] and exits instead of serving.
@@ -191,6 +216,15 @@ impl<DB: sqlx::Database> Database<DB> {
     where
         DB::Connection: sqlx::migrate::Migrate,
     {
+        let pool = self.pool().await?;
+        if self.migrate {
+            run_migrations(&pool, &self.migrations).await?;
+        }
+        Ok(pool)
+    }
+
+    /// The pool, without touching migrations.
+    async fn pool(&self) -> crate::Result<Pool<DB>> {
         let url = self.resolve_url()?;
         let max = self.max_connections.unwrap_or_else(|| {
             let cpus = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
@@ -204,9 +238,6 @@ impl<DB: sqlx::Database> Database<DB> {
             .connect(&url)
             .await
             .map_err(|e| Error::internal(format!("cannot connect to the database: {e}")))?;
-        if self.migrate {
-            run_migrations(&pool, &self.migrations).await?;
-        }
         Ok(pool)
     }
 }
@@ -295,6 +326,104 @@ where
     Ok(())
 }
 
+/// One migration as `zapline db status` reports it.
+#[derive(Debug, PartialEq, Eq)]
+struct MigrationStatus {
+    version: i64,
+    description: String,
+    applied: bool,
+    checksum_ok: bool,
+    missing: bool,
+}
+
+impl MigrationStatus {
+    /// One JSON object (the `json` feature may be off, so by hand).
+    fn to_json(&self) -> String {
+        let mut description = String::with_capacity(self.description.len());
+        for c in self.description.chars() {
+            match c {
+                '"' => description.push_str("\\\""),
+                '\\' => description.push_str("\\\\"),
+                c if c.is_control() => description.push_str(&format!("\\u{:04x}", c as u32)),
+                c => description.push(c),
+            }
+        }
+        format!(
+            "{{\"version\":{},\"description\":\"{description}\",\"applied\":{},\"checksum_ok\":{},\"missing\":{}}}",
+            self.version, self.applied, self.checksum_ok, self.missing
+        )
+    }
+}
+
+/// Compares the migrations in `dir` with the ones `pool` has applied,
+/// ordered by version. Creates sqlx's `_sqlx_migrations` table when it does
+/// not exist yet (as the next migration run would), so that a fresh database
+/// reports everything as pending.
+async fn migration_status<DB: sqlx::Database>(
+    pool: &Pool<DB>,
+    dir: &std::path::Path,
+) -> crate::Result<Vec<MigrationStatus>>
+where
+    DB::Connection: sqlx::migrate::Migrate,
+{
+    use sqlx::migrate::Migrate;
+
+    let files = if dir.is_dir() {
+        sqlx::migrate::Migrator::new(dir.to_path_buf())
+            .await
+            .map_err(|e| {
+                Error::internal(format!("cannot read migrations in {}: {e}", dir.display()))
+            })?
+            .migrations
+            .into_owned()
+    } else {
+        Vec::new()
+    };
+    let mut conn = pool
+        .acquire()
+        .await
+        .map_err(|e| Error::internal(format!("cannot connect to the database: {e}")))?;
+    let applied = match conn.list_applied_migrations().await {
+        Ok(applied) => applied,
+        Err(_) => {
+            conn.ensure_migrations_table()
+                .await
+                .map_err(|e| Error::internal(format!("cannot read applied migrations: {e}")))?;
+            conn.list_applied_migrations()
+                .await
+                .map_err(|e| Error::internal(format!("cannot read applied migrations: {e}")))?
+        }
+    };
+
+    let mut out: Vec<MigrationStatus> = files
+        .iter()
+        .filter(|m| !m.migration_type.is_down_migration())
+        .map(|m| {
+            let done = applied.iter().find(|a| a.version == m.version);
+            MigrationStatus {
+                version: m.version,
+                description: m.description.to_string(),
+                applied: done.is_some(),
+                checksum_ok: done.is_none_or(|a| a.checksum == m.checksum),
+                missing: false,
+            }
+        })
+        .collect();
+    for a in &applied {
+        if !out.iter().any(|m| m.version == a.version) {
+            out.push(MigrationStatus {
+                version: a.version,
+                description: String::new(),
+                applied: true,
+                checksum_ok: true,
+                missing: true,
+            });
+        }
+    }
+    out.sort_by_key(|m| m.version);
+    Ok(out)
+}
+
 impl App {
     /// Connect to a database at startup, apply pending migrations, and make
     /// the pool available to handlers as [`Db`] (and as `State<Pool<DB>>`).
@@ -306,6 +435,15 @@ impl App {
         DB::Connection: sqlx::migrate::Migrate,
     {
         self.on_startup(move |res: Resources| async move {
+            if std::env::var_os(ENV_MIGRATE_STATUS).is_some() {
+                let pool = database.pool().await?;
+                let status = migration_status(&pool, &database.migrations).await?;
+                for m in &status {
+                    println!("{}", m.to_json());
+                }
+                println!("migration status: {} migrations", status.len());
+                std::process::exit(0);
+            }
             let pool = database.connect().await?;
             if std::env::var_os(ENV_MIGRATE_ONLY).is_some() {
                 println!("migrations are up to date");
