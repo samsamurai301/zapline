@@ -241,6 +241,7 @@ fn sql_resources_with_references_compile_and_pass() {
         "crud_round_trip",
         "patch_changes_only_the_given_fields",
         "show_and_edit_pages",
+        "rejected_forms_come_back_with_errors",
         "listed_under_their_author",
     ] {
         assert!(
