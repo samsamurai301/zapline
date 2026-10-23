@@ -22,6 +22,7 @@ zapline generate migration add_x_to_posts x:int   # ALTER TABLE / CREATE TABLE f
 zapline generate handler <name> --method get
 zapline generate auth               # accounts + password reset (needs a database)
 zapline generate job <name>         # durable background job (needs a database)
+zapline generate mailer <name>      # email from templates/mail/<name>.html + .txt, with a test
 zapline generate tailwind           # Tailwind CSS without Node; then `zapline css`
 zapline generate deploy fly         # or railway, render, compose: hosting config
 zapline db seed                     # insert the demo data from App::seed
@@ -56,6 +57,10 @@ While `zapline dev` runs, the MCP tools `recent_errors`, `recent_requests` and
 - **Background work**: work that must not be lost (email, webhooks) is a
   durable job in `src/jobs/` (`zapline g job <name>`), enqueued with
   `jobs.enqueue(..)`; `BackgroundTasks` only for best-effort work.
+- **Email**: one function per email in `src/mail/` (`zapline g mailer <name>`)
+  building an `Email` with `.template(&views, "mail/<name>", ctx)`; send it
+  with `mailer.send(..)` or enqueue it as a job. Sent mail shows up at
+  `/_dev/mail` while developing; tests read `Mailer::outbox().sent()`.
 - **Errors**: return `Result<T>` (zapline's) and use `?`. Build HTTP errors
   with `Error::not_found()`, `Error::bad_request(msg)`, `Error::conflict(msg)`,
   and add a stable machine code with `.with_code("snake_case")`. Map domain

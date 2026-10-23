@@ -80,6 +80,24 @@ impl IntoResponse for Bytes {
         with_type(self.into(), OCTET)
     }
 }
+/// A body of any kind (for example a stream from
+/// `Storage::get_stream`), sent as `application/octet-stream`.
+///
+/// ```
+/// use zapline::prelude::*;
+/// use zapline::Body;
+///
+/// async fn download() -> Body {
+///     Body::from("raw bytes")
+/// }
+/// let app = App::new().get("/download", download);
+/// ```
+impl IntoResponse for Body {
+    #[inline]
+    fn into_response(self) -> Response {
+        with_type(self, OCTET)
+    }
+}
 impl IntoResponse for Vec<u8> {
     #[inline]
     fn into_response(self) -> Response {

@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width">
+  <title>{% block subject %}@@Title@@{% endblock %}</title>
+</head>
+<body style="margin:0;padding:24px;background:#f6f6f6;font-family:system-ui,-apple-system,sans-serif;line-height:1.5;color:#222">
+  <div style="max-width:560px;margin:0 auto;background:#fff;border-radius:8px;padding:24px">
+    <p>Hello {{ to }},</p>
+    <p>This is the @@name@@ email. Edit <code>templates/mail/@@name@@.html</code> (and the
+      plain-text <code>@@name@@.txt</code>) to change it.</p>
+  </div>
+</body>
+</html>

@@ -8,6 +8,7 @@ pub mod auth;
 pub mod db_resource;
 pub mod deploy;
 pub mod job;
+pub mod mailer;
 pub mod register;
 
 use std::fs;
@@ -772,7 +773,6 @@ pub fn resource(dir: &Path, name: &str, plural: Option<&str>, force: bool) -> Re
     Ok(report)
 }
 
-/// The crate name tests import: the library name, or the package name as a fallback.
 /// The file name of an existing migration ending in `suffix`.
 fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
     let dir = project.root.join(crate::db::MIGRATIONS_DIR);
@@ -783,6 +783,7 @@ fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
         .find(|n| n.ends_with(suffix))
 }
 
+/// The crate name tests import: the library name, or the package name as a fallback.
 fn crate_name_of(project: &Project) -> String {
     project
         .lib_name

@@ -503,6 +503,28 @@ Examples:
         name: String,
     },
 
+    /// An email rendered from templates, with a test
+    #[command(after_long_help = "\
+Generates:
+  src/mail/<name>.rs             a function building the Email from the templates
+  src/mail/mod.rs                declares it (and `pub mod mail;` is added to src/lib.rs)
+  templates/mail/<name>.html     the HTML body; its `{% block subject %}` is the subject
+  templates/mail/<name>.txt      the plain-text body
+  tests/<name>_email.rs          renders it and checks subject, recipient and body
+and enables zapline's `mail` and `views` features in Cargo.toml.
+
+Send it from a handler that takes `views: Views, mail: Mailer`:
+  mail.send(crate::mail::welcome::welcome(&views, &user.email)?).await?;
+While developing, sent mail shows up at /_dev/mail.
+
+Examples:
+  zapline g mailer welcome
+  zapline g mailer password-reset")]
+    Mailer {
+        /// Email name, e.g. `welcome`
+        name: String,
+    },
+
     /// Tailwind CSS without Node: styles/app.css compiled to static/app.css
     #[command(after_long_help = "\
 Creates styles/app.css (`@import \"tailwindcss\"` plus the CSS that was in static/app.css)

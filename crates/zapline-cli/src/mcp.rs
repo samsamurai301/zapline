@@ -189,6 +189,14 @@ fn tool_list() -> Value {
             }}
         },
         {
+            "name": "generate_mailer",
+            "description": "Add an email rendered from templates: src/mail/<name>.rs (a fn building the Email), templates/mail/<name>.html (subject in {% block subject %}) and .txt, declared in src/mail/mod.rs, plus a test against Mailer::outbox. Send with `mail.send(mail::<name>::<name>(&views, to)?).await?`.",
+            "inputSchema": { "type": "object", "required": ["name"], "properties": {
+                "name": { "type": "string", "description": "e.g. welcome" },
+                "force": { "type": "boolean" }
+            }}
+        },
+        {
             "name": "db_new_migration",
             "description": "Create migrations/<timestamp>_<name>.sql, optionally with its SQL.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
@@ -387,6 +395,15 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
             let name = s("name").context("`name` is required")?;
             let project = Project::discover(here)?;
             Ok(report_text(&generate::job::generate(
+                &project,
+                name,
+                flag("force"),
+            )?))
+        }
+        "generate_mailer" => {
+            let name = s("name").context("`name` is required")?;
+            let project = Project::discover(here)?;
+            Ok(report_text(&generate::mailer::generate(
                 &project,
                 name,
                 flag("force"),

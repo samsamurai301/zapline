@@ -1,0 +1,21 @@
+//! The `@@name@@` email renders and reaches its recipient.
+
+use zapline::mail::Mailer;
+use zapline::view::Views;
+
+use @@crate_name@@::mail::@@name@@::@@name@@;
+
+#[tokio::test]
+async fn @@name@@_email_is_sent() {
+    let views = Views::new("templates", true);
+    let mailer = Mailer::outbox();
+    let email = @@name@@(&views, "ada@example.com").unwrap();
+    mailer.send(email).await.unwrap();
+
+    let sent = mailer.sent();
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].to, ["ada@example.com"]);
+    assert_eq!(sent[0].subject, "@@Title@@");
+    assert!(sent[0].html.as_deref().unwrap().contains("ada@example.com"));
+    assert!(sent[0].text.as_deref().unwrap().contains("ada@example.com"));
+}

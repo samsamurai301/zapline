@@ -502,7 +502,7 @@ impl<DB: JobBackend> Jobs<DB> {
             )));
         }
         let payload = serde_json::to_string(&job).map_err(|e| {
-            Error::internal(format!("cannot encode job `{}`", J::NAME)).with_source(e)
+            Error::internal(format!("cannot encode job `{}`: {e}", J::NAME)).with_source(e)
         })?;
         let now = now_ms();
         DB::insert(

@@ -177,6 +177,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                 GenerateKind::Job { name } => {
                     generate::job::generate(&Project::discover(here)?, &name, g.force)?
                 }
+                GenerateKind::Mailer { name } => {
+                    generate::mailer::generate(&Project::discover(here)?, &name, g.force)?
+                }
                 GenerateKind::Deploy { target } => {
                     generate::deploy::generate(&Project::discover(here)?, target, g.force)?
                 }

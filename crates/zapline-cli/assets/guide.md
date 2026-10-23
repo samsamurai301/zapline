@@ -502,7 +502,8 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
-| Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
+| Files | `App::storage(Storage::from_env()?)` + `storage: Storage`: `put`, `put_with(k, b, PutOptions)`, `get`, `get_stream`/`put_stream`, `list(prefix)`, `metadata`, `copy`, `delete`, `url(key, ttl)`, `upload_url` (browser to S3) ([File storage](storage.md)) |
+| Email | `mail.send(Email::to(a).cc(b).bcc(c).attach(name, type, bytes))`; `.template(&views, "mail/x", ctx)`; `/_dev/mail`; `Mailer::outbox().sent()` ([Email](mail.md)) |
 | Dev loop | `zapline dev`: templates, translations and static files reload without a restart, CSS swaps in place, Rust changes swap with no downtime, compile errors show in the browser ([The dev loop](cli.md#the-dev-loop-zapline-dev)) |
 | Dev console | `App::dev_console()`: routes, requests, errors (with `ZL` codes and fixes), jobs, mail at `/_dev` (debug, localhost only) |
 | Typed frontend | a `frontend/` dir: `zapline dev` rewrites `frontend/src/api.ts` after each build (`api.createTask(body)`, `isValidationError(e, "createTask") && e.fields.title`); no build step: `OpenApi::new(..).client_js()` + `import { api } from "/_zapline/api.js"` ([Typed frontends](frontend.md)) |
@@ -510,7 +511,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
 | Fuzz every route | `app().test().fuzz().await.assert_clean()` or `zapline fuzz` |
 | Tests from traffic | `zapline dev --record`, use the app, `zapline snap signup`; replayed by `app().test().replay_snapshots("tests/snapshots")` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text due:date author:references` (migration with timestamps, JSON API with `PATCH`, index/show/edit pages, tests), `g migration add_x_to_posts x:int`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `fuzz`, `client` (typed TS/JS client; `dev` keeps `frontend/src/api.ts` current), `snap <name>`, `check`, `test`, `explain ZL0002`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text due:date author:references` (migration with timestamps, JSON API with `PATCH`, index/show/edit pages, tests), `g migration add_x_to_posts x:int`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g mailer <name>` (templated email + test), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `fuzz`, `client` (typed TS/JS client; `dev` keeps `frontend/src/api.ts` current), `snap <name>`, `check`, `test`, `explain ZL0002`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |
 | Form errors + flash | `ValidForm(form): ValidForm<T>`; `Err(invalid) => return views.render_invalid("new.html", context!{}, invalid)` (422 with `{{ errors.x }}`, `{{ old.x }}`); `flash: Flash`, `flash.success("Saved"); Ok(flash.redirect("/posts"))`, `{% for m in flash %}` in templates ([Views](views.md#forms-errors-next-to-each-field)) |
 
@@ -534,6 +535,7 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
 | `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
+| `zapline g mailer <name>` | An [email from templates](mail.md#templated-email-zapline-g-mailer): `src/mail/<name>.rs` (declared in `src/mail/mod.rs`), `templates/mail/<name>.html` and `.txt`, and a test against the outbox mailer; enables the `mail` and `views` features |
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
@@ -717,7 +719,7 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 |---|---|
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
-| `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
+| `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_job`, `generate_mailer` | The files created and edited |
 | `db_new_migration` | Creates a migration, with its SQL if given |
 | `db_migrate` | Applies pending migrations |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
@@ -4792,9 +4794,67 @@ Without `SMTP_URL`, a **debug** build uses the outbox described below, and a **r
 
 `Mailer::smtp(url)` and `Mailer::outbox()` build the two kinds directly, and `.default_from(addr)` sets the sender in code.
 
+## Recipients and headers
+
+```rust
+Email::to("ada@example.com")
+    .and_to("grace@example.com")       // more `To` recipients
+    .cc("team@example.com")             // visible copies
+    .bcc("audit@example.com")           // blind copies
+    .reply_to("support@example.com")
+    .header("List-Unsubscribe", "<https://example.com/unsubscribe?u=42>")
+    .subject("Release notes")
+    .text("...");
+```
+
+Blind copies go to the SMTP envelope only: the sent message has no `Bcc` header, so no recipient can see them. `header(name, value)` adds any other header; sending fails with a clear error for a value with a line break (header injection), a name that isn't a valid header name, or a header that has its own method (`To`, `Subject`, `Content-Type`, ...).
+
+## Attachments and inline images
+
+```rust
+let email = Email::to(&user.email)
+    .subject("Your invoice")
+    .text("Your invoice is attached.")
+    .html(r#"<img src="cid:logo" alt="Acme"><p>Your invoice is attached.</p>"#)
+    .attach("invoice-42.pdf", "application/pdf", pdf_bytes)
+    .inline("logo", "image/png", logo_png);
+```
+
+`attach` adds a file the recipient can download; `inline` embeds an image the HTML shows with `src="cid:<id>"`. Together they may be at most `MAX_ATTACHMENT_BYTES` (10 MiB, before base64 makes them a third larger): a larger email fails to send, and fails to enqueue, with an error that says so. For big files, send a [storage link](storage.md#links-are-private) instead.
+
+`email.to_mime(default_from)` returns the message exactly as it would be sent, for saving as an `.eml` file or checking in tests.
+
+## Templated email: `zapline g mailer`
+
+With the `views` feature, `Email::template` renders the subject and both bodies from templates in the app's `templates/` directory:
+
+```rust
+use zapline::view::{context, Views};
+
+#[post("/signup")]
+async fn signup(views: Views, mail: Mailer, Json(form): Json<Signup>) -> Result<StatusCode> {
+    let url = format!("https://app.example.com/confirm?t={}", token(&form.email));
+    let email = Email::to(&form.email)
+        .template(&views, "mail/welcome", context! { name => form.name, url })?;
+    mail.send(email).await?;
+    Ok(StatusCode::CREATED)
+}
+```
+
+`templates/mail/welcome.html` is the HTML body; its `{% block subject %}` is the subject, so it fits in `<title>` (and in a shared layout that other emails extend):
+
+```jinja
+<title>{% block subject %}Welcome, {{ name }}{% endblock %}</title>
+<p>Hi {{ name }}, please <a href="{{ url }}">confirm your address</a>.</p>
+```
+
+`templates/mail/welcome.txt`, when it exists, is the plain-text body (not HTML-escaped). Without it the text part is made from the HTML: paragraphs and line breaks kept, links as `label (url)`, lists as `- item`. Either template may be missing, not both.
+
+`zapline g mailer welcome` writes all of it: `src/mail/welcome.rs` with `pub fn welcome(views: &Views, to: &str) -> Result<Email>`, declared in `src/mail/mod.rs` (and `pub mod mail;` in `src/lib.rs`), the two templates, and `tests/welcome_email.rs`, which renders the email, sends it to an outbox mailer and checks the subject, the recipient and both bodies. It turns on the `mail` and `views` features and tells you what is left to register on the app.
+
 ## The dev inbox
 
-An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients, the HTML body in a sandboxed frame and the text body with clickable links. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use, and the [dev console](dev-console.md) links it.
+An outbox mailer sends nothing. It logs each message and serves the last 50 at **`GET /_dev/mail`**: subject, recipients (with blind copies listed apart, since the message itself doesn't carry them), the HTML body in a sandboxed frame with its inline images, an HTML / text toggle with clickable links in the text, download links for attachments, and the whole message as an `.eml` file. Sign-up confirmations and password-reset links work end to end on your machine with no mail server. The page only exists when the outbox is in use, and the [dev console](dev-console.md) links it.
 
 ## Sending in the background
 
@@ -4810,7 +4870,7 @@ App::new()
 jobs.enqueue(Email::to(&user.email).subject("Welcome").text(body)).await?;
 ```
 
-A failed send is retried with backoff (5 s, 20 s, 80 s, ...).
+A failed send is retried with backoff (5 s, 20 s, 80 s, ...). Attachments travel with the job (stored base64 in its payload).
 
 ## Testing
 
@@ -4824,7 +4884,7 @@ assert_eq!(sent[0].to, ["ada@example.com"]);
 assert!(sent[0].text.as_deref().unwrap().contains("/join"));
 ```
 
-`Email` is a plain struct with public fields, so assertions can look at anything.
+`Email` is a plain struct with public fields (`to`, `cc`, `bcc`, `subject`, `text`, `html`, `headers`, `attachments`), so assertions can look at anything. Generated emails come with such a test (`zapline g mailer`).
 
 
 ---
@@ -7542,22 +7602,78 @@ Requirements: the `storage` feature (included in `full`), plus `s3` for S3.
 | Call | Does |
 |---|---|
 | `storage.put(key, bytes)` | Store (or replace) a file. The content type comes from the key's extension. Local writes are atomic. |
+| `storage.put_with(key, bytes, PutOptions::new().content_type(..).cache_control(..))` | The same, with the content type and `Cache-Control` you choose. |
+| `storage.put_stream(key, stream, options)` | Store a stream of chunks (for example a request's `BodyStream`) without holding it in memory. Returns the size. |
 | `storage.get(key)` | The bytes, or a `404` error. |
+| `storage.get_stream(key)` | A `Body` that streams the file (64 KiB chunks from disk, straight from S3): return it from a handler. |
 | `storage.exists(key)` | `true` or `false`. |
+| `storage.metadata(key)` | `ObjectInfo { key, size, modified, content_type, cache_control }`, without reading the file. |
+| `storage.list(prefix)` | Every file whose key starts with `prefix`, sorted, as `ObjectInfo`s (`""` lists everything). |
+| `storage.copy(from, to)` | Copy a file with its content type (inside the bucket on S3, nothing downloaded). |
 | `storage.delete(key)` | Remove it. Removing a missing file is fine. |
 | `storage.url(key, ttl)` | A link that works for `ttl`. |
+| `storage.upload_url(key, ttl, max_bytes, content_type)` | A URL the browser uploads one file to directly ([below](#direct-uploads-from-the-browser)). |
 | `unique_key(prefix, file_name)` | `prefix/<random>/<safe-name>`: a fresh key for an upload, with a name that can't escape the prefix. |
 
-Invalid keys (empty segments, `..`, a leading `/`, backslashes, over 1024 bytes) are a `400` with code `invalid_key`, so a key built from user input can't reach outside the storage.
+Invalid keys (empty segments, `..`, a leading `/`, backslashes, a segment starting with `.zl-`, over 1024 bytes) are a `400` with code `invalid_key`, so a key built from user input can't reach outside the storage. Prefixes given to `list` are checked the same way. The local backend keeps its temporary files and the options of `put_with` next to each file under `.zl-` names, which never appear in listings; listings don't follow symbolic links.
 
 ## Links are private
 
 Files aren't public. `storage.url` makes a link that expires:
 
 - **S3**: a presigned URL (at most 7 days), straight to the bucket.
-- **Local and memory**: `/files/<key>?expires=…&sig=…`, served by the app (`App::storage` mounts it) only after the HMAC signature and the expiry check out. Anything else is a `403`. Responses are sent with `X-Content-Type-Options: nosniff`.
+- **Local and memory**: `/files/<key>?expires=…&sig=…`, served by the app (`App::storage` mounts it) only after the HMAC signature and the expiry check out. Anything else is a `403`. Files are streamed with the content type and `Cache-Control` they were stored with (default `private, max-age=300`), `X-Content-Type-Options: nosniff` and a sandboxing `Content-Security-Policy`; anything but images, PDFs, plain text, audio and video downloads instead of opening, whatever its declared type.
 
 Local links are signed with a random key per process, so they stop working at restart. Set `STORAGE_SECRET` (or call `.secret(..)`) to keep them valid, and use the same value on every instance.
+
+## Large files
+
+`get_stream` and `put_stream` move a file without loading it into memory, so a handler can pass a multi-gigabyte upload straight through:
+
+```rust
+use zapline::storage::{unique_key, PutOptions, Storage};
+use zapline::stream::BodyStream;
+use zapline::Body;
+
+#[put("/videos/{name}")]
+async fn upload(storage: Storage, Path(name): Path<String>, body: BodyStream) -> Result<String> {
+    let key = unique_key("videos", &name);
+    let options = PutOptions::new().content_type("video/mp4");
+    storage.put_stream(&key, body.with_limit(2 << 30), options).await?;
+    Ok(key)
+}
+
+#[get("/exports/{name}")]
+async fn export(storage: Storage, Path(name): Path<String>) -> Result<Body> {
+    storage.get_stream(&format!("exports/{name}")).await
+}
+```
+
+Locally the stream goes to a temporary file that replaces the old one only when complete. On S3 anything over 8 MiB becomes a multipart upload in 8 MiB parts; if the stream fails (a `BodyStream` over its limit, a dropped connection) the upload is aborted, nothing is stored, and the stream's error (the `413`, say) is what `put_stream` returns.
+
+## Direct uploads from the browser
+
+`upload_url` lets the browser send a file to storage without it passing through your handlers. The handler only decides the key, the size limit and the type:
+
+```rust
+use zapline::storage::{unique_key, Storage, UploadUrl};
+
+#[post("/avatar/upload-url")]
+async fn avatar_upload_url(storage: Storage, user: CurrentUser) -> Result<Json<UploadUrl>> {
+    let key = unique_key(&format!("avatars/{}", user.0.id), "avatar.png");
+    let up = storage.upload_url(&key, Duration::from_secs(600), 5 << 20, "image/png")?;
+    Ok(Json(up))
+}
+```
+
+```js
+const up = await (await fetch("/avatar/upload-url", { method: "POST" })).json();
+await fetch(up.url, { method: up.method, headers: up.headers, body: file });
+// then tell the app that up.key is ready
+```
+
+- **S3**: a presigned `PUT` (at most 7 days) that signs the content type, so S3 refuses any other. S3 can't cap the size of a presigned `PUT`: when the browser reports success, check `storage.metadata(&key)` and delete what is too large.
+- **Local and memory**: a `PUT` to `/files/<key>?expires=…&max=…&type=…&sig=…`, which `App::storage` serves. The HMAC signature covers the key, the expiry, the size limit and the type, so none of them can be changed. It answers `403` for a bad or expired signature (download links don't work for uploads, nor the other way round), `415` for another `Content-Type`, and `413` beyond `max_bytes`, checked against `Content-Length` and again while the body streams to disk.
 
 ## Configuration
 
@@ -7574,7 +7690,7 @@ Local links are signed with a random key per process, so they stop working at re
 
 Or build one in code: `Storage::s3(S3::new("bucket", "eu-west-1").credentials(id, secret))`.
 
-The S3 client is built in (Signature V4 over hyper and rustls; the signing is tested against AWS's published examples), so it adds no AWS SDK to your build.
+The S3 client is built in (Signature V4 over hyper and rustls; the signing is tested against AWS's published examples and botocore), so it adds no AWS SDK to your build. It covers what the API needs: objects, ListObjectsV2 with continuation tokens, server-side copies, multipart uploads, and presigned `GET` and `PUT`.
 
 ## Testing
 

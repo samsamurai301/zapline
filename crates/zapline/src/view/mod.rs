@@ -204,6 +204,52 @@ impl Views {
         self.request.as_ref().and_then(|r| r.hx.as_ref())
     }
 
+    /// The parts of an email from `{name}.html` and `{name}.txt` (either
+    /// may be missing, not both): `(subject, html, text)`. The subject is
+    /// `{% block subject %}` of the HTML template, else of the text one.
+    #[cfg(feature = "mail")]
+    pub(crate) fn render_mail(
+        &self,
+        name: &str,
+        ctx: impl Serialize,
+    ) -> crate::Result<(Option<String>, Option<String>, Option<String>)> {
+        let ctx = Value::from_serialize(&ctx);
+        self.with_env(|env| {
+            // `(output, subject block)` of one template, `None` if missing.
+            let render = |file: String| -> crate::Result<Option<(String, Option<String>)>> {
+                let tmpl = match env.get_template(&file) {
+                    Ok(tmpl) => tmpl,
+                    Err(e) if e.kind() == minijinja::ErrorKind::TemplateNotFound => {
+                        return Ok(None)
+                    }
+                    Err(e) => return Err(template_error(e)),
+                };
+                let body = tmpl.render(&ctx).map_err(template_error)?;
+                // As in `render_block`: evaluate again to reach the block.
+                let mut captured = tmpl
+                    .render_captured_to(&ctx, std::io::sink())
+                    .map_err(template_error)?;
+                let subject = match captured.with_state_mut(|s| s.render_block("subject")) {
+                    Ok(subject) => Some(subject),
+                    Err(e) if e.kind() == minijinja::ErrorKind::UnknownBlock => None,
+                    Err(e) => return Err(template_error(e)),
+                };
+                Ok(Some((body, subject)))
+            };
+            let html = render(format!("{name}.html"))?;
+            let text = render(format!("{name}.txt"))?;
+            if html.is_none() && text.is_none() {
+                return Err(Error::internal(format!(
+                    "no email template {name}.html or {name}.txt in {}",
+                    self.0.dir.display()
+                )));
+            }
+            let (html, html_subject) = html.map_or((None, None), |(b, s)| (Some(b), s));
+            let (text, text_subject) = text.map_or((None, None), |(b, s)| (Some(b), s));
+            Ok((html_subject.or(text_subject), html, text))
+        })
+    }
+
     fn with_env<R>(&self, f: impl FnOnce(&Environment<'static>) -> R) -> R {
         // Templates read `flash` from this request's session.
         #[cfg(feature = "cookies")]
