@@ -4797,10 +4797,10 @@ ws.send("hello, room");
   }
   ```
 
-- **Middleware only sees the handshake.** `Timeout`, `ConcurrencyLimit` and `RateLimit` apply to the upgrade request. They don't bound the lifetime of the connection afterwards, and a connection doesn't hold a concurrency slot. Limit connections yourself (a semaphore in state, or a per-user count) and use `max_message_size`.
+- **Middleware only sees the handshake.** `Timeout`, `ConcurrencyLimit` and `RateLimit` apply to the upgrade request. They don't bound the lifetime of the connection afterwards, and a connection doesn't hold a concurrency slot. The server does count it: an upgraded socket keeps its `max_connections` slot, or counts against `ServerConfig::max_upgraded` if you set it (upgrades beyond it get `503`, code `ws_too_many_connections`). For per-user limits, keep a count in state, and use `max_message_size`. See [Server: WebSockets and the server](server.md#websockets-and-the-server).
 - **Dead peers.** Idle proxies and NATs drop silent connections, and TCP won't tell you for a long time. Send a ping every 20 to 30 seconds with `socket.send(Message::ping(Bytes::new()))`, and treat a failed send as a closed connection.
 - **Reverse proxies** must forward the upgrade headers. For nginx: `proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade";`, plus a long `proxy_read_timeout`.
-- **Shutdown.** Open sockets keep running while the server drains. If you use a worker, a job or `App::tasks_grace_period(..)`, `State<zapline::tasks::Shutdown>` is available: `select!` on `shutdown.wait()` in your loop and call `socket.close_with(close_code::AWAY, "restarting")`. See [Background tasks](tasks.md).
+- **Shutdown.** The drain waits for open sockets. Each one sends a `1001` close frame (`close_code::AWAY`) the next time your callback reads or writes, so a `recv` loop ends by itself and a later `send` fails with `ws_closed`. Callbacks still running after `shutdown_timeout` are dropped. If your loop waits on something else, put `socket.recv()` in the same `select!` so the close goes out at once. New upgrades during the drain get `503` (`ws_shutting_down`).
 - **HTTP/2.** WebSockets over HTTP/2 (RFC 8441 extended `CONNECT`) are not supported; clients use an HTTP/1.1 connection for the upgrade.
 
 ## Testing
@@ -6115,7 +6115,8 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `runtime` | `PerCore` (Linux) | `PerCore` or `MultiThread` |
 | `header_read_timeout` | 30s | Slowloris protection |
 | `keep_alive` / `pipeline_flush` | true / true | HTTP/1.1 behavior |
-| `max_connections` | unlimited | Per worker. Accepting pauses at the limit. |
+| `max_connections` | unlimited | Per worker. Accepting pauses at the limit. WebSockets keep their slot after the upgrade. |
+| `max_upgraded` | none | Per worker. A separate limit for WebSockets; upgrades beyond it get `503`. |
 | `max_header_size`, `max_headers`, `max_buf_size` | hyper defaults | Request head limits |
 | `http2`, `http2_max_concurrent_streams`, `http2_keep_alive_interval` | true (feature on) | HTTP/2 tuning |
 | `shutdown_timeout` | 30s | Drain deadline |
@@ -6129,11 +6130,48 @@ Invalid combinations are rejected at startup with `ErrorKind::InvalidInput`.
 
 `TlsConfig::from_pem_files`, `from_pem` or `from_rustls(Arc<rustls::ServerConfig>)` set up TLS. For SNI, mTLS or custom ciphers, build the rustls config yourself; `zapline::tls::rustls` is re-exported. The handshake runs in the connection task with a timeout, so slow clients never block accepting. Handlers can see `ConnInfo::secure == true`.
 
+## WebSockets and the server
+
+An upgraded WebSocket stays a connection as far as the server is concerned:
+
+- **It keeps counting against `max_connections`.** The socket takes over the slot of the HTTP connection it came from, with no gap in between, so a new connection can't slip in when hyper hands the socket over. At the limit, an upgrade is never refused: it doesn't need a new slot.
+- **Or against its own limit.** Set `max_upgraded` to count WebSockets separately. The HTTP connection's slot is then freed at the upgrade, and an upgrade beyond `max_upgraded` is answered with `503` (`ws_too_many_connections`, `Retry-After: 1`) instead of `101`, so your callback never runs.
+- **Graceful shutdown waits for it.** When the drain starts, each socket sends a close frame with code `1001` (`close_code::AWAY`, "server shutting down") the next time your callback reads from or writes to it. A `recv` loop then sees the close handshake and ends; a `send` afterwards fails with `ws_closed`. The server waits for the callbacks to return, up to `shutdown_timeout`, and then drops the ones still running (the socket closes). Upgrades that arrive during the drain get `503` (`ws_shutting_down`).
+
+```rust
+use std::time::Duration;
+use zapline::prelude::*;
+use zapline::ws::{WebSocket, WebSocketUpgrade};
+
+async fn feed(ws: WebSocketUpgrade) -> Response {
+    ws.on_upgrade(|mut socket: WebSocket| async move {
+        // Ends on shutdown: recv() completes the 1001 close handshake.
+        while let Some(Ok(msg)) = socket.recv().await {
+            if msg.is_text() && socket.send(msg).await.is_err() {
+                break;
+            }
+        }
+        // Cleanup here still runs before the server returns.
+    })
+}
+
+fn main() -> std::io::Result<()> {
+    let mut app = App::new()
+        .get("/feed", feed)
+        .max_connections(2_000)                  // HTTP connections per worker
+        .shutdown_timeout(Duration::from_secs(10));
+    app.server_config_mut().max_upgraded = Some(50_000); // WebSockets per worker
+    app.run("0.0.0.0:8080")
+}
+```
+
+A callback that waits on something other than the socket (a channel, a timer) sees the shutdown when it next touches the socket. Put `socket.recv()` in your `select!` so the close frame goes out right away. None of this costs plain HTTP connections anything: the accounting is set up in the handler, only for upgrades.
+
 ## Known limitations
 
-- With `pipeline_flush` on (the default, needed for pipelined throughput), hyper 1.12 closes the connection on malformed or oversized request heads without sending the 400/431 response. Set `pipeline_flush = false` if you need those responses.
-- Upgraded WebSocket connections and individual HTTP/2 streams aren't tracked by the drain. With `App::run` they end when the workers stop.
-- A WebSocket connection gives back its `max_connections` slot when it upgrades, so long-lived sockets aren't counted against that limit. Bound them in your handler, for example with a semaphore in app state.
+- With `pipeline_flush` on (the default, needed for pipelined throughput), hyper 1.12 closes the connection on a malformed or oversized request head without sending the 400/414/431 response. Responses to earlier pipelined requests that were still buffered on that connection are lost with it. Set `pipeline_flush = false` if you need those responses. zapline can't send them itself: hyper drops its write buffer, and only it knows what was in it (see the [upstream issue draft](upstream-issues.md#hyper-automatic-error-responses-are-dropped-with-pipeline_flush)). The test `hyper_drops_automatic_error_responses_with_pipeline_flush` fails once a hyper release fixes it.
+- Individual HTTP/2 streams aren't tracked by the drain: an HTTP/2 connection gets a GOAWAY and closes when its streams finish. With `App::run` the rest end when the workers stop.
+- WebSockets over HTTP/2 (RFC 8441) aren't supported.
 
 
 ---
@@ -6534,3 +6572,156 @@ Plugins such as [OpenAPI](openapi.md), [Metrics and Health](observability.md) an
 ## Contributing a feature
 
 Add it as a module in the `zapline` crate behind a feature if it needs a dependency, build it on the extension points above (never add fields to `Request` or work to the request path for a single feature), and give every public type a doc comment with a short example. Run `./scripts/check.sh` before opening a pull request, and include before and after `./bench/run.sh` numbers for hot-path changes. `ARCHITECTURE.md` and `CONTRIBUTING.md` have the details.
+
+
+---
+
+<!-- upstream-issues.md -->
+
+# Upstream issues
+
+Bugs in dependencies that zapline works around, written up so they can be
+filed (search the tracker for an existing report first) and re-checked on
+each upgrade. Each one has a canary test in `crates/zapline/tests/` that
+fails once the upstream fix lands.
+
+## hyper: automatic error responses are dropped with `pipeline_flush`
+
+**Status:** present in hyper 1.12.0. Workaround: `ServerConfig::pipeline_flush = false`.
+Canary: `hyper_drops_automatic_error_responses_with_pipeline_flush` in
+`crates/zapline/tests/server.rs`.
+
+**Why zapline can't fix it on its side:** the lost bytes live in hyper's
+private write buffer and are dropped with the connection. zapline could
+write its own `400` to the socket after hyper reports a parse error, but on a
+pipelined connection that response would arrive in place of the earlier
+responses hyper also dropped, and the client would match it to the wrong
+request. Knowing whether anything else was buffered would take bookkeeping
+on every request, or a wrapper around every connection's IO type. Both cost
+the hot path (the IO wrapper blocks LTO from inlining hyper's dispatcher;
+see `server::conn`).
+
+The draft below is ready to file at <https://github.com/hyperium/hyper/issues>.
+
+---
+
+**Title:** `http1::Builder::pipeline_flush(true)` drops the automatic 400/414/431 response (and buffered pipelined responses) on a request-head parse error
+
+**Version:** hyper 1.12.0, `server` + `http1` features, Linux, Tokio 1.
+
+**Description**
+
+With `pipeline_flush(true)`, a request head that fails to parse (invalid
+header line, invalid method/URI/version, head larger than
+`max_header_size`/`max_buf_size`, URI too long) closes the connection without
+sending the automatic error response. With `pipeline_flush(false)` the
+same requests get `400`, `431` or `414` as documented.
+
+Responses to earlier requests on the same connection that were still
+buffered are lost as well: a client that pipelines a valid request and a
+malformed one in one write receives nothing at all, not even the `200` for
+the first request.
+
+**Reproduction**
+
+```rust
+// [dependencies] hyper = { version = "1.12", features = ["server", "http1"] }
+// hyper-util = { version = "0.1", features = ["tokio"] }
+// tokio = { version = "1", features = ["full"] }
+// http-body-util = "0.1"
+use std::convert::Infallible;
+use http_body_util::Full;
+use hyper::{body::Bytes, server::conn::http1, service::service_fn, Response};
+use hyper_util::rt::TokioIo;
+
+#[tokio::main]
+async fn main() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+    loop {
+        let (stream, _) = listener.accept().await.unwrap();
+        tokio::spawn(async move {
+            let svc = service_fn(|_req| async {
+                Ok::<_, Infallible>(Response::new(Full::new(Bytes::from("ok"))))
+            });
+            let result = http1::Builder::new()
+                .pipeline_flush(true) // false: the 400 arrives
+                .serve_connection(TokioIo::new(stream), svc)
+                .await;
+            eprintln!("connection ended: {result:?}");
+        });
+    }
+}
+```
+
+```sh
+printf 'GET / HTTP/1.1\r\nHost: x\r\nno colon here\r\n\r\n' | nc 127.0.0.1 3000
+# expected: HTTP/1.1 400 Bad Request ...   actual: nothing, connection closed
+
+printf 'GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nno colon\r\n\r\n' | nc 127.0.0.1 3000
+# expected: HTTP/1.1 200 OK ... ok, then HTTP/1.1 400   actual: nothing
+```
+
+The server logs `connection ended: Err(hyper::Error(Parse(Header(Token))))`
+in both cases.
+
+**Cause**
+
+1. `Conn::on_read_head_error` (`src/proto/h1/conn.rs`, line 339) calls
+   `on_parse_error` (line 836), which queues the error head with
+   `write_head` and stores the error in `state.error`. The malformed bytes
+   stay in the read buffer (`consume_leading_lines` only strips leading
+   CRLFs).
+2. `Buffered::poll_flush` (`src/proto/h1/io.rs`, line 278) returns
+   `Ready(Ok(()))` without writing while `flush_pipeline && !read_buf.is_empty()`,
+   on the assumption that more pipelined requests are about to be parsed and
+   their responses batched.
+3. The read side is already closed, so nothing is parsed or flushed again.
+   `Dispatcher::poll_inner` (`src/proto/h1/dispatch.rs`, line 143) sees
+   `is_done()`, `take_error()` returns the parse error, and the connection,
+   with its unflushed write buffer, is dropped.
+
+**Suggested fix**
+
+Drop the unparseable input once the automatic response is queued: the
+connection closes after it and never reads that buffer again, and an empty
+read buffer lets `poll_flush` write. Error path only, so pipelined
+throughput is unaffected.
+
+```diff
+--- a/src/proto/h1/io.rs
++++ b/src/proto/h1/io.rs
+@@ -115,6 +115,11 @@
+         self.read_buf.as_ref()
+     }
+ 
++    /// Drop unread input: the connection will not parse it.
++    pub(crate) fn clear_read_buf(&mut self) {
++        self.read_buf.clear();
++    }
++
+     #[cfg(test)]
+     #[cfg(feature = "nightly")]
+     pub(super) fn read_buf_mut(&mut self) -> &mut BytesMut {
+--- a/src/proto/h1/conn.rs
++++ b/src/proto/h1/conn.rs
+@@ -843,6 +843,7 @@
+                 // assert in `write_head`...
+                 self.state.cached_headers.take();
+                 self.write_head(msg, None);
++                self.io.clear_read_buf();
+                 self.state.error = Some(err);
+                 return Ok(());
+             }
+```
+
+Verified against 1.12.0 with zapline's test suite through
+`[patch.crates-io]`: with `pipeline_flush(true)` a malformed head gets
+`400 Bad Request`, an oversized one `431 Request Header Fields Too Large`,
+and the pipelined case gets the `200` followed by the `400`.
+
+An alternative is to skip the pipeline shortcut in `Buffered::poll_flush`
+once the read side is closed (`Conn::poll_flush` knows `state.is_read_closed()`).
+
+A regression test: serve with `pipeline_flush(true)`, write
+`"GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nbad\r\n\r\n"` and expect
+a `200` followed by a `400` before EOF.

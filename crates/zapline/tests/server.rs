@@ -379,6 +379,72 @@ async fn oversized_request_heads_are_rejected() {
 }
 
 #[tokio::test]
+async fn malformed_request_heads_get_automatic_responses_without_pipeline_flush() {
+    let mut app = App::new().get("/", || async { "ok" });
+    app.server_config_mut().pipeline_flush = false;
+    let server = TestServer::spawn(app).await;
+
+    let bad_header = raw(
+        server.addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nno colon here\r\n\r\n",
+    )
+    .await;
+    assert!(bad_header.starts_with("HTTP/1.1 400"), "{bad_header}");
+    let bad_line = raw(server.addr, "GET\x01/ HTTP/1.1\r\nHost: x\r\n\r\n").await;
+    assert!(bad_line.starts_with("HTTP/1.1 400"), "{bad_line}");
+    let long_uri = format!("GET /{} HTTP/1.1\r\nHost: x\r\n\r\n", "a".repeat(70_000));
+    let long_uri = raw(server.addr, &long_uri).await;
+    assert!(long_uri.starts_with("HTTP/1.1 414"), "{long_uri}");
+    // A good request on a pipelined connection is still answered first.
+    let mixed = raw(
+        server.addr,
+        "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nno colon here\r\n\r\n",
+    )
+    .await;
+    assert!(mixed.starts_with("HTTP/1.1 200"), "{mixed}");
+    assert!(mixed.contains("HTTP/1.1 400"), "{mixed}");
+}
+
+/// Canary for the hyper issue described in `docs/src/server.md` ("Known
+/// limitations"): with `pipeline_flush` on, hyper queues the automatic
+/// 400/431 but drops it (and any unflushed pipelined responses) when it
+/// closes. When this fails after a hyper upgrade, the bug is fixed: update
+/// the docs, `ServerConfig::pipeline_flush` and ROADMAP.md, and turn this
+/// into a test that the responses arrive.
+#[tokio::test]
+async fn hyper_drops_automatic_error_responses_with_pipeline_flush() {
+    let app = App::new().get("/", || async { "ok" });
+    let server = TestServer::spawn(app).await;
+
+    let bad_header = raw(
+        server.addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nno colon here\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        bad_header, "",
+        "hyper now answers malformed heads: see the doc comment"
+    );
+    // The response to the good request before it is lost as well.
+    let mixed = raw(
+        server.addr,
+        "GET / HTTP/1.1\r\nHost: x\r\n\r\nGET / HTTP/1.1\r\nno colon here\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        mixed, "",
+        "hyper now flushes before closing: see the doc comment"
+    );
+    // The server itself is unaffected.
+    let ok = raw(
+        server.addr,
+        "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert!(ok.ends_with("ok"), "{ok}");
+}
+
+#[tokio::test]
 async fn silent_connections_are_dropped_after_the_header_timeout() {
     let mut app = App::new().get("/", || async { "ok" });
     app.server_config_mut().header_read_timeout = Some(Duration::from_millis(200));
@@ -416,6 +482,7 @@ fn server_config_defaults() {
     assert_eq!(c.header_read_timeout, Some(Duration::from_secs(30)));
     assert!(c.keep_alive && c.banner);
     assert_eq!(c.max_connections, None);
+    assert_eq!(c.max_upgraded, None);
     assert_eq!(c.http2, cfg!(feature = "http2"));
     assert_eq!(c.runtime, RuntimeMode::default());
     #[cfg(target_os = "linux")]

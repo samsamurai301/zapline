@@ -43,6 +43,16 @@
 //! the callback is never run. Test the conversation itself over a real
 //! socket with [`App::serve`](crate::App::serve) and a WebSocket client.
 //!
+//! # The server
+//!
+//! An upgraded socket keeps counting against
+//! [`ServerConfig::max_connections`](crate::server::ServerConfig::max_connections)
+//! (or its own
+//! [`max_upgraded`](crate::server::ServerConfig::max_upgraded) limit), and
+//! graceful shutdown waits for it: the socket sends a `1001` close frame
+//! the next time the callback reads or writes, and callbacks still running
+//! at the shutdown timeout are dropped.
+//!
 //! WebSockets over HTTP/2 (RFC 8441 extended `CONNECT`) are not supported.
 
 use std::fmt;
@@ -67,6 +77,7 @@ use tokio_tungstenite::WebSocketStream;
 use crate::extract::FromRequestParts;
 use crate::request::Request;
 use crate::response::{IntoResponse, Response};
+use crate::server::{Refused, ShutdownWatch};
 use crate::Error;
 
 /// Default maximum incoming message size: 16 MiB.
@@ -107,6 +118,7 @@ pub struct WebSocketUpgrade {
     offered: Vec<String>,
     selected: Option<HeaderValue>,
     on_upgrade: Option<OnUpgrade>,
+    upgrades: Option<crate::server::Upgrades>,
     config: Config,
 }
 
@@ -222,12 +234,30 @@ impl WebSocketUpgrade {
     /// The callback may return `()` or `Result<(), E>`; an `Err` is logged.
     /// Without a real connection to upgrade (the in-process test client) the
     /// `101` response is still returned but the callback never runs.
+    ///
+    /// The upgraded connection keeps counting against
+    /// [`ServerConfig::max_connections`](crate::server::ServerConfig::max_connections)
+    /// (or `max_upgraded`), and graceful shutdown waits for it: the socket
+    /// sends a `1001` close frame ([`close_code::AWAY`]) the next time it is
+    /// read from or written to, and the task is dropped when the shutdown
+    /// timeout ends. Upgrades are refused with `503` while the server shuts
+    /// down (`ws_shutting_down`) or when `max_upgraded` sockets are open
+    /// (`ws_too_many_connections`).
     pub fn on_upgrade<F, Fut>(self, callback: F) -> Response
     where
         F: FnOnce(WebSocket) -> Fut + Send + 'static,
         Fut: Future + Send + 'static,
         Fut::Output: CallbackResult,
     {
+        // Count and track the socket before the 101 goes out, while the HTTP
+        // connection still holds its own slot (see `server::upgrade`).
+        let admission = match (&self.on_upgrade, &self.upgrades) {
+            (Some(_), Some(upgrades)) => match upgrades.admit() {
+                Ok(a) => Some(a),
+                Err(refused) => return refused_response(refused),
+            },
+            _ => None,
+        };
         let accept = ts::handshake::derive_accept_key(self.key.as_bytes());
         let mut res = StatusCode::SWITCHING_PROTOCOLS.into_response();
         let h = res.headers_mut();
@@ -243,7 +273,8 @@ impl WebSocketUpgrade {
         if let Some(on_upgrade) = self.on_upgrade {
             let config = self.config.tungstenite();
             let protocol = self.selected;
-            tokio::spawn(async move {
+            let shutdown = admission.as_ref().map(|a| a.watch());
+            let task = async move {
                 let upgraded = match on_upgrade.await {
                     Ok(u) => u,
                     Err(e) => return log_upgrade_failed(&e),
@@ -254,13 +285,40 @@ impl WebSocketUpgrade {
                     Some(config),
                 )
                 .await;
-                if let Err(e) = callback(WebSocket { inner, protocol }).await.into_result() {
+                let socket = WebSocket {
+                    inner,
+                    protocol,
+                    shutdown,
+                    going_away: false,
+                };
+                if let Err(e) = callback(socket).await.into_result() {
                     log_callback_error(&e);
                 }
-            });
+            };
+            match admission {
+                Some(admission) => admission.spawn(task),
+                None => drop(tokio::spawn(task)),
+            }
         }
         res
     }
+}
+
+fn refused_response(refused: Refused) -> Response {
+    let err = match refused {
+        Refused::Full => Error::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "too many WebSocket connections, try again later",
+        )
+        .with_code("ws_too_many_connections"),
+        Refused::ShuttingDown => Error::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the server is shutting down",
+        )
+        .with_code("ws_shutting_down"),
+    };
+    err.with_header(http::header::RETRY_AFTER, HeaderValue::from_static("1"))
+        .into_response()
 }
 
 impl FromRequestParts for WebSocketUpgrade {
@@ -313,6 +371,7 @@ impl FromRequestParts for WebSocketUpgrade {
             offered,
             selected: None,
             on_upgrade: req.extensions_mut().remove::<OnUpgrade>(),
+            upgrades: req.shared.upgrades.clone(),
             config: Config {
                 max_message_size: Some(DEFAULT_MAX_MESSAGE_SIZE),
                 max_frame_size: Some(DEFAULT_MAX_FRAME_SIZE),
@@ -400,6 +459,10 @@ fn log_callback_error(e: &str) {
 pub struct WebSocket {
     inner: WebSocketStream<TokioIo<Upgraded>>,
     protocol: Option<HeaderValue>,
+    /// Graceful shutdown of the server this socket was accepted by.
+    shutdown: Option<ShutdownWatch>,
+    /// The shutdown close frame has been queued.
+    going_away: bool,
 }
 
 impl fmt::Debug for WebSocket {
@@ -470,10 +533,36 @@ impl WebSocket {
     }
 }
 
+impl WebSocket {
+    /// Once the server starts shutting down, queue a `1001` close frame
+    /// (once) and start flushing it. Reading on then completes the close
+    /// handshake, and later sends fail with `ws_closed`.
+    fn poll_going_away(&mut self, cx: &mut Context<'_>) {
+        if self.going_away || !self.shutdown.as_ref().is_some_and(ShutdownWatch::stopping) {
+            return;
+        }
+        let mut inner = Pin::new(&mut self.inner);
+        match inner.as_mut().poll_ready(cx) {
+            // Try again on the next poll.
+            Poll::Pending => return,
+            Poll::Ready(Err(_)) => {}
+            Poll::Ready(Ok(())) => {
+                let frame = Message::close(close_code::AWAY, "server shutting down");
+                // Fails only if a close is already under way.
+                if inner.as_mut().start_send(frame.into_tungstenite()).is_ok() {
+                    let _ = inner.as_mut().poll_flush(cx);
+                }
+            }
+        }
+        self.going_away = true;
+    }
+}
+
 impl Stream for WebSocket {
     type Item = Result<Message, Error>;
 
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        self.poll_going_away(cx);
         loop {
             return match ready!(Pin::new(&mut self.inner).poll_next(cx)) {
                 Some(Ok(msg)) => match Message::from_tungstenite(msg) {
@@ -491,6 +580,7 @@ impl Sink<Message> for WebSocket {
     type Error = Error;
 
     fn poll_ready(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Result<(), Error>> {
+        self.poll_going_away(cx);
         Pin::new(&mut self.inner).poll_ready(cx).map_err(ws_error)
     }
 
@@ -515,7 +605,11 @@ impl Sink<Message> for WebSocket {
 fn ws_error(e: ts::Error) -> Error {
     use ts::Error as E;
     let (status, code) = match &e {
-        E::ConnectionClosed | E::AlreadyClosed => (StatusCode::GONE, "ws_closed"),
+        E::ConnectionClosed
+        | E::AlreadyClosed
+        | E::Protocol(ts::error::ProtocolError::SendAfterClosing) => {
+            (StatusCode::GONE, "ws_closed")
+        }
         E::Capacity(_) | E::WriteBufferFull(_) => {
             (StatusCode::PAYLOAD_TOO_LARGE, "ws_message_too_large")
         }

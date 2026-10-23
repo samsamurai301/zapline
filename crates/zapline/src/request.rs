@@ -17,6 +17,9 @@ pub(crate) type StateEntry = (TypeId, Arc<dyn Any + Send + Sync>);
 pub(crate) struct Shared {
     pub(crate) states: Arc<[StateEntry]>,
     pub(crate) body_limit: usize,
+    /// The serving accept loop's WebSocket accounting (`None` in-process).
+    #[cfg(feature = "ws")]
+    pub(crate) upgrades: Option<crate::server::Upgrades>,
 }
 
 impl Shared {
