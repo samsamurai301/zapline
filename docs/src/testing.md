@@ -63,7 +63,7 @@ client.post("/users").json(&new_user).send().await
 
 ## Cookies and sessions
 
-`app.test()` is stateless: each request carries only the headers you set. `.with_cookies()` gives the client a cookie store, shared by its clones, that works like a browser's: it keeps every `Set-Cookie` (honoring `Path`, `Max-Age` and `Expires`, and deleting cookies set to expire) and sends matching cookies back in one `Cookie` header. That makes login flows one line per step:
+`app.test()` is stateless: each request carries only the headers you set. `.with_cookies()` gives the client a cookie store, shared by its clones, that works like a browser's: it keeps every `Set-Cookie` it is allowed to and sends the matching cookies back in one `Cookie` header. That makes login flows one line per step:
 
 ```rust
 let browser = app().test().with_cookies();
@@ -73,7 +73,58 @@ browser.post("/logout").send().await;
 assert_eq!(browser.cookie("zapline.sid"), None);
 ```
 
-Every request counts as same-site and secure, so `Secure` session cookies are sent too. Calling `.with_cookies()` again starts a separate store, e.g. for a second user.
+Calling `.with_cookies()` again starts a separate store, e.g. for a second user. The store applies the rules browsers do (RFC 6265 and 6265bis):
+
+| Attribute | In the test store |
+|---|---|
+| `Domain` | Without it, a cookie is host-only. With it, the cookie also goes to subdomains. A `Domain` the host doesn't belong to, or a public suffix (`com`, `co.uk`), is rejected. |
+| `Path` | Prefix match, defaulting to the request's directory. Longer paths are sent first. |
+| `Secure` | Stored and sent only on secure requests: `https`, or a loopback host such as the default `http://localhost`. A plain-`http` response can't overwrite a `Secure` cookie. |
+| `SameSite` | Applied to requests another page starts (below). `Strict` stays home on cross-site requests; `Lax` (also the default) goes only with safe top-level navigations; `None` always, and needs `Secure`. |
+| `Max-Age`, `Expires` | `Max-Age` wins. Expired cookies are deleted and never sent. |
+| `HttpOnly` | Kept, and hidden from `document_cookie`. |
+| `__Secure-`, `__Host-` | `__Secure-` needs `Secure`; `__Host-` also needs `Path=/` and no `Domain`. |
+
+Cookies you set with `.header("cookie", ..)` are sent first and win over stored ones with the same name.
+
+### Origins and cross-site requests
+
+Relative URIs go to `http://localhost` unless you pick the site with `.base_url("https://app.example.com")`: requests then get a `Host` header, and `https` makes them secure (`ConnInfo::secure`). Absolute URIs (`client.get("https://api.example.com/x")`) use their own origin.
+
+`.from_origin(url)` sends a request as if a page on `url` started it with a link or a form, and `.fetch_from(url)` as a `fetch` with credentials. They add the `Origin` and `Sec-Fetch-Site`/`Sec-Fetch-Mode` headers a browser would, and the store applies `SameSite`. Sites are compared like browsers do, by scheme and registrable domain, using a short built-in list of multi-label public suffixes (`co.uk`, `github.io`, ...) instead of the full Public Suffix List. So you can test CSRF defenses against what a browser would really send:
+
+```rust
+let browser = app().test().with_cookies().base_url("https://app.example.com");
+browser.post("/login").json(&credentials).send().await.assert_status(200);
+
+// A form on another site: the Lax session cookie stays home, and
+// `SameOrigin` refuses the request.
+browser.post("/transfer").from_origin("https://evil.example").send().await.assert_status(403);
+// A sibling subdomain is the same site, and the cookie goes along.
+browser.post("/transfer").from_origin("https://blog.example.com").send().await;
+```
+
+To look inside the store:
+
+| Method | Returns |
+|---|---|
+| `cookie(name)` | The value of a stored, unexpired cookie |
+| `cookies()` | Every stored cookie with its attributes (`domain`, `host_only`, `path`, `secure`, `http_only`, `same_site`, `expires`) |
+| `document_cookie(url)` | What `document.cookie` would return on that page: matching cookies that aren't `HttpOnly` |
+| `set_cookie(url, set_cookie)` | Stores a `Set-Cookie` as if that page sent it, with every rule applied, and returns whether it was accepted. Use it to simulate another site planting a cookie. |
+| `clear_cookies()` | Empties the store |
+
+```rust
+// JavaScript can read the CSRF token but never the session id.
+let js = browser.document_cookie("https://app.example.com/");
+assert!(js.contains("__Host-zapline.csrf=") && !js.contains("zapline.sid"));
+
+// evil.example.com can plant a cookie for all of example.com, but not a __Host- one.
+assert!(browser.set_cookie("https://evil.example.com/", "csrf=x; Domain=example.com"));
+assert!(!browser.set_cookie("https://evil.example.com/", "__Host-csrf=x; Domain=example.com; Path=/; Secure"));
+```
+
+Not modelled: redirects are not followed, there is no per-domain cookie limit or eviction, and the Chrome "Lax+POST" two-minute exception for cookies without a `SameSite` attribute is not applied.
 
 ## Lifecycle in tests
 
