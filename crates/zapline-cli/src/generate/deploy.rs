@@ -53,7 +53,7 @@ pub struct Facts {
     pub sqlite: bool,
     /// zapline's `postgres` feature is on: provision a Postgres database.
     pub postgres: bool,
-    /// zapline's `redis` feature is on: provision Redis.
+    /// zapline's `redis` (or `redis-tls`) feature is on: provision Redis.
     pub redis: bool,
     /// `/health/ready` exists (the `Health` plugin is installed).
     pub health: bool,
@@ -125,7 +125,7 @@ impl Facts {
             name: project.package_name.clone(),
             sqlite,
             postgres,
-            redis: feature("redis"),
+            redis: feature("redis") || feature("redis-tls"),
             health,
             reads_port: main.contains("\"PORT\""),
             secrets,
