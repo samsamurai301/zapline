@@ -53,8 +53,47 @@ Requirements: the `postgres` or `sqlite` feature, and `json` (on by default). `z
 |---|---|
 | `jobs.enqueue(job).await?` | as soon as a worker is free |
 | `jobs.enqueue_in(job, Duration::from_secs(3600)).await?` | after the delay |
+| `jobs.enqueue_at(job, SystemTime).await?` | at that time (right away if it has passed) |
 
 `Jobs` is an extractor, and also available from `Resources` (`res.require::<Jobs>()?`), so a job can enqueue follow-up jobs. Enqueueing a type that isn't registered in `.jobs(..)` is an error that names the missing `.register::<T>()`.
+
+All three return `Ok(true)` when the job was stored, and `Ok(false)` when it was a duplicate (below).
+
+## Unique jobs, priorities and queues
+
+Three optional items on `Job` shape how a type is queued:
+
+```rust
+impl Job for ReindexProduct {
+    const NAME: &'static str = "reindex_product";
+    const QUEUE: &'static str = "search";   // default "default"
+    const PRIORITY: i32 = -1;               // default 0; higher runs first
+
+    // At most one queued or running job per product.
+    fn unique_key(&self) -> Option<String> {
+        Some(self.product_id.to_string())
+    }
+
+    async fn run(self, res: Resources) -> Result<()> { /* ... */ Ok(()) }
+}
+```
+
+- **`unique_key`**: while a job of this type with the same key is queued or running, enqueueing another stores nothing and returns `Ok(false)`, so ten edits in a row reindex once. A partial unique index on `(name, unique_key)` enforces it, across instances too. Once the job has finished (or failed for good), the key is free. `enqueue` reports duplicates itself instead of a separate `enqueue_unique`, because uniqueness is a property of the job type: every caller gets it, whether or not it checks the result.
+- **`PRIORITY`**: due jobs are claimed highest priority first, then oldest first. A password-reset email (`10`) overtakes a backlog of newsletters (`-5`).
+- **`QUEUE`**: by default an instance's workers take jobs from every queue its registered types use. `.queues(..)` gives each queue its own workers instead, so a flood in one can't hold up another:
+
+```rust
+App::new()
+    .database(Database::from_env())
+    .jobs(|queue| {
+        queue
+            .register::<SendWelcome>()
+            .register::<ReindexProduct>()
+            .queues([("default", 4), ("search", 1)])   // or .queues(["default", "search"]) with .workers(n) each
+    })
+```
+
+An instance only works the queues it lists, so a dedicated search worker is the same app started with `.queues([("search", 8)])`.
 
 ## Workers, retries and failures
 
@@ -63,6 +102,7 @@ Requirements: the `postgres` or `sqlite` feature, and `json` (on by default). `z
 | Setting | Default | |
 |---|---|---|
 | `.workers(n)` | 4 | Jobs run at once in this instance. `0` runs none: useful in tests, or for web instances when a separate instance runs the jobs. |
+| `.queues([..])` | every queue in use, shared | Dedicated workers per queue: `("mail", 2)`, or a bare name for `.workers(n)` workers. |
 | `.poll_interval(d)` | 1 s | How often idle workers look for due jobs. Jobs enqueued by the same instance wake a worker at once. |
 | `.timeout(d)` | 5 min | A run that takes longer fails (and is retried). |
 
@@ -70,12 +110,17 @@ A failed run is retried after 5 s, 20 s, 80 s, 5 min, 21 min (capped at 1 h) unt
 
 ```rust
 let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
+for job in jobs.failed(20).await? {   // newest first: id, name, queue, attempts, last_error, payload
+    if job.name == "obsolete_job" {
+        jobs.discard(job.id).await?;  // delete it (also cancels a queued job)
+    }
+}
 let n = jobs.retry_failed().await?;   // queue every failed job again
 ```
 
-In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them.
+`retry_failed` leaves a failed job alone when a newer job holds its unique key. In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them all and a **Discard** button on each failed job.
 
-The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`.
+The table is `zapline_jobs` (created at startup), so plain SQL works for anything else: `SELECT name, last_error FROM zapline_jobs WHERE status = 'failed'`. A table created by an older zapline gets the `queue`, `priority` and `unique_key` columns added at startup; existing rows land in the `default` queue at priority 0.
 
 On Postgres, workers claim jobs with `FOR UPDATE SKIP LOCKED`, so any number of instances share one queue without running a job twice. SQLite serializes writes, which gives the same guarantee for a single server.
 

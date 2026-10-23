@@ -100,16 +100,75 @@ For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition 
 
 ## Migrations
 
-Migrations are plain SQL files in `migrations/`, applied in file-name order, each exactly once (sqlx tracks them in `_sqlx_migrations`).
+Migrations are plain SQL files in `migrations/`, applied in version order, each exactly once (sqlx tracks them in `_sqlx_migrations`). Each one is a pair: `<version>_<name>.up.sql` does the change and `<version>_<name>.down.sql` undoes it.
 
 ```sh
-zapline db new create_posts     # migrations/20261022062406_create_posts.sql
+zapline db new create_posts     # migrations/20261022062406_create_posts.up.sql + .down.sql
 zapline db migrate              # apply pending migrations, then exit
 ```
 
-The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
+The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+### Writing them for you
+
+`zapline g migration` writes both halves from the name:
+
+```sh
+zapline g migration create_comments body:text post_id:int   # CREATE TABLE / DROP TABLE
+zapline g migration add_email_to_users email                # ADD COLUMN / DROP COLUMN
+zapline g migration remove_legacy_from_posts legacy:bool    # DROP COLUMN / ADD COLUMN
+zapline g migration backfill_slugs                          # an empty pair to fill in
+```
+
+A required column added to an existing table gets a default (`''`, `0`, `FALSE`) so the rows already there stay valid. `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
+
+### Status, rollback, redo, reset
+
+```sh
+zapline db status               # every migration, applied or not, and edited files
+zapline db rollback             # revert the last migration with its .down.sql
+zapline db rollback --steps 3   # ... or the last three, newest first
+zapline db redo                 # revert the last one and apply it again
+zapline db reset                # revert everything, migrate, run the seed (development)
+```
+
+```text
+VERSION         NAME                APPLIED AT           STATE                  DOWN
+20260101000000  create todos        2026-10-23 08:54:03  applied                yes
+20261022062406  add email to users  2026-10-23 08:54:03  CHANGED since applied  yes
+20261023090000  create comments     -                    pending                yes
+
+2 applied, 1 pending
+```
+
+`CHANGED since applied` means the file was edited after it ran: the app refuses to start until it matches again (edit a migration that already shipped by adding a new one instead). Nothing is reverted unless every migration involved has a down file; a one-way migration from an older project (`<version>_<name>.sql`) becomes reversible when you add `<version>_<name>.down.sql` next to it. `zapline db new` keeps writing one-way files in a project whose migrations are all one-way, unless you pass `--reversible`.
+
+Every command but `new` runs your app with `ZAPLINE_MIGRATE=status|up|down:<n>|redo|reset` (plus `ZAPLINE_SEED=1` for `reset`), so it uses exactly the URL and settings the app uses; the app does the work and exits instead of serving. The same commands are there in code, for tests and one-off tools:
+
+```rust,ignore
+use zapline::db::{Migrations, MigrationState};
+
+let migrations = Migrations::open("migrations").await?;
+migrations.up(&pool).await?;
+let pending = migrations
+    .status(&pool)
+    .await?
+    .iter()
+    .filter(|m| m.state == MigrationState::Pending)
+    .count();
+migrations.down(&pool, 1).await?;
+```
+
+#### Guard rails
+
+Rolling back drops tables, so production is protected twice:
+
+- `zapline db rollback`, `redo` and `reset` refuse `--release` (a release build) and `APP_ENV`/`ZAPLINE_ENV=production` unless you add `--force`.
+- The app itself, built in release mode, refuses `ZAPLINE_MIGRATE=down:<n>`, `redo` and `reset` unless `ZAPLINE_ALLOW_DESTRUCTIVE=1` is set (`--force` sets it).
+
+The MCP tools `db_rollback`, `db_redo` and `db_reset` need `confirm=true`, so an assistant has to ask first.
 
 ## Seed data
 

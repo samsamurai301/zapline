@@ -32,7 +32,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Static files | `App::assets("/static", "static")` (`fs` feature): hashed URLs cached forever, `{{ asset('app.css') }}` in templates, `assets: Assets` + `assets.url("app.css")` in handlers; plain `ServeDir::new("public")` for anything else |
 | Database | `App::database(Database::from_env())` + `db: Db`, then `sqlx::query_as(..).fetch_one(&*db)` ([Databases](database.md)) |
 | List endpoints | `params: ListParams` + `Listing::new("posts", "id, title").sortable(["title"]).search(["title"]).filter_bool("done").fetch(&db, &params).await?` returns `Paged<T>` (`?limit=&offset=&sort=-id&q=&done=true`) |
-| Migrations | `zapline db new create_posts`, applied at startup or with `zapline db migrate` |
+| Migrations | `zapline db new create_posts` (up + down SQL), applied at startup or by `db migrate`; `db status/rollback/redo/reset` |
 | Test data / seeds | `Factory::new("posts").set("title", "Hi").create(&pool).await?` fills the other required columns (and parent rows) from the schema; `.create_many(&pool, 10)`; record `.int("id")`, `.json()`, `.parse::<Post>()`; `App::seed(\|db\| async move { .. })` + `zapline db seed` |
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
@@ -44,5 +44,5 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `g migration add_x_to_t x:int`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |

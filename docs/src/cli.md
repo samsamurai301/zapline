@@ -6,8 +6,12 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 |---|---|
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration, sqlx CRUD API, an htmx page (when `templates/base.html` exists) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`; `?` for optional. |
-| `zapline db new <name>` / `zapline db migrate` | Create a SQL migration / apply pending ones ([Databases](database.md)) |
+| `zapline db new <name> [--reversible\|--one-way]` / `zapline db migrate` | Create a SQL migration (an `.up.sql` + `.down.sql` pair) / apply pending ones ([Databases](database.md#migrations)) |
+| `zapline db status` | Every migration: version, name, when it was applied, whether its file changed since, and whether it has a down file |
+| `zapline db rollback [--steps N]` / `zapline db redo` | Revert the last N migrations with their `.down.sql` files / revert the last one and apply it again |
+| `zapline db reset` | Revert every migration, apply them all and insert the seed data. Development only: `rollback`, `redo` and `reset` refuse `--release` and `APP_ENV=production` unless `--force` ([guard rails](database.md#guard-rails)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
+| `zapline g migration <name> [field:type ...]` | A reversible migration written from its name: `create_<table>`, `add_<what>_to_<table>`, `remove_<what>_from_<table>` ([Databases](database.md#writing-them-for-you)) |
 | `zapline g handler <name> --method get --path /x` | Add a single route |
 | `zapline g middleware <name>` | Add a middleware function |
 | `zapline g job <name>` | A [durable job](jobs.md): `src/jobs/<name>.rs`, registered in `src/jobs/mod.rs` and `app()`, plus a test |
@@ -88,15 +92,17 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 |---|---|
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
-| `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth` | The files created and edited |
-| `db_new_migration` | Creates a migration, with its SQL if given |
-| `db_migrate` | Applies pending migrations |
+| `generate_resource`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_migration` | The files created and edited |
+| `db_new_migration` | Creates a migration, with its up (`sql`) and down (`down_sql`) SQL if given |
+| `db_migrate` | Applies pending migrations and names them |
+| `db_status` | The `zapline db status` table |
+| `db_rollback`, `db_redo`, `db_reset` | Revert migrations. They refuse to run without `confirm=true`, so the assistant asks you first |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
 | `typescript_client` | Writes the TypeScript client |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
+When the app does not compile, `routes`, `openapi` and the `db_*` tools answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
 
 Register it from the project directory:
 
