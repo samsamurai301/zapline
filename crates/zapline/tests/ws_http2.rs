@@ -299,3 +299,36 @@ async fn max_upgraded_refuses_h2_websockets() {
     server.stop();
     server.join().await.unwrap();
 }
+
+#[tokio::test]
+async fn h2_websockets_do_not_use_up_max_connections() {
+    let mut server = TestServer::spawn(app().max_connections(2)).await;
+    // One client, one connection, three sockets on it.
+    let mut sender = handshake(TcpStream::connect(server.addr).await.unwrap()).await;
+    let mut sockets = Vec::new();
+    for _ in 0..3 {
+        let (_, ws) = connect_ws(&mut sender, "http", None).await;
+        let mut ws = ws.expect("upgraded");
+        assert!(next_text(&mut ws).await.starts_with("hello GET"));
+        sockets.push(ws);
+    }
+    // Other clients are still served, one after the other.
+    for _ in 0..3 {
+        let out = tokio::time::timeout(
+            Duration::from_secs(5),
+            raw(
+                server.addr,
+                "GET /plain HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            ),
+        )
+        .await
+        .expect("a new connection was never served: the streams used up the limit");
+        assert!(out.ends_with("plain"), "{out}");
+    }
+    for mut ws in sockets {
+        ws.close(None).await.unwrap();
+    }
+    drop(sender);
+    server.stop();
+    server.join().await.unwrap();
+}

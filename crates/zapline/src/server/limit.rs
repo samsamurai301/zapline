@@ -6,7 +6,8 @@
 //! still holds its own, and the HTTP permit is released when hyper hands the
 //! socket over. The count is briefly one over the limit (the accept loop
 //! just waits a little longer), never under it, so a new connection cannot
-//! slip into the slot the WebSocket is about to occupy.
+//! slip into the slot the WebSocket is about to occupy. (An HTTP/2
+//! WebSocket takes no permit here: its connection keeps its own.)
 //!
 //! Only the accept loop waits for a permit, so there is a single waker.
 

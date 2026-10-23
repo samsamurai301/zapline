@@ -31,8 +31,11 @@ pub(crate) struct Upgrades {
 enum UpgradeLimit {
     /// No limit.
     None,
-    /// Count against `max_connections`; an upgrade takes over the slot of
-    /// the connection it came from, so it is never refused.
+    /// Count against `max_connections`. An HTTP/1.1 upgrade takes over the
+    /// slot of the connection it came from, so it is never refused. An
+    /// HTTP/2 WebSocket is one stream of a connection that stays open and
+    /// keeps its slot, so it is not counted again (the streams of one
+    /// connection are bounded by `http2_max_concurrent_streams`).
     Connections(Arc<Limit>),
     /// `max_upgraded`: a separate limit; upgrades beyond it are refused.
     Own(Arc<Limit>),
@@ -61,13 +64,18 @@ impl Upgrades {
     }
 
     /// Count and track one upgrade. Call it while the HTTP connection is
-    /// still alive (from the handler).
-    pub(crate) fn admit(&self) -> Result<Admission, Refused> {
+    /// still alive (from the handler). `h2`: an HTTP/2 extended CONNECT
+    /// stream (RFC 8441), whose connection keeps its own permit.
+    pub(crate) fn admit(&self, h2: bool) -> Result<Admission, Refused> {
         if self.signal.state() != RUNNING {
             return Err(Refused::ShuttingDown);
         }
         let permit = match &self.limit {
             UpgradeLimit::None => None,
+            // The HTTP/2 connection's permit is held until its last stream
+            // ends; taking another one per stream would let one client fill
+            // `max_connections` with streams on a single socket.
+            UpgradeLimit::Connections(_) if h2 => None,
             UpgradeLimit::Connections(l) => Some(l.acquire_over()),
             UpgradeLimit::Own(l) => Some(l.try_acquire().ok_or(Refused::Full)?),
         };

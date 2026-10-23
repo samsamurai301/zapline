@@ -160,8 +160,9 @@ pub struct ServerConfig {
     /// [`RuntimeMode::PerCore`], in total otherwise. At the limit the server
     /// stops accepting until a connection closes (the kernel backlog queues
     /// new ones). Upgraded (WebSocket) connections keep counting after the
-    /// upgrade, unless `max_upgraded` gives them their own limit. Default:
-    /// unlimited.
+    /// upgrade, unless `max_upgraded` gives them their own limit; an HTTP/2
+    /// WebSocket is a stream of a connection that is already counted.
+    /// Default: unlimited.
     pub max_connections: Option<usize>,
     /// Count upgraded (WebSocket) connections against this separate limit,
     /// per accept loop like `max_connections`, instead of against

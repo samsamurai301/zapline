@@ -260,7 +260,7 @@ impl WebSocketUpgrade {
         // Count and track the socket before the 101 goes out, while the HTTP
         // connection still holds its own slot (see `server::upgrade`).
         let admission = match (&self.on_upgrade, &self.upgrades) {
-            (Some(_), Some(upgrades)) => match upgrades.admit() {
+            (Some(_), Some(upgrades)) => match upgrades.admit(self.key.is_none()) {
                 Ok(a) => Some(a),
                 Err(refused) => return refused_response(refused),
             },
