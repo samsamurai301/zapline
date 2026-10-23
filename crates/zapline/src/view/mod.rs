@@ -241,7 +241,7 @@ impl Views {
             if html.is_none() && text.is_none() {
                 return Err(Error::internal(format!(
                     "no email template {name}.html or {name}.txt in {}",
-                    self.0.dir.display()
+                    self.inner.dir.path().display()
                 )));
             }
             let (html, html_subject) = html.map_or((None, None), |(b, s)| (Some(b), s));
