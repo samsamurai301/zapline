@@ -49,6 +49,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{Map, Value};
 
+use crate::auth::CsrfBinding;
 use crate::cookies::{random_token, Cookie, Key, SameSite};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
@@ -355,6 +356,14 @@ impl Middleware for SessionLayer {
             }),
         };
         req.extensions_mut().insert(SessionHandle(session.clone()));
+        // `Csrf` ran first (it is installed outside this layer): bind its
+        // token to this session now.
+        let csrf = req.extensions().get::<CsrfBinding>().cloned();
+        if let Some(csrf) = csrf {
+            if let Err(e) = csrf.bind(&mut req, &session) {
+                return Box::pin(ready(e.into_response()));
+            }
+        }
         Box::pin(async move {
             let mut res = next.run(req).await;
             if let Err(e) = session.commit(&mut res).await {
@@ -404,6 +413,9 @@ struct State {
     refresh: bool,
     /// Ids to delete from the store at the end of the request.
     stale: Vec<String>,
+    /// The request's CSRF token, bound to this session: rotated on commit
+    /// when the session id changes.
+    csrf: Option<CsrfBinding>,
 }
 
 /// The current session, from [`SessionLayer`]. Cheap to clone; all clones
@@ -436,6 +448,8 @@ struct Plan {
     save: Option<(String, SessionRecord)>,
     delete: Vec<String>,
     remove_cookie: bool,
+    /// The session id the client presents after this response.
+    next_id: Option<String>,
 }
 
 impl Session {
@@ -447,6 +461,37 @@ impl Session {
             let session = handle.ok_or_else(missing_layer)?.0;
             session.load().await?;
             Ok(session)
+        }
+    }
+
+    /// The session of `req` without loading it, if a layer is installed.
+    pub(crate) fn unloaded(req: &Request) -> Option<Session> {
+        req.extensions().get::<SessionHandle>().map(|h| h.0.clone())
+    }
+
+    /// The key that signs the session cookie.
+    pub(crate) fn cookie_key(&self) -> &Key {
+        &self.inner.key
+    }
+
+    /// The verified session id from the request's cookie, without touching
+    /// the store (the id may be unknown or expired there).
+    pub(crate) fn presented_id(&self) -> Option<String> {
+        let mut st = self.state();
+        self.parse_cookie(&mut st);
+        st.cookie_id.clone()
+    }
+
+    /// Rotate `csrf` with the session id when the session commits.
+    pub(crate) fn attach_csrf(&self, csrf: CsrfBinding) {
+        self.state().csrf = Some(csrf);
+    }
+
+    fn parse_cookie(&self, st: &mut State) {
+        if !st.parsed {
+            let cookies = std::mem::take(&mut st.cookies);
+            st.cookie_id = self.read_cookie(&cookies);
+            st.parsed = true;
         }
     }
 
@@ -466,11 +511,7 @@ impl Session {
             if let Some(cause) = &st.load_error {
                 return Err(store_unavailable().with_source(cause.clone()));
             }
-            if !st.parsed {
-                let cookies = std::mem::take(&mut st.cookies);
-                st.cookie_id = self.read_cookie(&cookies);
-                st.parsed = true;
-            }
+            self.parse_cookie(&mut st);
             st.cookie_id.clone()
         };
         let record = match &id {
@@ -609,6 +650,7 @@ impl Session {
         let mut st = self.state();
         let mut plan = Plan {
             delete: std::mem::take(&mut st.stale),
+            next_id: st.cookie_id.clone(),
             ..Plan::default()
         };
         // Not loaded (or the store failed): keep the client's cookie as is.
@@ -633,9 +675,11 @@ impl Session {
                 data: st.data.clone(),
                 expires_at,
             };
+            plan.next_id = Some(id.clone());
             plan.save = Some((id, record));
         } else if st.destroyed && st.had_cookie && st.id.is_none() {
             plan.remove_cookie = true;
+            plan.next_id = None;
         }
         Ok(plan)
     }
@@ -657,6 +701,10 @@ impl Session {
         };
         if let Some(value) = cookie.and_then(|c| HeaderValue::try_from(c).ok()) {
             res.headers_mut().append(SET_COOKIE, value);
+        }
+        let csrf = self.state().csrf.take();
+        if let Some(csrf) = csrf {
+            csrf.commit(plan.next_id.as_deref(), res)?;
         }
         Ok(())
     }

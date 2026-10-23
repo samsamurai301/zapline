@@ -62,6 +62,8 @@ pub use authenticate::{Authenticate, Authenticator, CurrentUser};
 pub use basic::{BasicAuth, BasicAuthConfig};
 pub use bearer::BearerToken;
 #[cfg(feature = "cookies")]
+pub(crate) use csrf::CsrfBinding;
+#[cfg(feature = "cookies")]
 pub use csrf::{Csrf, CsrfToken};
 pub use guard::{
     AllowAnonymous, Guard, HasRoles, RequireAuth, RequireRoles, RequireScopes, RoutePolicy,
