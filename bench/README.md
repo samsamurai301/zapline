@@ -1,5 +1,12 @@
 # Benchmarks
 
+Four harnesses:
+
+- this directory: zapline vs axum vs actix-web on identical trivial endpoints (below);
+- [`tfb/`](tfb/): the TechEmpower Framework Benchmarks implementation (all seven tests, against Postgres), its verifier and submission files;
+- [`compile/`](compile/): compile and rebuild times of scaffolded zapline apps vs equivalent axum and actix-web apps;
+- [`tokens/`](tokens/): how many tokens AI assistants spend on the CLI's output.
+
 `servers/` has three binaries that implement identical endpoints:
 
 | endpoint | response |

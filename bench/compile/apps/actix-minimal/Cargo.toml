@@ -1,0 +1,11 @@
+[package]
+name = "actix-minimal"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# The actix-web equivalent of `zapline new --template minimal`; see ../../README.md.
+[workspace]
+
+[dependencies]
+actix-web = "4"

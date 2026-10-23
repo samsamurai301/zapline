@@ -31,7 +31,7 @@ Run `./scripts/check.sh` to verify everything locally.
 ## Next milestones
 
 1. **Release:** push to the private repository `samsamurai301/zapline` (run `publish-to-github.ps1` or `.sh`) and watch the first CI run on Linux, macOS and Windows. When going public, publish `zapline-macros`, `zapline` and `zapline-cli` to crates.io (in that order) and the guide with GitHub Pages.
-2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. Prepare a TechEmpower Framework Benchmarks submission (needs the database tests: single query, multiple queries, fortunes, updates).
+2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. The TechEmpower implementation (`bench/tfb/`, all seven tests, verified locally with TFB's checks) still has to be opened as a pull request against TechEmpower/FrameworkBenchmarks once the commit it builds is pushed (`bench/tfb/README.md` has the steps). Consider exposing sqlx's `test_before_acquire` on `Database`: the ping it adds to every checkout cost about a quarter of single-query throughput in `bench/tfb`.
 3. **Distributed stores:** pluggable rate-limit and session stores (Redis), and JWKS / key rotation for JWT.
 4. **Scheduling:** full cron expressions, with job metrics.
 5. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).

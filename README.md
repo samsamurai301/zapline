@@ -182,6 +182,11 @@ _2 server workers on CPUs 0,1; wrk 2 threads / 256 connections on CPUs 2,3; best
 
 These numbers come from the complete framework with default features (OpenAPI, validation, tracing and so on compiled in). Features you don't use add no per-request cost. Hot-path changes are verified by instruction counts per request (callgrind), not only wall-clock time. Reproduce with `./bench/run.sh` (needs `wrk`), and please run it on your own hardware. Numbers from a 4-vCPU VM where the client and server share the machine are only useful for *relative* comparison. axum's pipelined result reflects that `axum::serve` doesn't enable hyper's pipeline flushing by default.
 
+Two more harnesses live in `bench/`, with their numbers and caveats in the [Performance](docs/src/performance.md) chapter:
+
+- [`bench/tfb/`](bench/tfb/): all seven TechEmpower Framework Benchmarks tests (plaintext, JSON, single and multiple queries, fortunes, updates, cached queries) against Postgres with TFB's schema, a verifier that applies TFB's checks, a local runner, and the files a TechEmpower submission needs. On a shared 4-vCPU VM (2 app workers, Postgres on one CPU) it served 17,276 single-query and 17,032 fortunes requests per second.
+- [`bench/compile/`](bench/compile/): cold build, check and edit-rebuild times for apps scaffolded with `zapline new` against the same apps in axum and actix-web. On the same VM the `api` template built cold in 26.1 s (axum 23.5 s, actix-web 40.2 s) and rebuilt after a handler edit in 1.3 s (axum 2.5 s, actix-web 2.9 s); the minimal template costs as much as the `api` one, about twice bare axum.
+
 ## Project status
 
 zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830 tests, an adversarial security review whose findings were fixed, and a compile-checked guide. [ROADMAP.md](ROADMAP.md) lists deferred items and next steps. Planned next:
@@ -190,7 +195,7 @@ zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830
 - [ ] Pluggable distributed stores for rate limiting and sessions (Redis)
 - [ ] Full cron expressions for scheduled jobs
 - [ ] OpenTelemetry OTLP exporter
-- [ ] TechEmpower Framework Benchmarks submission (with DB tests)
+- [ ] Submit to the TechEmpower Framework Benchmarks (the implementation, with all database tests, is ready in `bench/tfb/`)
 - [ ] Database integration guides (sqlx, SeaORM, Diesel)
 
 ## Contributing
