@@ -791,11 +791,24 @@ impl Dev<'_> {
             None if c.started.elapsed() >= HANDSHAKE_TIMEOUT => {
                 ui::status_warn(
                     "Direct",
-                    "the app did not report its address (does it use `App::run`?); \
-                     running it without the live reload proxy",
+                    format!(
+                        "the app did not report its address within {}s (slow startup, \
+                         or it does not use `App::run`); restarting it without the \
+                         live reload proxy",
+                        HANDSHAKE_TIMEOUT.as_secs()
+                    ),
                 );
                 self.direct = true;
-                self.promote(None);
+                // This process was told to listen behind the proxy: if it is
+                // only slow, it would bind an internal port nobody forwards
+                // to. Start it again told nothing, so it binds its own
+                // address once the proxy has let go of it.
+                if let Some(mut c) = self.candidate.take() {
+                    stop(&mut c.child, self.opts.grace);
+                    let _ = std::fs::remove_file(&c.handshake_file);
+                    self.hub.set_upstream(None, None);
+                    self.restart_direct(&c.exe);
+                }
             }
             None => {}
             Some((hs, _)) if hs.internal.is_none() => {
@@ -1485,6 +1498,77 @@ mod tests {
                 .stdout(Stdio::null())
                 .spawn()
                 .unwrap()
+        }
+
+        #[test]
+        fn a_late_handshake_restarts_the_app_without_the_proxy() {
+            let dir = tempfile::tempdir().unwrap();
+            let log = dir.path().join("runs.log");
+            let exe = dir.path().join("app.sh");
+            std::fs::write(
+                &exe,
+                format!(
+                    "#!/bin/sh\necho \"${{{ENV_DEV_PROXY}:-direct}}\" >> '{}'\nexec sleep 30\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let project = Project {
+                root: dir.path().to_path_buf(),
+                package_name: "demo".into(),
+                lib_name: None,
+                bins: vec!["demo".into()],
+                default_run: None,
+                edition: "2021".into(),
+                dependencies: Default::default(),
+                dev_dependencies: Default::default(),
+            };
+            let opts = DevOptions {
+                grace: Duration::from_secs(2),
+                ..DevOptions::default()
+            };
+            let mut dev = Dev::new(&project, &opts, "demo".into(), Arc::default());
+            // A candidate told to listen behind the proxy, still starting
+            // up when the wait for its handshake ends.
+            let handshake_file = dir.path().join("handshake.json");
+            let child = Command::new(&exe)
+                .env(ENV_DEV_PROXY, &handshake_file)
+                .stdout(Stdio::null())
+                .spawn()
+                .unwrap();
+            dev.candidate = Some(Candidate {
+                child,
+                exe: exe.clone(),
+                handshake_file,
+                started: Instant::now()
+                    .checked_sub(HANDSHAKE_TIMEOUT)
+                    .unwrap_or_else(Instant::now),
+                handshake: None,
+            });
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !log.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            dev.poll_candidate();
+            assert!(dev.candidate.is_none());
+            assert!(dev.direct);
+            let mut app = dev.app.take().expect("restarted directly");
+            // Run twice: behind the proxy, then without it.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let runs = loop {
+                let runs = std::fs::read_to_string(&log).unwrap_or_default();
+                if runs.lines().count() >= 2 || Instant::now() > deadline {
+                    break runs;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            stop(&mut app, Duration::from_secs(1));
+            let runs: Vec<&str> = runs.lines().collect();
+            assert_eq!(runs.len(), 2, "{runs:?}");
+            assert_ne!(runs[0], "direct");
+            assert_eq!(runs[1], "direct");
         }
 
         #[test]

@@ -122,7 +122,7 @@ browser ──▶ zapline dev proxy (the app's address, e.g. :8080)
 
 The cost in production is zero: the proxy is part of the CLI, and the app side is one environment check in `App::run` at startup. Some limits:
 
-- Apps served with TLS (`ServerConfig::tls`), on a Unix socket, or with `App::serve` on your own listener are run directly (no proxy), as with `--no-proxy`.
+- Apps served with TLS (`ServerConfig::tls`), on a Unix socket, or with `App::serve` on your own listener are run directly (no proxy), as with `--no-proxy`. An app that has not reported its address 60 seconds after starting (it does not use `App::run`, or its startup is that slow) is restarted without the proxy, so it binds its own address, and the session stays direct.
 - The browser talks HTTP/1.1 to the proxy; the app may still serve HTTP/2 to other clients.
 - Each open tab holds one event-stream connection; browsers allow about six HTTP/1.1 connections per host, so keep fewer than that many tabs of the app open.
 - The proxy remembers the app's address from the last run, so the overlay also works when the first build of a session fails. On the very first run in a project it learns the address when the app first starts.
