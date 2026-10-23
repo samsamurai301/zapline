@@ -1173,11 +1173,9 @@ pub fn run(project: &Project, opts: &ShipOptions) -> Result<()> {
                 .replacen("\nSHA256=''\n", &format!("\nSHA256={sha}\n"), 1);
     }
 
-    let staging = staging_dir(&plan);
-    fs::create_dir_all(&staging).with_context(|| format!("cannot create {}", staging.display()))?;
+    let staging = create_staging(&staging_dir(&plan))?;
     for (name, text) in plan.file_listing() {
-        fs::write(staging.join(name), text)
-            .with_context(|| format!("cannot write {}", staging.join(name).display()))?;
+        write_private(&staging.join(name), text)?;
     }
     let tty = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
     let result = (|| {
@@ -1229,6 +1227,59 @@ fn staging_dir(plan: &Plan) -> PathBuf {
         plan.app,
         std::process::id()
     ))
+}
+
+/// Creates a fresh, private directory named `stem` plus a random suffix:
+/// mode 0700 on unix, and never one that already exists, since `stem` is
+/// predictable and the temp dir is shared. The files in it hold `--env`
+/// secrets and the script the server runs.
+fn create_staging(stem: &Path) -> Result<PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    let mut last = None;
+    for attempt in 0u32..16 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u32(attempt);
+        h.write_u128(
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_nanos()),
+        );
+        let mut name = stem.as_os_str().to_owned();
+        name.push(format!(".{:016x}", h.finish()));
+        let path = PathBuf::from(name);
+        let mut builder = fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        match builder.create(&path) {
+            Ok(()) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => last = Some(path),
+            Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
+        }
+    }
+    bail!(
+        "cannot create a fresh staging directory (last tried {})",
+        last.map(|p| p.display().to_string()).unwrap_or_default()
+    )
+}
+
+/// Writes a new file readable only by the owner (0600 on unix), refusing to
+/// follow or overwrite anything already at `path`.
+fn write_private(path: &Path, text: &str) -> Result<()> {
+    use std::io::Write;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options
+        .open(path)
+        .and_then(|mut f| f.write_all(text.as_bytes()))
+        .with_context(|| format!("cannot write {}", path.display()))
 }
 
 /// Where cargo will put the binary (for `--dry-run`, which doesn't build).

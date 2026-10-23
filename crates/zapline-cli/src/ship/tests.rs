@@ -750,3 +750,37 @@ fn concurrent_deploys_are_refused() {
         "not ours to remove"
     );
 }
+
+/// The staging directory is never one that already exists (its name is
+/// predictable, in a shared temp dir), and on unix it and the secret files in
+/// it are private to the deployer.
+#[test]
+fn staging_is_fresh_and_private() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stem = tmp.path().join("zapline-stage.app.1.2");
+    // Someone pre-creates the predictable name: it is not reused.
+    fs::create_dir(&stem).unwrap();
+    let a = create_staging(&stem).unwrap();
+    let b = create_staging(&stem).unwrap();
+    assert_ne!(a, stem);
+    assert_ne!(a, b);
+    assert!(fs::read_dir(&a).unwrap().next().is_none());
+
+    write_private(&a.join("env.set"), "SECRET=x\n").unwrap();
+    assert_eq!(fs::read_to_string(a.join("env.set")).unwrap(), "SECRET=x\n");
+    // Never follows or overwrites what is already there.
+    assert!(write_private(&a.join("env.set"), "other").is_err());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &Path| fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&a), 0o700);
+        assert_eq!(mode(&a.join("env.set")), 0o600);
+        let target = tmp.path().join("victim");
+        fs::write(&target, "keep").unwrap();
+        std::os::unix::fs::symlink(&target, a.join("ship.sh")).unwrap();
+        assert!(write_private(&a.join("ship.sh"), "evil").is_err());
+        assert_eq!(fs::read_to_string(&target).unwrap(), "keep");
+    }
+}
