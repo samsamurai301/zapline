@@ -53,6 +53,9 @@ pub struct DevOptions {
     pub grace: Duration,
     /// Regenerate this TypeScript client after every successful build.
     pub client: Option<PathBuf>,
+    /// Start the app with `ZAPLINE_RECORD=1`: its dev console records
+    /// requests for `zapline snap`.
+    pub record: bool,
 }
 
 impl Default for DevOptions {
@@ -64,6 +67,7 @@ impl Default for DevOptions {
             debounce: Duration::from_millis(300),
             grace: Duration::from_secs(5),
             client: None,
+            record: false,
         }
     }
 }
@@ -335,6 +339,9 @@ impl Dev<'_> {
         // message, so you (or your AI assistant) see what broke.
         if std::env::var_os("ZAPLINE_DEV").is_none() {
             cmd.env("ZAPLINE_DEV", "1");
+        }
+        if self.opts.record {
+            cmd.env("ZAPLINE_RECORD", "1");
         }
         match cmd.spawn() {
             Ok(child) => {

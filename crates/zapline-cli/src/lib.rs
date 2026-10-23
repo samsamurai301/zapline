@@ -25,6 +25,7 @@ pub mod openapi;
 pub mod project;
 pub mod render;
 pub mod routes;
+pub mod snap;
 pub mod tailwind;
 pub mod templates;
 pub mod ui;
@@ -171,9 +172,16 @@ pub fn execute(cli: Cli) -> Result<()> {
                         )),
                         None => None,
                     },
+                    record: a.record,
                     ..dev::DevOptions::default()
                 },
             )
+        }
+        Command::Snap(a) => {
+            let url = a
+                .url
+                .unwrap_or_else(|| snap::default_url(|k| std::env::var(k).ok()));
+            snap::run(&a.name, &url)
         }
         Command::Routes(a) => {
             let project = Project::discover(Path::new("."))?;

@@ -23,6 +23,8 @@ Examples:
   zapline new todo --template fullstack    HTML + htmx + SQLite + JSON API, zero setup
   zapline dev                              Rebuild and restart on every change
   zapline dev -- --port 9000               Pass arguments to your app
+  zapline dev --record                     Record requests to turn into tests
+  zapline snap signup                      Save the recording as tests/snapshots/signup.json
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
   zapline g handler ping --method get      Add a single route
   zapline g middleware audit               Add a middleware function
@@ -91,8 +93,26 @@ Examples:
   zapline dev
   zapline dev --bin server
   zapline dev --client web/src/api.ts   Also keep a typed TypeScript client up to date
+  zapline dev --record                  Record requests for `zapline snap` (ZAPLINE_RECORD=1)
   zapline dev -- --port 9000")]
     Dev(DevArgs),
+
+    /// Save the requests the running app recorded as snapshot tests
+    #[command(after_long_help = "\
+Asks the running app's dev console (debug builds with `.dev_console()`) to write what it
+recorded to tests/snapshots/<NAME>.json, and tests/snapshots.rs, which replays every
+snapshot with `app().test().replay_snapshots(\"tests/snapshots\")`, if there is none yet.
+The recording is then emptied. Each replayed response must keep its status and body;
+timestamps, UUIDs, tokens and ids may differ. Authorization and cookie values are never
+recorded.
+
+Record with `zapline dev --record` (or the Start button at /_dev), use the app, then:
+
+Examples:
+  zapline snap signup
+  zapline snap checkout --url http://127.0.0.1:3000
+  ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test --test snapshots   Accept changed responses")]
+    Snap(SnapArgs),
 
     /// Print the app's route table
     #[command(after_long_help = "\
@@ -371,6 +391,10 @@ pub struct DevArgs {
     #[arg(long, value_name = "FILE")]
     pub client: Option<PathBuf>,
 
+    /// Record requests and responses from startup, for `zapline snap`
+    #[arg(long)]
+    pub record: bool,
+
     /// How long (ms) files must stay quiet before rebuilding
     #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]
     pub debounce_ms: u64,
@@ -378,6 +402,18 @@ pub struct DevArgs {
     /// Arguments passed to the app (after `--`)
     #[arg(last = true, value_name = "APP_ARGS")]
     pub app_args: Vec<String>,
+}
+
+/// Arguments of `zapline snap`.
+#[derive(Debug, Args)]
+pub struct SnapArgs {
+    /// Snapshot name: tests/snapshots/<NAME>.json (letters, digits, `-`, `_`)
+    pub name: String,
+
+    /// Where the app listens [default: from ADDR or PORT like the app's main, else
+    /// http://127.0.0.1:8080]
+    #[arg(long, value_name = "URL")]
+    pub url: Option<String>,
 }
 
 /// Arguments of `zapline routes`.
@@ -552,6 +588,25 @@ mod tests {
         assert_eq!(d.bin.as_deref(), Some("server"));
         assert_eq!(d.app_args, ["--port", "9000"]);
         assert_eq!(d.debounce_ms, 300);
+        assert!(!d.record);
+        let Command::Dev(d) = parse(&["dev", "--record"]).command else {
+            panic!()
+        };
+        assert!(d.record);
+    }
+
+    #[test]
+    fn snap_takes_a_name_and_an_optional_url() {
+        let Command::Snap(s) = parse(&["snap", "signup"]).command else {
+            panic!()
+        };
+        assert_eq!((s.name.as_str(), s.url), ("signup", None));
+        let Command::Snap(s) = parse(&["snap", "x", "--url", "http://127.0.0.1:3000"]).command
+        else {
+            panic!()
+        };
+        assert_eq!(s.url.as_deref(), Some("http://127.0.0.1:3000"));
+        assert!(Cli::try_parse_from(["zapline", "snap"]).is_err());
     }
 
     #[test]
