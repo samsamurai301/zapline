@@ -48,6 +48,8 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
 | `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
 | `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
+| `chrono` | `full` | `zapline::chrono` (`NaiveDate`, `DateTime<Utc>`) with sqlx, serde and OpenAPI support; `extract::datetime` for `datetime-local` inputs ([Databases](database.md#dates-times-and-uuids)) | | `chrono` |
+| `uuid` | `full` | `zapline::uuid::Uuid` with sqlx, serde and OpenAPI support ([Databases](database.md#dates-times-and-uuids)) | | `uuid` |
 
 With `postgres` or `sqlite` (and `json`), `zapline::jobs` adds [durable jobs](jobs.md) stored in the same database. With `postgres` or `sqlite`, `App::admin` adds an [admin panel](admin.md) for every table.
 | `full` | | Every feature above except the database backends (pick `postgres` and/or `sqlite`) | all | |

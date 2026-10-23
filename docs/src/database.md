@@ -96,7 +96,7 @@ async fn list(db: Db, params: ListParams) -> Result<Json<Paged<Post>>> {
 
 Nothing from the request reaches the SQL text: values are bound as parameters, and sort columns must be on the allow-list. Bad input is a `400` with code `invalid_sort`, `invalid_filter` or `invalid_page`, and the message lists what's allowed.
 
-For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition the request can't remove. `zapline generate resource` writes a `listing()` like this for every resource, with sorting on every column, search on the text fields and a filter per field. It works on SQLite and Postgres, and `ListParams` documents `limit`, `offset`, `sort` and `q` in the OpenAPI spec.
+For per-user or per-tenant lists, `.scope("user_id", user.id)` adds a condition the request can't remove. `zapline generate resource` writes a `listing()` like this for every resource, with sorting on every column but long text, search on the text fields and a filter per string, number, boolean and reference field; a reference (`author:references`) also gets a nested list, `GET /api/authors/{id}/posts`, which is `listing().scope("author_id", id)`. It works on SQLite and Postgres, and `ListParams` documents `limit`, `offset`, `sort` and `q` in the OpenAPI spec.
 
 ## Migrations
 
@@ -107,9 +107,45 @@ zapline db new create_posts     # migrations/20261022062406_create_posts.sql
 zapline db migrate              # apply pending migrations, then exit
 ```
 
+`zapline g migration` writes the SQL too, from the name and `field:type` arguments ([CLI](cli.md#migrations-from-the-command-line)):
+
+```sh
+zapline g migration add_published_at_to_posts published_at:datetime?   # ALTER TABLE posts ADD COLUMN ...
+zapline g migration create_tags name slug                             # CREATE TABLE tags (...)
+```
+
 The app also applies pending migrations at startup, so `zapline dev` and deploys need no extra step. Turn that off with `Database::from_env().migrate(false)`, or read them from elsewhere with `.migrations("db/migrations")`. `.migrations(zapline::embed!("migrations"))` compiles them into the binary, with the same checksums as the files ([One binary](deployment.md#one-binary-one-command)). `zapline db migrate` runs your app with `ZAPLINE_MIGRATE_ONLY=1`, so it uses exactly the URL and settings the app uses.
 
 > In Docker, copy `migrations/` next to the binary (the generated Dockerfiles do).
+
+## Dates, times and UUIDs
+
+Turn on zapline's `chrono` and `uuid` features and use `zapline::chrono` and `zapline::uuid` in models: sqlx, serde and the OpenAPI schema (`format: date`, `date-time`, `uuid`) all understand them, with no extra dependencies. `zapline g resource` turns the features on when its fields need them.
+
+```rust,ignore
+use zapline::chrono::{DateTime, NaiveDate, Utc};
+use zapline::uuid::Uuid;
+
+#[model]
+#[derive(sqlx::FromRow)]
+pub struct Event {
+    pub id: i64,
+    pub day: NaiveDate,             // DATE on Postgres, TEXT ("2026-01-31") on SQLite
+    pub starts_at: DateTime<Utc>,   // TIMESTAMPTZ / TEXT
+    pub token: Uuid,                // UUID / BLOB
+    pub created_at: DateTime<Utc>,  // DEFAULT CURRENT_TIMESTAMP works on both
+}
+
+#[model]
+pub struct NewEvent {
+    pub day: NaiveDate,
+    // Accepts RFC 3339 and what <input type="datetime-local"> sends ("2026-01-31T09:30", as UTC).
+    #[serde(deserialize_with = "zapline::extract::datetime")]
+    pub starts_at: DateTime<Utc>,
+}
+```
+
+`zapline::extract::optional_datetime` is the same for an `Option<DateTime<Utc>>` field (empty means `None`).
 
 ## Seed data
 

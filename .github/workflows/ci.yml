@@ -72,7 +72,7 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz; do
+          for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
             echo "::group::$f"
             cargo check -p zapline --no-default-features --features "$f"
             echo "::endgroup::"
@@ -170,6 +170,9 @@ jobs:
             if [ "$t" = fullstack ]; then
               # The database-backed generator must produce code that builds and passes its tests.
               (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool \
+                && "$ROOT/target/debug/zapline" g resource author name \
+                && "$ROOT/target/debug/zapline" g resource post title body:text published_on:date 'starts_at:datetime?' 'token:uuid?' author:references \
+                && "$ROOT/target/debug/zapline" g migration add_rating_to_authors rating:int \
                 && "$ROOT/target/debug/zapline" g auth && "$ROOT/target/debug/zapline" g job send_welcome)
             fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)

@@ -198,6 +198,43 @@ async fn postgres_factories() {
     exec(&setup, &format!("DROP SCHEMA {schema} CASCADE")).await;
 }
 
+/// Required `UUID`, `DATE` and `TIMESTAMPTZ` columns (what `zapline g
+/// resource` writes for `uuid`, `date` and `datetime` fields) get valid values.
+#[cfg(feature = "postgres")]
+#[tokio::test]
+async fn postgres_factories_fill_uuid_and_date_columns() {
+    let Ok(url) = std::env::var("ZAPLINE_TEST_POSTGRES_URL") else {
+        eprintln!("skipped: ZAPLINE_TEST_POSTGRES_URL is not set");
+        return;
+    };
+    let schema = format!("factory_types_{}", std::process::id());
+    let setup: Pool<sqlx::Postgres> = Pool::connect(&url).await.unwrap();
+    exec(
+        &setup,
+        &format!("DROP SCHEMA IF EXISTS {schema} CASCADE; CREATE SCHEMA {schema};"),
+    )
+    .await;
+    let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect_with(options.options([("search_path", schema.as_str())]))
+        .await
+        .unwrap();
+    exec(
+        &pool,
+        "CREATE TABLE events (id BIGSERIAL PRIMARY KEY, token UUID NOT NULL, \
+         day DATE NOT NULL, at TIMESTAMPTZ NOT NULL)",
+    )
+    .await;
+    let a = Factory::new("events").create(&pool).await.unwrap();
+    let b = Factory::new("events").create(&pool).await.unwrap();
+    let token = a.get("token").unwrap();
+    assert_eq!(token.len(), 36, "{token}");
+    assert_ne!(a.get("token"), b.get("token"));
+    assert_eq!(a.get("day").unwrap().len(), 10);
+    exec(&setup, &format!("DROP SCHEMA {schema} CASCADE")).await;
+}
+
 /// `App::seed` runs only under `zapline db seed` (ZAPLINE_SEED), which exits
 /// the process; here we check that normal starts skip it.
 #[cfg(feature = "sqlite")]

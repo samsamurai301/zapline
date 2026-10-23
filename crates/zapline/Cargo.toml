@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views",
-    "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "redis-tls", "otlp", "tz",
+    "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -46,6 +46,10 @@ jwks = ["jwt", "_http-client"]
 cookies = ["json", "dep:cookie", "dep:getrandom", "dep:hmac", "dep:sha2"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
+# `zapline::chrono` / `zapline::uuid`, with serde, sqlx and OpenAPI support
+# wired up so apps can use these types in models without new dependencies.
+chrono = ["dep:chrono", "sqlx?/chrono", "schemars?/chrono04"]
+uuid = ["dep:uuid", "sqlx?/uuid", "schemars?/uuid1"]
 views = ["dep:minijinja"]
 password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
@@ -101,6 +105,8 @@ webpki-roots = { version = "1", optional = true }
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
 lettre = { version = "0.11.19", optional = true, default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1-rustls", "ring", "webpki-roots"] }
 minijinja = { version = "2.24", optional = true, features = ["loader"] }
+chrono = { version = "0.4.38", optional = true, default-features = false, features = ["std", "now", "serde"] }
+uuid = { version = "1.10", optional = true, default-features = false, features = ["std", "serde", "v4"] }
 sqlx = { version = "0.8.6", optional = true, default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros"] }
 # HTTP/3 (experimental). h3 is pre-1.0, so pin exact versions.
 quinn = { version = "0.11.9", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }

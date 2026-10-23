@@ -467,6 +467,64 @@ where
     deserializer.deserialize_any(form_helpers::Checkbox)
 }
 
+/// Serde helper for `<input type="datetime-local">`: accepts what browsers
+/// send (`2026-01-31T09:30`, read as UTC) as well as RFC 3339
+/// (`2026-01-31T09:30:00Z`, `2026-01-31T10:30:00+01:00`), so one struct can
+/// take both forms and JSON.
+///
+/// ```
+/// # use serde::Deserialize;
+/// use zapline::chrono::{DateTime, Utc};
+///
+/// #[derive(Deserialize)]
+/// struct Meeting {
+///     #[serde(deserialize_with = "zapline::extract::datetime")]
+///     starts_at: DateTime<Utc>,
+/// }
+///
+/// let m: Meeting = serde_json::from_str(r#"{"starts_at": "2026-01-31T09:30"}"#).unwrap();
+/// assert_eq!(m.starts_at.to_rfc3339(), "2026-01-31T09:30:00+00:00");
+/// ```
+#[cfg(all(feature = "form", feature = "chrono"))]
+pub fn datetime<'de, D>(deserializer: D) -> Result<chrono::DateTime<chrono::Utc>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match optional_datetime(deserializer)? {
+        Some(t) => Ok(t),
+        None => Err(serde::de::Error::custom("a date and time is required")),
+    }
+}
+
+/// [`datetime`] for an optional field: empty or `null` is `None`. Pair it
+/// with `#[serde(default)]` so a missing field is `None` too.
+///
+/// ```
+/// # use serde::Deserialize;
+/// use zapline::chrono::{DateTime, Utc};
+///
+/// #[derive(Deserialize)]
+/// struct Task {
+///     #[serde(default, deserialize_with = "zapline::extract::optional_datetime")]
+///     due_at: Option<DateTime<Utc>>,
+/// }
+///
+/// let t: Task = serde_json::from_str(r#"{"due_at": ""}"#).unwrap();
+/// assert!(t.due_at.is_none());
+/// ```
+#[cfg(all(feature = "form", feature = "chrono"))]
+pub fn optional_datetime<'de, D>(
+    deserializer: D,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let loose = deserializer.deserialize_any(
+        form_helpers::Loose::<form_helpers::LocalDateTime>(std::marker::PhantomData),
+    )?;
+    Ok(loose.map(|t| t.0))
+}
+
 #[cfg(feature = "form")]
 mod form_helpers {
     use std::fmt;
@@ -520,6 +578,33 @@ mod form_helpers {
         }
         fn visit_some<D: Deserializer<'de>>(self, d: D) -> Result<Self::Value, D::Error> {
             d.deserialize_any(self)
+        }
+    }
+
+    /// A UTC time parsed from RFC 3339 or a `datetime-local` value.
+    #[cfg(feature = "chrono")]
+    pub(super) struct LocalDateTime(pub(super) chrono::DateTime<chrono::Utc>);
+
+    #[cfg(feature = "chrono")]
+    impl FromStr for LocalDateTime {
+        type Err = String;
+        fn from_str(s: &str) -> Result<Self, String> {
+            if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+                return Ok(LocalDateTime(t.with_timezone(&chrono::Utc)));
+            }
+            for format in [
+                "%Y-%m-%dT%H:%M:%S%.f",
+                "%Y-%m-%dT%H:%M",
+                "%Y-%m-%d %H:%M:%S%.f",
+                "%Y-%m-%d %H:%M",
+            ] {
+                if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, format) {
+                    return Ok(LocalDateTime(t.and_utc()));
+                }
+            }
+            Err(format!(
+                "`{s}` is not a date and time (expected e.g. `2026-01-31T09:30` or `2026-01-31T09:30:00Z`)"
+            ))
         }
     }
 
