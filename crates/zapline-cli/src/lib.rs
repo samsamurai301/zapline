@@ -1,8 +1,8 @@
 //! # zapline-cli
 //!
-//! The `zapline` command-line tool: project scaffolding, code generators, a
-//! live-reload dev server, route and OpenAPI inspection, benchmarking and
-//! toolchain diagnostics.
+//! The `zapline` command-line tool: project scaffolding, one-file apps, code
+//! generators, a live-reload dev server, route and OpenAPI inspection,
+//! benchmarking and toolchain diagnostics.
 //!
 //! The binary is a thin wrapper around [`main_with`]; everything is also
 //! available as a library so it can be tested.
@@ -25,6 +25,7 @@ pub mod openapi;
 pub mod project;
 pub mod render;
 pub mod routes;
+pub mod script;
 pub mod tailwind;
 pub mod templates;
 pub mod ui;
@@ -33,7 +34,7 @@ pub mod ui;
 mod test_util;
 
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -115,12 +116,34 @@ pub fn execute(cli: Cli) -> Result<()> {
             .with_context(|| format!("cannot change to directory {}", dir.display()))?;
     }
     match cli.command {
+        Command::New(a) if a.name.ends_with(".rs") => {
+            if let Some(t) = a.template {
+                anyhow::bail!(
+                    "`--template {}` makes a project; `{}` is a one-file app\n\
+                     hint: drop `.rs` from the name for a project",
+                    t.name(),
+                    a.name
+                );
+            }
+            let file = if a.path == Path::new(".") {
+                PathBuf::from(&a.name)
+            } else {
+                a.path.join(&a.name)
+            };
+            script::run_new(&file, a.zapline_path.as_deref())
+        }
         Command::New(a) => new::run(&new::NewOptions {
             name: a.name,
-            template: a.template,
+            template: a.template.unwrap_or(templates::Template::Api),
             parent: a.path,
             zapline_path: a.zapline_path,
             git: !a.no_git,
+        }),
+        Command::Run(a) => script::run(&script::RunOptions {
+            file: a.file(),
+            release: a.release,
+            args: a.app_args(),
+            print_manifest: a.print_manifest,
         }),
         Command::Generate(g) => {
             let here = Path::new(".");
@@ -155,28 +178,28 @@ pub fn execute(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Dev(a) => {
-            let project = Project::discover(Path::new("."))?;
-            dev::run(
-                &project,
-                &dev::DevOptions {
-                    bin: a.bin,
-                    release: a.release,
-                    app_args: a.app_args,
-                    debounce: Duration::from_millis(a.debounce_ms),
-                    client: match a.client {
-                        Some(c) => Some(openapi::resolve_output(
-                            &std::env::current_dir()
-                                .context("cannot determine the current directory")?,
-                            &c,
-                        )),
-                        None => None,
-                    },
-                    ..dev::DevOptions::default()
+            let opts = dev::DevOptions {
+                bin: a.bin,
+                release: a.release,
+                app_args: a.app_args,
+                debounce: Duration::from_millis(a.debounce_ms),
+                client: match a.client {
+                    Some(c) => Some(openapi::resolve_output(
+                        &std::env::current_dir()
+                            .context("cannot determine the current directory")?,
+                        &c,
+                    )),
+                    None => None,
                 },
-            )
+                ..dev::DevOptions::default()
+            };
+            match &a.file {
+                Some(file) => dev::run_script(&script::open(file)?, &opts),
+                None => dev::run(&Project::discover(Path::new("."))?, &opts),
+            }
         }
         Command::Routes(a) => {
-            let project = Project::discover(Path::new("."))?;
+            let project = project_or_script(a.file.as_deref())?;
             routes::run(&project, a.bin.as_deref(), a.json)
         }
         Command::Openapi(a) => {
@@ -195,12 +218,22 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             db::seed(&project, bin.as_deref())
         }
-        Command::Check { clippy } => {
-            let project = Project::discover(Path::new("."))?;
+        Command::Check { file, clippy } => {
+            let project = project_or_script(file.as_deref())?;
             finish(brief::check(&project, clippy)?)
         }
-        Command::Test { filter } => {
-            let project = Project::discover(Path::new("."))?;
+        Command::Test { first, filter } => {
+            // `zapline test [app.rs] [filter]`: a first argument ending in
+            // `.rs` is a one-file app, anything else is the filter.
+            let (file, filter) = match (first, filter) {
+                (Some(f), filter) if f.ends_with(".rs") => (Some(PathBuf::from(f)), filter),
+                (first, None) => (None, first),
+                (Some(f), Some(_)) => anyhow::bail!(
+                    "`{f}` is not a one-file app (a path ending in .rs); give one test filter"
+                ),
+                (None, Some(filter)) => (None, Some(filter)),
+            };
+            let project = project_or_script(file.as_deref())?;
             finish(brief::test(&project, filter.as_deref())?)
         }
         Command::Client(a) => {
@@ -224,6 +257,14 @@ pub fn execute(cli: Cli) -> Result<()> {
             let cfg = bench::configure(&a.url, a.connections, &a.duration, a.threads, cpus)?;
             bench::run(&cfg, a.raw)
         }
+    }
+}
+
+/// The hidden project of a one-file app, or the project around the current directory.
+fn project_or_script(file: Option<&Path>) -> Result<Project> {
+    match file {
+        Some(file) => script::project(file),
+        None => Project::discover(Path::new(".")),
     }
 }
 

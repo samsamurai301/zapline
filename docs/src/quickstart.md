@@ -13,6 +13,9 @@ zapline dev                                 # build, run, and restart on every c
 
 Open <http://localhost:8080/docs> for the interactive API docs, and run `cargo test` for the generated tests.
 
+Or skip the project entirely: `zapline new hello.rs && zapline dev hello.rs` gives you the same in a
+single file, dependencies declared at its top ([One-file apps](one-file.md)).
+
 ## By hand
 
 ```toml

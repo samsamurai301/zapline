@@ -16,6 +16,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 ## Getting started
 
 - [Quickstart](https://samsamurai301.github.io/zapline/quickstart.html): cargo install --path crates/zapline-cli     # installs `zapline` and `cargo zapline`
+- [One-file apps](https://samsamurai301.github.io/zapline/one-file.html): A whole zapline app can live in a single `.rs` file, with no `Cargo.toml`, no
 - [Cheatsheet](https://samsamurai301.github.io/zapline/cheatsheet.html): One runnable file showing the canonical way to do each common task: models with validation, handlers, errors, dependency injection, middleware, route groups, Op
 - [Project layout & the CLI](https://samsamurai301.github.io/zapline/cli.html): The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev server, and talks to your app to print its routes or export its OpenAPI document
 - [Coming from FastAPI, Spring, NestJS, axum or actix](https://samsamurai301.github.io/zapline/comparison.html): zapline will feel familiar. Extractors, `IntoResponse` and `State` work the same way. The differences:

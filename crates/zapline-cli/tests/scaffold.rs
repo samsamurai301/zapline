@@ -237,3 +237,55 @@ fn routes_and_openapi_work_on_a_real_project() {
     assert!(spec["paths"]["/users"]["post"].is_object(), "{spec}");
     assert!(spec["paths"]["/users/{id}"]["delete"].is_object(), "{spec}");
 }
+
+/// `zapline new hello.rs`: the one-file starter compiles against this checkout,
+/// passes the tests inside it, serves its routes and passes clippy.
+#[test]
+#[ignore = "slow: compiles zapline"]
+fn one_file_starter_builds_and_passes_its_tests() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let zapline_cmd = |args: &[&str]| {
+        let out = zapline()
+            .args(args)
+            .current_dir(dir)
+            .env("XDG_CACHE_HOME", dir.join("cache"))
+            .env("CARGO_TARGET_DIR", target_dir())
+            .output()
+            .expect("zapline runs");
+        (
+            out.status.success(),
+            format!("{}{}", stdout(&out), stderr(&out)),
+        )
+    };
+    let checkout = zapline_checkout();
+    let (ok, text) = zapline_cmd(&[
+        "new",
+        "hello.rs",
+        "--zapline-path",
+        checkout.to_str().unwrap(),
+    ]);
+    assert!(ok, "{text}");
+    // Start from the workspace's lockfile, like the project tests.
+    let (ok, manifest) = zapline_cmd(&["run", "--print-manifest", "hello.rs"]);
+    assert!(ok, "{manifest}");
+    let lock = checkout.join("../../Cargo.lock");
+    if lock.is_file() {
+        fs::copy(
+            lock,
+            Path::new(manifest.trim()).with_file_name("Cargo.lock"),
+        )
+        .unwrap();
+    }
+
+    let (ok, tests) = zapline_cmd(&["test", "hello.rs"]);
+    assert!(ok, "{tests}");
+    assert!(tests.contains("2 passed"), "{tests}");
+    let (ok, routes) = zapline_cmd(&["routes", "hello.rs"]);
+    assert!(ok, "{routes}");
+    for route in ["/hello/{name}", "/notes"] {
+        assert!(routes.contains(route), "{routes}");
+    }
+    let (ok, lints) = zapline_cmd(&["check", "--clippy", "hello.rs"]);
+    assert!(ok && lints.contains("no errors, no warnings"), "{lints}");
+}

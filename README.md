@@ -64,7 +64,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Observability | `tracing` spans per request, exported to any OpenTelemetry backend over OTLP (set `OTEL_EXPORTER_OTLP_ENDPOINT`, no SDK); Prometheus `/metrics` with route labels; `/health/live` and `/health/ready` with checks |
 | Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
 | Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases and one-line test data (`Factory::new("posts").create(&pool)` fills required columns and parent rows from the schema) plus seeds (`zapline db seed`); accounts in one command (`zapline g auth`: Argon2id, database sessions, password reset by email, GitHub/Google login, htmx pages); durable jobs with retries in the same database; email with a dev inbox; file storage on disk or S3 with expiring links; caching (stampede-free `get_or_set`, page caching, ETags); live updates pushed to every open page over SSE or WebSockets; shared cache, live updates, rate limits and sessions in Redis for running several instances (built-in client); translations (TOML per language, `Accept-Language`, plurals, `t()` in templates); an admin panel at `/admin` for every table, read from the schema (search, sort, edit, no code per table); a dev console at `/_dev` (routes, recent requests, job queue, inbox); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
-| Tooling | `zapline new` (minimal, api, full and fullstack templates), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `g tailwind` (Tailwind CSS with no Node, rebuilt live by `dev`), `g deploy fly\|railway\|render\|compose`, `routes`, `openapi`, `doctor`, `bench` |
+| Tooling | `zapline new` (minimal, api, full and fullstack templates, or `hello.rs` for a [one-file app](docs/src/one-file.md) run by `zapline run`/`dev`), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `g tailwind` (Tailwind CSS with no Node, rebuilt live by `dev`), `g deploy fly\|railway\|render\|compose`, `routes`, `openapi`, `doctor`, `bench` |
 
 ## Getting started
 
@@ -80,6 +80,34 @@ zapline dev                                                      # http://localh
 Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, an admin panel for the accounts in `ADMIN_EMAILS`, and 13 end-to-end tests, about 100 lines beyond what the CLI generated.
 
 Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
+
+### A full app in one file
+
+No `Cargo.toml`, no project directory: one `.rs` file with its dependencies at the top.
+
+```rust
+#!/usr/bin/env -S zapline run
+//! ```cargo
+//! [dependencies]
+//! uuid = { version = "1", features = ["v4"] }   # zapline, serde, serde_json and tokio are built in
+//! ```
+use zapline::prelude::*;
+
+#[get("/ids/new")]
+async fn new_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn main() -> std::io::Result<()> {
+    App::new().mount(new_id).run("0.0.0.0:8080")
+}
+```
+
+```sh
+zapline run ids.rs        # or ./ids.rs; `zapline dev ids.rs` reloads on save, `zapline test ids.rs` runs its tests
+```
+
+Every one-file app shares one compiled dependency cache, and an unchanged file starts in milliseconds without running cargo. Errors in the header or the code point at your file and line. `zapline new hello.rs` writes a starter. See [One-file apps](docs/src/one-file.md).
 
 zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
 

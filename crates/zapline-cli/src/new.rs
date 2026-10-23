@@ -114,7 +114,7 @@ pub fn zapline_dependency(source: &ZaplineSource, features: &[&str]) -> String {
 }
 
 /// An absolute, symlink-free path where possible (no `\\?\` prefixes on Windows).
-fn absolute(path: &Path) -> Result<PathBuf> {
+pub(crate) fn absolute(path: &Path) -> Result<PathBuf> {
     if cfg!(windows) {
         std::path::absolute(path).with_context(|| format!("cannot resolve {}", path.display()))
     } else {

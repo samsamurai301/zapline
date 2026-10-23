@@ -1,0 +1,85 @@
+#!/usr/bin/env -S zapline run
+//! @@name@@: a whole zapline app in one file.
+//!
+//!     zapline dev @@file@@     # serve on http://localhost:8080, restart on every save
+//!     zapline run @@file@@     # build (cached) and run; arguments go after `--`
+//!     zapline test @@file@@    # run the tests at the bottom of this file
+//!
+//! Dependencies go in the `cargo` block below, in Cargo.toml syntax. zapline,
+//! serde, serde_json and tokio are always there; list them only to change
+//! their version or features, e.g. `zapline = { features = ["ws"] }`.
+//!
+//! ```cargo
+//! [dependencies]
+@@dependencies@@
+//! ```
+
+use zapline::prelude::*;
+
+/// `GET /`: a plain-text greeting.
+#[get("/")]
+async fn index() -> &'static str {
+    "Hello from @@name@@!"
+}
+
+/// `GET /hello/{name}`: path parameters are parsed for you.
+#[get("/hello/{name}")]
+async fn hello(Path(name): Path<String>) -> String {
+    format!("Hello, {name}!")
+}
+
+/// A note. `#[model]` derives serde, JSON Schema and validation rules.
+#[model]
+struct Note {
+    #[validate(length(min = 1, max = 280))]
+    text: String,
+}
+
+/// Create a note: the body is parsed and validated (422 with per-field errors).
+#[post("/notes", status = 201)]
+async fn create_note(Valid(Json(note)): Valid<Json<Note>>) -> (StatusCode, Json<Note>) {
+    (StatusCode::CREATED, Json(note))
+}
+
+/// The application: the same value serves traffic and runs the tests.
+fn app() -> App {
+    App::new()
+        .mount((index, hello, create_note))
+        .openapi(OpenApi::new("@@name@@", "0.1.0")) // /openapi.json + interactive docs at /docs
+}
+
+fn main() -> std::io::Result<()> {
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".into());
+    app().run(format!("0.0.0.0:{port}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn index_greets() {
+        let res = app().test().get("/").send().await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(res.text(), "Hello from @@name@@!");
+    }
+
+    #[tokio::test]
+    async fn notes_are_validated() {
+        let client = app().test();
+        let res = client
+            .post("/notes")
+            .json(&serde_json::json!({ "text": "ship it" }))
+            .send()
+            .await;
+        assert_eq!(res.status(), 201);
+        assert_eq!(res.json::<Note>().text, "ship it");
+
+        let res = client
+            .post("/notes")
+            .json(&serde_json::json!({ "text": "" }))
+            .send()
+            .await;
+        assert_eq!(res.status(), 422);
+    }
+}
