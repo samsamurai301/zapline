@@ -146,6 +146,9 @@ pub fn execute(cli: Cli) -> Result<()> {
                 GenerateKind::Job { name } => {
                     generate::job::generate(&Project::discover(here)?, &name, g.force)?
                 }
+                GenerateKind::Migration { name, fields } => {
+                    generate::migration::generate(&Project::discover(here)?, &name, &fields)?
+                }
                 GenerateKind::Deploy { target } => {
                     generate::deploy::generate(&Project::discover(here)?, target, g.force)?
                 }
@@ -183,13 +186,40 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             openapi::run(&project, a.bin.as_deref(), &a.output)
         }
-        Command::Db(DbCommand::New { name }) => {
+        Command::Db(DbCommand::New {
+            name,
+            reversible,
+            one_way,
+        }) => {
             let project = Project::discover(Path::new("."))?;
-            db::new(&project.root, &name)
+            let style = match (reversible, one_way) {
+                (true, _) => Some(db::Style::Reversible),
+                (_, true) => Some(db::Style::OneWay),
+                _ => None,
+            };
+            db::new(&project.root, &name, style)
         }
         Command::Db(DbCommand::Migrate { bin }) => {
             let project = Project::discover(Path::new("."))?;
-            db::migrate(&project, bin.as_deref())
+            db::migrate(&project, bin.as_deref()).map(drop)
+        }
+        Command::Db(DbCommand::Status { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            let rows = db::status(&project, bin.as_deref())?;
+            print!("{}", db::render_status(&rows, ui::stdout_color()));
+            Ok(())
+        }
+        Command::Db(DbCommand::Rollback { steps, target }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::rollback(&project, steps, db_target(&target)).map(drop)
+        }
+        Command::Db(DbCommand::Redo { target }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::redo(&project, db_target(&target)).map(drop)
+        }
+        Command::Db(DbCommand::Reset { target }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::reset(&project, db_target(&target)).map(drop)
         }
         Command::Db(DbCommand::Seed { bin }) => {
             let project = Project::discover(Path::new("."))?;
@@ -224,6 +254,15 @@ pub fn execute(cli: Cli) -> Result<()> {
             let cfg = bench::configure(&a.url, a.connections, &a.duration, a.threads, cpus)?;
             bench::run(&cfg, a.raw)
         }
+    }
+}
+
+/// The `--bin`, `--release` and `--force` of `db rollback`/`redo`/`reset`.
+fn db_target(args: &cli::DestructiveArgs) -> db::Target<'_> {
+    db::Target {
+        bin: args.bin.as_deref(),
+        release: args.release,
+        force: args.force,
     }
 }
 

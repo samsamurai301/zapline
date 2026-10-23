@@ -9,9 +9,8 @@ use std::path::PathBuf;
 use anyhow::{bail, Result};
 
 use super::db_resource::Dialect;
-use super::{
-    apply, crate_name_of, existing_migration, plan_route_registration, warn_if_not_zapline, Report,
-};
+use super::{apply, crate_name_of, plan_route_registration, warn_if_not_zapline, Report};
+use crate::db::MigrationFiles;
 use crate::project::Project;
 use crate::render::{render, OutputFile};
 use crate::templates;
@@ -41,23 +40,30 @@ pub fn files(
     dialect: Dialect,
     html: bool,
     with_test: bool,
-    migration: &str,
+    migration: &MigrationFiles,
 ) -> Result<Vec<OutputFile>> {
     let vars = [("crate_name", krate), ("package", package)];
-    let mut files = vec![
-        OutputFile {
-            path: PathBuf::from(format!("migrations/{migration}")),
-            contents: match dialect {
-                Dialect::Sqlite => templates::AUTH_MIGRATION_SQLITE,
-                Dialect::Postgres => templates::AUTH_MIGRATION_POSTGRES,
-            }
-            .to_string(),
-        },
-        OutputFile {
-            path: PathBuf::from("src/routes/auth.rs"),
-            contents: render(&html_sections(templates::AUTH, html), &vars)?,
-        },
-    ];
+    let mut files = vec![OutputFile {
+        path: PathBuf::from(format!("migrations/{}", migration.up)),
+        contents: match dialect {
+            Dialect::Sqlite => templates::AUTH_MIGRATION_SQLITE,
+            Dialect::Postgres => templates::AUTH_MIGRATION_POSTGRES,
+        }
+        .to_string(),
+    }];
+    if let Some(down) = &migration.down {
+        files.push(OutputFile {
+            path: PathBuf::from(format!("migrations/{down}")),
+            contents:
+                "-- Reverts the accounts tables: run by `zapline db rollback`.\n\
+                       DROP TABLE oauth_accounts;\nDROP TABLE password_resets;\nDROP TABLE users;\n"
+                    .to_string(),
+        });
+    }
+    files.push(OutputFile {
+        path: PathBuf::from("src/routes/auth.rs"),
+        contents: render(&html_sections(templates::AUTH, html), &vars)?,
+    });
     if html {
         for (name, tmpl) in [
             ("signup", templates::AUTH_SIGNUP_PAGE),
@@ -200,10 +206,7 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
         && lib.contains("pub fn app(db: Database)")
         && dialect == Dialect::Sqlite;
     // Regenerating (--force) rewrites the existing migration instead of adding a second one.
-    let migration = match existing_migration(project, "_create_users.sql") {
-        Some(name) => name,
-        None => crate::db::new_migration_name(&project.root, "create_users")?,
-    };
+    let migration = MigrationFiles::plan(&project.root, "create_users")?;
     let krate = crate_name_of(project);
     let files = files(
         &project.package_name,
@@ -243,6 +246,7 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::Style;
 
     #[test]
     fn html_sections_are_kept_or_dropped() {
@@ -295,7 +299,7 @@ mod tests {
             Dialect::Sqlite,
             true,
             true,
-            "1_create_users.sql",
+            &MigrationFiles::new("1_create_users", Style::Reversible),
         )
         .unwrap();
         let paths: Vec<_> = all
@@ -305,7 +309,8 @@ mod tests {
         assert_eq!(
             paths,
             [
-                "migrations/1_create_users.sql",
+                "migrations/1_create_users.up.sql",
+                "migrations/1_create_users.down.sql",
                 "src/routes/auth.rs",
                 "templates/auth/signup.html",
                 "templates/auth/login.html",
@@ -315,17 +320,19 @@ mod tests {
             ]
         );
         assert!(all[0].contents.contains("AUTOINCREMENT"));
-        assert!(all[1].contents.contains("signup_form"));
-        assert!(all[6].contents.contains("use my_app::app;"));
+        assert!(all[1].contents.contains("DROP TABLE users;"));
+        assert!(all[2].contents.contains("signup_form"));
+        assert!(all[7].contents.contains("use my_app::app;"));
         assert!(all[0].contents.contains("CREATE TABLE password_resets"));
 
+        // A project of one-way migrations gets no down file.
         let api = files(
             "my-app",
             "my_app",
             Dialect::Postgres,
             false,
             false,
-            "1_create_users.sql",
+            &MigrationFiles::new("1_create_users", Style::OneWay),
         )
         .unwrap();
         assert_eq!(api.len(), 2);

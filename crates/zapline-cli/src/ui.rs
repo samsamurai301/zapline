@@ -130,6 +130,15 @@ pub fn bold(color: bool, text: impl Display) -> String {
     paint(color, BOLD, text)
 }
 
+/// Colours a migration state for `zapline db status`.
+pub fn migration_state_color(state: &str) -> &'static str {
+    match state {
+        "applied" => GREEN,
+        "pending" => YELLOW,
+        _ => RED,
+    }
+}
+
 /// Colours an HTTP method for the route table.
 pub fn method_color(method: &str) -> &'static str {
     match method {

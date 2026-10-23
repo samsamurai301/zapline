@@ -8,6 +8,7 @@ pub mod auth;
 pub mod db_resource;
 pub mod deploy;
 pub mod job;
+pub mod migration;
 pub mod register;
 
 use std::fs;
@@ -348,13 +349,10 @@ fn sql_resource(
         html,
         test_crate: testable.then_some(krate.as_str()),
         // Regenerating (--force) rewrites the existing migration instead of adding a second one.
-        migration_name: match existing_migration(project, &format!("_create_{}.sql", names.plural))
-        {
-            Some(name) => name,
-            None => {
-                crate::db::new_migration_name(&project.root, &format!("create_{}", names.plural))?
-            }
-        },
+        migration: crate::db::MigrationFiles::plan(
+            &project.root,
+            &format!("create_{}", names.plural),
+        )?,
     };
     let files = db_resource::files(&plan);
 
@@ -411,16 +409,6 @@ pub fn resource(dir: &Path, name: &str, plural: Option<&str>, force: bool) -> Re
 }
 
 /// The crate name tests import: the library name, or the package name as a fallback.
-/// The file name of an existing migration ending in `suffix`.
-fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
-    let dir = project.root.join(crate::db::MIGRATIONS_DIR);
-    fs::read_dir(dir)
-        .ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .find(|n| n.ends_with(suffix))
-}
-
 fn crate_name_of(project: &Project) -> String {
     project
         .lib_name

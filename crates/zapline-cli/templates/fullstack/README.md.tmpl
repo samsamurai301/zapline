@@ -35,8 +35,11 @@ in debug builds.
 ## Common tasks
 
 ```sh
-zapline db new add_due_date          # new migration in migrations/
+zapline g migration add_due_date_to_todos due:string?   # .up.sql + .down.sql
 zapline db migrate                   # apply migrations without starting the server
+zapline db status                    # what is applied, what is pending
+zapline db rollback                  # undo the last migration (its .down.sql)
+zapline db reset                     # rebuild the schema and seed it (development)
 zapline generate resource project    # CRUD module + tests, registered for you
 zapline routes                       # the route table
 ```
