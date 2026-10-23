@@ -6163,7 +6163,7 @@ Browsers don't try HTTP/3 first. They learn about it from the `Alt-Svc` header, 
 How it behaves:
 
 - Requests have `version() == Version::HTTP_3` and `ConnInfo::secure == true`. Request bodies stream, so the body limit, `Json<T>` and `BodyStream` work as over TCP. Responses stream too (SSE, `StreamBody`, trailers), and `Content-Length` is set when the body size is known.
-- `max_header_size` limits the HTTP/3 header section, `tls_handshake_timeout` bounds the QUIC handshake, and `max_connections` caps QUIC connections separately from TCP ones. QUIC has no kernel backlog, so connections over the limit are refused and clients fall back to TCP.
+- `max_header_size` limits the HTTP/3 header section, `header_read_timeout` bounds how long a request stream may take to send its headers, `tls_handshake_timeout` bounds the QUIC handshake, and `max_connections` caps QUIC connections separately from TCP ones. QUIC has no kernel backlog, so connections over the limit are refused and clients fall back to TCP.
 - Graceful shutdown sends `GOAWAY`: requests in flight finish, new ones are refused, and the UDP socket stops accepting connections. After `shutdown_timeout` the remaining connections are closed.
 - With `App::run`, HTTP/3 runs on its own runtime (`workers` threads, named `zapline-h3`). With `App::serve`, it runs on your runtime and binds UDP on the listener's address. `App::run_unix` with HTTP/3 fails with `InvalidInput`.
 - The startup line shows it: `zapline listening on https://0.0.0.0:8443 (..., HTTP/1.1 + HTTP/2, TLS + HTTP/3 on UDP 0.0.0.0:8443)`.

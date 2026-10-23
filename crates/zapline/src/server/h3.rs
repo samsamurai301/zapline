@@ -53,6 +53,7 @@ pub(crate) struct H3Listener {
 struct Settings {
     max_field_section_size: Option<u64>,
     handshake_timeout: Duration,
+    header_read_timeout: Option<Duration>,
     max_connections: Option<usize>,
     shutdown_timeout: Duration,
 }
@@ -97,6 +98,7 @@ pub(crate) fn bind(
         settings: Settings {
             max_field_section_size: config.max_header_size.map(|n| n as u64),
             handshake_timeout: config.tls_handshake_timeout,
+            header_read_timeout: config.header_read_timeout,
             max_connections: config.max_connections,
             shutdown_timeout: config.shutdown_timeout,
         },
@@ -263,7 +265,8 @@ impl Conn {
                 // Keeps driving the control stream while draining, too.
                 r = h3.accept(), if accepting => match r {
                     Ok(Some(resolver)) => {
-                        requests.spawn(request(resolver, self.app.clone(), info));
+                        let timeout = self.settings.header_read_timeout;
+                        requests.spawn(request(resolver, self.app.clone(), info, timeout));
                     }
                     Ok(None) => accepting = false,
                     // The client closed, or the connection timed out.
@@ -303,8 +306,18 @@ async fn request(
     resolver: RequestResolver<h3_quinn::Connection, Bytes>,
     app: Arc<AppInner>,
     conn: ConnInfo,
+    header_timeout: Option<Duration>,
 ) {
-    let Ok((req, stream)) = resolver.resolve_request().await else {
+    // Like HTTP/1.1's header read timeout: a stream that never sends its
+    // headers must not hold a stream slot forever.
+    let resolved = match header_timeout {
+        Some(t) => match tokio::time::timeout(t, resolver.resolve_request()).await {
+            Ok(r) => r,
+            Err(_) => return,
+        },
+        None => resolver.resolve_request().await,
+    };
+    let Ok((req, stream)) = resolved else {
         return;
     };
     let (mut send, recv) = stream.split();
