@@ -41,10 +41,11 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
-| Dev loop | `zapline dev`: templates, translations and static files reload open pages without a restart, CSS swaps in place, Rust changes rebuild and swap with no downtime, compile errors show in the browser ([The dev loop](cli.md#the-dev-loop-zapline-dev)) |
+| Dev loop | `zapline dev`: templates, translations and static files reload without a restart, CSS swaps in place, Rust changes swap with no downtime, compile errors show in the browser ([The dev loop](cli.md#the-dev-loop-zapline-dev)) |
 | Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| Fuzz every route | `app().test().fuzz().await.assert_clean()` (requests from the OpenAPI schemas); `zapline fuzz` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `fuzz`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| Fuzz every route | `app().test().fuzz().await.assert_clean()` or `zapline fuzz` |
+| Tests from traffic | `zapline dev --record`, use the app, `zapline snap signup`; replayed by `app().test().replay_snapshots("tests/snapshots")` |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `fuzz`, `client -o web/api.ts` (typed TS client), `snap <name>`, `check`, `test`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |

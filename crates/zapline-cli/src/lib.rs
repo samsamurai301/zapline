@@ -27,6 +27,7 @@ pub mod project;
 pub mod render;
 pub mod routes;
 pub mod script;
+pub mod snap;
 pub mod tailwind;
 pub mod templates;
 pub mod ui;
@@ -193,12 +194,19 @@ pub fn execute(cli: Cli) -> Result<()> {
                     )),
                     None => None,
                 },
+                record: a.record,
                 ..dev::DevOptions::default()
             };
             match &a.file {
                 Some(file) => dev::run_script(&script::open(file)?, &opts),
                 None => dev::run(&Project::discover(Path::new("."))?, &opts),
             }
+        }
+        Command::Snap(a) => {
+            let url = a
+                .url
+                .unwrap_or_else(|| snap::default_url(|k| std::env::var(k).ok()));
+            snap::run(&a.name, &url)
         }
         Command::Routes(a) => {
             let project = project_or_script(a.file.as_deref())?;

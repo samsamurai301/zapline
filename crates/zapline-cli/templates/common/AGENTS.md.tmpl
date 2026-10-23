@@ -13,6 +13,7 @@ zapline fuzz                        # every route vs. its OpenAPI schemas (tests
 zapline check [--clippy]            # one line per error/warning, with the fix
 cargo fmt
 zapline dev                         # run with live reload on :8080
+zapline dev --record; zapline snap <name>   # record real requests as tests/snapshots/<name>.json
 zapline routes --json               # machine-readable route table
 zapline openapi -o openapi.json     # the API contract, generated from code
 zapline generate resource <name>    # new CRUD module + tests, auto-registered

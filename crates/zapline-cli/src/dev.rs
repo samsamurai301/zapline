@@ -99,6 +99,9 @@ pub struct DevOptions {
     /// Run the live reload proxy (browser reload, CSS hot swap, error
     /// overlay, zero-downtime swaps). `false` runs the app directly.
     pub proxy: bool,
+    /// Start the app with `ZAPLINE_RECORD=1`: its dev console records
+    /// requests for `zapline snap`.
+    pub record: bool,
 }
 
 impl Default for DevOptions {
@@ -111,6 +114,7 @@ impl Default for DevOptions {
             grace: Duration::from_secs(5),
             client: None,
             proxy: true,
+            record: false,
         }
     }
 }
@@ -625,6 +629,9 @@ impl Dev<'_> {
         // and translations are read again when they change.
         if std::env::var_os("ZAPLINE_DEV").is_none() {
             cmd.env("ZAPLINE_DEV", "1");
+        }
+        if self.opts.record {
+            cmd.env("ZAPLINE_RECORD", "1");
         }
         cmd
     }

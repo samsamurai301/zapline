@@ -647,7 +647,8 @@ mod tests {
         let text = docs(None);
         assert!(text.contains("#[get("), "{text}");
         assert!(text.contains("Pages: "));
-        assert!(text.len() < 12_000);
+        // About 3k tokens: the cheatsheet, its example file and the page list.
+        assert!(text.len() < 13_000, "{}", text.len());
     }
 
     #[test]

@@ -23,6 +23,8 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json]` | Export the OpenAPI document |
+| `zapline dev --record` | Same, with `ZAPLINE_RECORD=1`: the dev console records requests for `zapline snap` |
+| `zapline snap <name> [--url URL]` | Save what the running app recorded as `tests/snapshots/<name>.json`, plus `tests/snapshots.rs` the first time ([snapshot tests](testing.md#snapshot-tests-from-real-traffic)). The URL defaults to the app's `ADDR`/`PORT`, else `http://127.0.0.1:8080` |
 | `zapline client [-o client.ts]` | Generate a typed TypeScript client for the JSON API ([below](#typescript-client-zapline-client)). `zapline dev --client <file>` keeps it up to date |
 | `zapline doctor` | Check rustc and cargo versions, git, docker and wrk |
 | `zapline bench <url> [-c 256 -d 10s -t N]` | Load-test with wrk |

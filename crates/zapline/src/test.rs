@@ -26,6 +26,9 @@
 //!   sends hundreds of requests generated from the app's OpenAPI schemas
 //!   to every route and reports panics, 5xx, undeclared statuses and
 //!   responses that break their schema (see `TestClient::fuzz`).
+//! - **Snapshots**: [`TestClient::replay_snapshots`] replays traffic
+//!   recorded in the [dev console](crate::dev) and fails with a diff when a
+//!   response changed.
 //!
 //! ```
 //! # use zapline::prelude::*;
@@ -65,6 +68,8 @@ use crate::router::RouteInfo;
 
 #[cfg(feature = "openapi")]
 mod fuzz;
+#[cfg(feature = "json")]
+pub use crate::snapshot::{Replay, ReplayReport, ENV_UPDATE_SNAPSHOTS};
 #[cfg(feature = "openapi")]
 pub use fuzz::{
     FailureKind, Fuzz, FuzzConfig, FuzzFailure, FuzzReport, FuzzRequest, ENV_FUZZ_CASES,

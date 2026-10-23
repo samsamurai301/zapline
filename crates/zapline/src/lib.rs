@@ -121,6 +121,8 @@ mod request;
 mod response;
 mod router;
 pub mod server;
+#[cfg(feature = "json")]
+mod snapshot;
 pub mod test;
 
 #[doc(hidden)]
