@@ -15,11 +15,12 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
-| `zapline dev [--bin X] [--no-proxy] [-- app args]` | The [dev loop](#the-dev-loop-zapline-dev): template, translation and static file changes reload open pages without a restart, CSS is swapped in place, Rust changes rebuild in the background and swap in the new binary with no downtime, and compile errors show as an overlay in the browser. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error. With Tailwind, also rebuilds `static/app.css` as you save. |
+| `zapline dev [--bin X] [--no-proxy] [-- app args]` | The [dev loop](#the-dev-loop-zapline-dev): template, translation and static file changes reload open pages without a restart, CSS is swapped in place, Rust changes rebuild in the background and swap in the new binary with no downtime, and compile errors show as an overlay in the browser. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error on the [dev error page](errors.md#the-dev-error-page), and records the app's address in `target/zapline-dev.addr` for `zapline mcp`. With Tailwind, also rebuilds `static/app.css` as you save. |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
 | `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
-| `zapline fuzz [--seed N] [--cases N]` | Run `tests/fuzz.rs`, which [fuzzes every route](testing.md#fuzz-every-route) from its OpenAPI schemas, and print the report: each panic, 5xx, timeout, undeclared status or response that breaks its schema, with a minimal reproducing request |
+| `zapline fuzz [--seed N] [--cases N]` | Run `tests/fuzz.rs`, which [fuzzes every route](testing.md#fuzz-every-route) from its OpenAPI schemas, and print the report: each panic, 5xx, timeout, undeclared status or response that breaks its schema, with a minimal reproducing request. The report is kept for the MCP `last_results` tool |
+| `zapline explain [ZL0002]` | What a [diagnostic code](errors.md#diagnostic-codes) means and the code that fixes it; without a code, the list |
 | `zapline mcp` | Serve these tools to AI assistants over the Model Context Protocol ([below](#ai-assistants-zapline-mcp)) |
 | `zapline routes [--json]` | Print the route table |
 | `zapline openapi [-o openapi.json]` | Export the OpenAPI document |
@@ -148,8 +149,22 @@ With `zapline dev --client web/src/api.ts`, the client is regenerated after ever
 | `routes` | One `METHOD path` line per route |
 | `openapi` | The OpenAPI document, compact |
 | `typescript_client` | Writes the TypeScript client |
+| `explain_error` | A [diagnostic code](errors.md#diagnostic-codes)'s cause and fix |
+| `last_results` | The latest `test`, `check` and `zapline fuzz` results with their age, without running anything again |
 
-When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included.
+When the app does not compile, `routes`, `openapi` and `db_migrate` answer with the compile errors (as `check` would) instead of "build failed", and when the app exits with an error, its last stderr lines are included. Any answer that mentions a diagnostic code (`ZL0004` in a startup error, a panic in a test) ends with that code's fix.
+
+### Live tools: debugging the running app
+
+While the app runs under `zapline dev` with the [dev console](dev-console.md), the assistant can look at it directly instead of asking you to copy logs:
+
+| Tool | Returns |
+|---|---|
+| `recent_errors` | The latest errors, newest first: code, status, request, the real message, the panic location and the fix. `ZL0002 500 GET /orders: no provider registered for `app::Repo`` then `  fix: .provide(value) // value: app::Repo; ...` |
+| `recent_requests` | One `500 GET /orders 0.8ms ZL0002` line per request |
+| `call_route` | Sends a request (`method`, `path`, `body`, `headers`) and returns the status line, the headers worth reading (content type, location, cookies without their values, `x-zapline-diagnostic`) and the body, JSON compacted and cut at 2,000 bytes. A 500 comes back as problem+json with its code and fix |
+
+They find the app through `target/zapline-dev.addr`, which `zapline dev` makes the app write (or `$ZAPLINE_URL`, `$ADDR`/`$PORT`, then `http://127.0.0.1:8080`; each tool also takes a `url`). The console only answers requests from this machine, and nothing here exists in a release build. A typical loop: the assistant edits a handler, `zapline dev` restarts the app, `call_route` shows a 500 with `ZL0044`, the fix says `.database(Database::from_env())`, the assistant adds it, and `call_route` returns 200.
 
 Register it from the project directory:
 

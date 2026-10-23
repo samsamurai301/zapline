@@ -533,6 +533,7 @@ fn config(req: &Request) -> Result<&JwtConfig> {
     req.state::<JwtConfig>().ok_or_else(|| {
         Error::internal("JWT is not configured: register a JwtConfig with `App::jwt(..)`")
             .with_code("auth_misconfigured")
+            .diagnosed("ZL0075", None)
     })
 }
 

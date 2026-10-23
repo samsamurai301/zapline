@@ -178,7 +178,9 @@ fn template_error(err: minijinja::Error) -> Error {
     } else {
         "internal server error".to_string()
     };
-    Error::internal(msg).with_source(err)
+    Error::internal(msg)
+        .with_source(err)
+        .diagnosed("ZL0051", None)
 }
 
 /// Re-read templates on every render in debug builds, and under
@@ -219,6 +221,7 @@ impl FromRequestParts for Views {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
         req.state::<Views>().cloned().ok_or_else(|| {
             Error::internal("no templates registered: add `.views(\"templates\")` to the app")
+                .diagnosed("ZL0050", None)
         })
     }
 }

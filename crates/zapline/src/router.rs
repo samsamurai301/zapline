@@ -213,7 +213,16 @@ impl Routes {
         &mut self
             .entries
             .last_mut()
-            .expect("`meta` must be called after registering a route")
+            .unwrap_or_else(|| {
+                panic!(
+                    "{}",
+                    crate::codes::with_help(
+                        "ZL0012",
+                        None,
+                        "`meta` must be called after registering a route"
+                    )
+                )
+            })
             .meta
     }
 
@@ -493,7 +502,7 @@ impl Slot {
                 Method::OPTIONS => &mut self.options,
                 ref m => {
                     if self.other.iter().any(|(o, _)| o == m) {
-                        panic!("duplicate route: {m} {path}");
+                        duplicate(m.as_str(), path);
                     }
                     self.other.push((m.clone(), ep));
                     return;
@@ -501,8 +510,7 @@ impl Slot {
             },
         };
         if slot.is_some() {
-            let m = ep.info.method().map_or("ANY", |m| m.as_str());
-            panic!("duplicate route: {m} {path}");
+            duplicate(ep.info.method().map_or("ANY", |m| m.as_str()), path);
         }
         *slot = Some(ep);
     }
@@ -551,6 +559,14 @@ impl Slot {
     }
 }
 
+/// Two handlers for one method and path: invalid configuration.
+#[cold]
+fn duplicate(method: &str, path: &str) -> ! {
+    let route = format!("{method} {path}");
+    let msg = format!("duplicate route: {route}");
+    panic!("{}", crate::codes::with_help("ZL0010", Some(&route), &msg))
+}
+
 pub(crate) struct Router {
     matcher: matchit::Router<usize>,
     slots: Vec<Slot>,
@@ -577,7 +593,8 @@ impl Router {
         for (info, endpoint) in routes {
             let i = *index.entry(info.path()).or_insert_with(|| {
                 if let Err(err) = router.matcher.insert(info.path(), router.slots.len()) {
-                    panic!("invalid route `{}`: {err}", info.path());
+                    let msg = format!("invalid route `{}`: {err}", info.path());
+                    panic!("{}", crate::codes::with_help("ZL0011", None, &msg));
                 }
                 router.slots.push(Slot::new(param_names(info.path())));
                 router.slots.len() - 1

@@ -20,6 +20,7 @@ Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `
 
 | Panel | Shows |
 |---|---|
+| Recent errors | The last 20 errors (500s, panics and rejected requests), with their [diagnostic code](errors.md#diagnostic-codes), the real message and the fix. |
 | Recent requests | The last 50 requests: status (4xx and 5xx highlighted), method, path with query, and how long the app took. |
 | Recording | Whether requests are being recorded, the latest recorded ones, and buttons to start or stop recording, **Save as snapshot test** and clear. See [below](#recording-requests-as-tests). |
 | Routes | Every route with its summary and tags (from doc comments and `#[get(.., tag = "..")]`). Parameterless `GET` routes are links. |
@@ -32,6 +33,22 @@ Open <http://localhost:8080/_dev>. Projects created with `zapline new` (except `
 - **This machine only.** Requests from any other address get a `404`, so a debug build bound to `0.0.0.0` doesn't show its routes or jobs to the network.
 
 The console's own requests are not listed under recent requests.
+
+`.dev_console()` also turns on the [dev error page](errors.md#the-dev-error-page): a 500 or a panic answers your browser with the error, its code, the fix and a **Copy fix prompt** block for your AI assistant.
+
+## JSON for tools
+
+`GET /_dev/api` serves the same data as JSON, newest first, for scripts and for the [live tools of `zapline mcp`](cli.md#live-tools-debugging-the-running-app):
+
+```json
+{"requests":[{"method":"GET","path":"/orders","status":500,"micros":812,"code":"ZL0002"}],
+ "errors":[{"at_ms":1767225600000,"method":"GET","path":"/orders","status":500,"code":"ZL0002",
+            "error_code":"missing_dependency","message":"no provider registered for `app::Repo`",
+            "fix":".provide(value) // value: app::Repo; ..."}],
+ "routes":[{"method":"GET","path":"/orders"}]}
+```
+
+`location` (`src/routes/orders.rs:42:17`) is set for panics. Like the page, it answers only this machine.
 
 ## Recording requests as tests
 

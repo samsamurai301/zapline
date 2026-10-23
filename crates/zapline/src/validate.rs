@@ -166,6 +166,7 @@ pub fn validation_error(errors: ValidationErrors) -> Error {
     Error::unprocessable("validation failed")
         .with_code("validation_error")
         .with_details(field_errors(&errors))
+        .diagnosed("ZL0066", None)
 }
 
 /// One failed rule, as listed in a validation error's `details`.

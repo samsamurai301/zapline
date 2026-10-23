@@ -386,6 +386,7 @@ impl FromRequestParts for Cache {
     async fn from_request_parts(req: &mut Request) -> Result<Self> {
         req.state::<Cache>().cloned().ok_or_else(|| {
             Error::internal("no cache registered: add `.cache(Cache::memory())` to the app")
+                .diagnosed("ZL0071", None)
         })
     }
 }

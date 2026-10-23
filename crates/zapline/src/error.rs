@@ -47,6 +47,14 @@ pub struct Error {
     details: Option<Details>,
     headers: Option<Box<HeaderMap>>,
     source: Option<crate::body::BoxError>,
+    diagnostic: Option<Box<Diagnosis>>,
+}
+
+/// A [diagnostic code](crate::codes) and what the error is about (the type,
+/// route or key that `{T}` in the fix stands for).
+struct Diagnosis {
+    code: &'static str,
+    subject: Option<String>,
 }
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
@@ -61,6 +69,7 @@ impl Error {
             details: None,
             headers: None,
             source: None,
+            diagnostic: None,
         }
     }
     pub fn bad_request(msg: impl Into<Cow<'static, str>>) -> Self {
@@ -82,7 +91,7 @@ impl Error {
         Self::new(StatusCode::CONFLICT, msg)
     }
     pub fn payload_too_large() -> Self {
-        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload too large")
+        Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload too large").diagnosed("ZL0067", None)
     }
     pub fn unsupported_media_type(msg: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, msg)
@@ -127,6 +136,45 @@ impl Error {
         self
     }
 
+    /// Tag a developer mistake with its [diagnostic code](crate::codes),
+    /// and name what it is about for the fix's `{T}`.
+    pub(crate) fn diagnosed(mut self, code: &'static str, subject: Option<String>) -> Self {
+        self.diagnostic = Some(Box::new(Diagnosis { code, subject }));
+        self
+    }
+
+    /// The [diagnostic code](crate::codes) of a mistake the framework
+    /// recognized (`"ZL0002"` for a missing provider), if any. Unlike
+    /// [`code`](Self::code), it is never sent to clients.
+    ///
+    /// ```
+    /// use zapline::Resources;
+    ///
+    /// #[derive(Debug)]
+    /// struct Repo;
+    /// let err = Resources::default().dep::<Repo>().unwrap_err();
+    /// assert_eq!(err.code(), Some("missing_dependency")); // sent to clients
+    /// assert_eq!(err.diagnostic_code(), Some("ZL0002")); // for you
+    /// ```
+    pub fn diagnostic_code(&self) -> Option<&'static str> {
+        self.diagnostic.as_ref().map(|d| d.code)
+    }
+
+    /// The fix for this error's diagnostic code, with `{T}` filled in.
+    fn fix(&self) -> Option<String> {
+        let d = self.diagnostic.as_ref()?;
+        Some(crate::codes::lookup(d.code)?.fix_for(d.subject.as_deref()))
+    }
+
+    /// `\n  fix: ...\n  see: zapline explain ZL....` for terminal output,
+    /// or an empty string.
+    pub(crate) fn help(&self) -> String {
+        match &self.diagnostic {
+            Some(d) => crate::codes::help(d.code, d.subject.as_deref()),
+            None => String::new(),
+        }
+    }
+
     pub fn status(&self) -> StatusCode {
         self.status
     }
@@ -164,11 +212,26 @@ impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
                 }
             }
             let e = slot.expect("error taken only for sqlx::Error");
-            return Error::internal(GENERIC_500).with_source(e);
+            return unhandled(e);
         }
         #[allow(unreachable_code)]
-        Error::internal(GENERIC_500).with_source(e)
+        unhandled(e)
     }
+}
+
+/// A 500 for an error nothing mapped. Config errors (from `?` on
+/// `Config::load()` and friends) keep their diagnostic code.
+fn unhandled<E: std::error::Error + Send + Sync + 'static>(e: E) -> Error {
+    #[cfg(feature = "config")]
+    let diagnosis = (&e as &dyn std::any::Any)
+        .downcast_ref::<crate::config::ConfigError>()
+        .map(|c| (c.diagnostic_code(), c.key().map(str::to_owned)));
+    let err = Error::internal(GENERIC_500).with_source(e);
+    #[cfg(feature = "config")]
+    if let Some((code, subject)) = diagnosis {
+        return err.diagnosed(code, subject);
+    }
+    err
 }
 
 /// A [`zapline::Error`](Error) viewed as a `std::error::Error`, so it can
@@ -212,6 +275,9 @@ impl fmt::Debug for Error {
         if let Some(s) = &self.source {
             d.field("source", s);
         }
+        if let Some(diag) = &self.diagnostic {
+            d.field("diagnostic", &diag.code);
+        }
         d.finish()
     }
 }
@@ -221,6 +287,9 @@ impl fmt::Display for Error {
         write!(f, "{}: {}", self.status, self.message)?;
         if let Some(src) = &self.source {
             write!(f, " ({src})")?;
+        }
+        if let Some(d) = &self.diagnostic {
+            write!(f, " [{}]", d.code)?;
         }
         Ok(())
     }
@@ -260,6 +329,7 @@ impl ErrorReport {
 
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        let diagnostic = diagnosing().then(|| self.diagnostic_report());
         // A 500 means the server is at fault: its message and cause are
         // diagnostics for operators (type names, routes, driver errors) and
         // are logged, never sent. Clients get a generic message plus `code`.
@@ -308,8 +378,56 @@ impl IntoResponse for Error {
             }
         }
         res.extensions_mut().insert(report);
+        if let Some(d) = diagnostic {
+            res.extensions_mut().insert(d);
+        }
         res
     }
+}
+
+impl Error {
+    /// What the dev error page shows: the real message with its causes, and
+    /// the diagnostic code (an uncoded 500 is an unhandled error).
+    fn diagnostic_report(&self) -> DevDiagnostic {
+        let code = self.diagnostic_code().or_else(|| {
+            (self.status == StatusCode::INTERNAL_SERVER_ERROR && self.code.is_none())
+                .then_some("ZL0081")
+        });
+        let fix = self
+            .fix()
+            .or_else(|| code.and_then(crate::codes::lookup).map(|c| c.fix_for(None)));
+        DevDiagnostic {
+            message: dev_message(&self.message, self.source.as_deref()),
+            code,
+            fix,
+            location: None,
+        }
+    }
+}
+
+/// The developer's view of an error response, attached to its extensions
+/// while [dev errors](crate::App::dev_errors) are on.
+#[derive(Clone, Debug)]
+pub(crate) struct DevDiagnostic {
+    /// The real message and its cause chain, even for 500s.
+    pub(crate) message: String,
+    pub(crate) code: Option<&'static str>,
+    pub(crate) fix: Option<String>,
+    /// `file:line:col` of a panic.
+    pub(crate) location: Option<String>,
+}
+
+static DIAGNOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Attach a [`DevDiagnostic`] to error responses from now on. Set once,
+/// when an app with dev errors is built; until then error responses carry
+/// nothing extra.
+pub(crate) fn start_diagnosing() {
+    DIAGNOSING.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub(crate) fn diagnosing() -> bool {
+    DIAGNOSING.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 const GENERIC_500: &str = "internal server error";

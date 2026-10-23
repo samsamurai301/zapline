@@ -349,6 +349,7 @@ impl FromRequestParts for Mailer {
     async fn from_request_parts(req: &mut Request) -> Result<Self> {
         req.state::<Mailer>().cloned().ok_or_else(|| {
             Error::internal("no mailer registered: add `.mailer(Mailer::from_env()?)` to the app")
+                .diagnosed("ZL0070", None)
         })
     }
 }

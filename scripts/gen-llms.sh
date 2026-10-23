@@ -8,7 +8,8 @@
 # link per page. llms-full.txt is the whole guide in reading order as one
 # Markdown file, so an AI assistant can load all of zapline's docs in a
 # single fetch. mdBook copies both files to the published site, and the CLI
-# embeds llms-full.txt for its MCP `docs` tool.
+# embeds llms-full.txt for its MCP `docs` tool, and the diagnostic code
+# registry (crates/zapline/src/codes.in) for `zapline explain`.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -16,6 +17,9 @@ SITE=${SITE:-https://samsamurai301.github.io/zapline}
 SRC=docs/src
 # The guide embedded in the CLI for `zapline mcp` (inside the crate so it is published).
 GUIDE=crates/zapline-cli/assets/guide.md
+# The diagnostic code registry, embedded in the CLI the same way.
+CODES_SRC=crates/zapline/src/codes.in
+CODES=crates/zapline-cli/assets/codes.in
 CHECK=0
 [ "${1:-}" = "--check" ] && CHECK=1
 
@@ -82,13 +86,14 @@ done < "$SRC/SUMMARY.md"
 
 if [ $CHECK = 1 ]; then
   diff -q "$tmp/llms.txt" "$SRC/llms.txt" >/dev/null && diff -q "$tmp/llms-full.txt" "$SRC/llms-full.txt" >/dev/null \
-    && diff -q "$tmp/llms-full.txt" "$GUIDE" >/dev/null || {
-    echo "docs/src/llms*.txt or $GUIDE are out of date: run ./scripts/gen-llms.sh" >&2
+    && diff -q "$tmp/llms-full.txt" "$GUIDE" >/dev/null && diff -q "$CODES_SRC" "$CODES" >/dev/null || {
+    echo "docs/src/llms*.txt, $GUIDE or $CODES are out of date: run ./scripts/gen-llms.sh" >&2
     exit 1
   }
   echo "llms.txt and llms-full.txt are up to date"
 else
   cp "$tmp/llms.txt" "$tmp/llms-full.txt" "$SRC/"
   cp "$tmp/llms-full.txt" "$GUIDE"
+  cp "$CODES_SRC" "$CODES"
   echo "wrote $SRC/llms.txt ($(wc -c < "$SRC/llms.txt") bytes) and $SRC/llms-full.txt ($(wc -c < "$SRC/llms-full.txt") bytes)"
 fi

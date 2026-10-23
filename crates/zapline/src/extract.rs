@@ -118,9 +118,9 @@ impl MatchedPath {
 impl FromRequestParts for MatchedPath {
     #[inline]
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
-        req.matched_path()
-            .map(MatchedPath)
-            .ok_or_else(|| Error::internal("no matched route for this request"))
+        req.matched_path().map(MatchedPath).ok_or_else(|| {
+            Error::internal("no matched route for this request").diagnosed("ZL0013", None)
+        })
     }
 }
 
@@ -176,10 +176,13 @@ impl<T: Clone + Send + Sync + 'static> FromRequestParts for State<T> {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
         match req.shared.state::<T>() {
             Some(v) => Ok(State(v.clone())),
-            None => Err(Error::internal(format!(
-                "state `{}` was not registered with App::state",
-                std::any::type_name::<T>()
-            ))),
+            None => {
+                let name = std::any::type_name::<T>();
+                Err(
+                    Error::internal(format!("state `{name}` was not registered with App::state"))
+                        .diagnosed("ZL0001", Some(name.to_owned())),
+                )
+            }
         }
     }
 }
@@ -194,10 +197,13 @@ impl<T: Clone + Send + Sync + 'static> FromRequestParts for Extension<T> {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
         match req.head.extensions.get::<T>() {
             Some(v) => Ok(Extension(v.clone())),
-            None => Err(Error::internal(format!(
-                "extension `{}` missing from request",
-                std::any::type_name::<T>()
-            ))),
+            None => {
+                let name = std::any::type_name::<T>();
+                Err(
+                    Error::internal(format!("extension `{name}` missing from request"))
+                        .diagnosed("ZL0005", Some(name.to_owned())),
+                )
+            }
         }
     }
 }
@@ -227,7 +233,9 @@ impl<T: DeserializeOwned + Send> FromRequestParts for Path<T> {
 
 #[cold]
 fn path_error(e: path_de::DeError) -> Error {
-    let err = Error::bad_request(format!("invalid path parameter: {e}")).with_code("invalid_path");
+    let err = Error::bad_request(format!("invalid path parameter: {e}"))
+        .with_code("invalid_path")
+        .diagnosed("ZL0060", None);
     #[cfg(feature = "json")]
     if let Some(param) = e.param {
         return err.with_details(serde_json::json!({ "param": param }));
@@ -252,7 +260,9 @@ impl<T: DeserializeOwned + Send> FromRequestParts for Query<T> {
     async fn from_request_parts(req: &mut Request) -> Result<Self, Error> {
         let q = req.head.uri.query().unwrap_or("");
         serde_urlencoded::from_str(q).map(Query).map_err(|e| {
-            Error::bad_request(format!("invalid query string: {e}")).with_code("invalid_query")
+            Error::bad_request(format!("invalid query string: {e}"))
+                .with_code("invalid_query")
+                .diagnosed("ZL0061", None)
         })
     }
 }
@@ -315,7 +325,9 @@ fn is_form(essence: &str) -> bool {
 #[cfg(any(feature = "json", feature = "form"))]
 #[cold]
 fn unsupported_media_type(expected: &'static str) -> Error {
-    Error::unsupported_media_type(expected).with_code("unsupported_media_type")
+    Error::unsupported_media_type(expected)
+        .with_code("unsupported_media_type")
+        .diagnosed("ZL0064", None)
 }
 
 #[cfg(feature = "json")]
@@ -348,10 +360,10 @@ impl<T: DeserializeOwned + Send> FromRequest for Json<T> {
 #[cfg(feature = "json")]
 #[cold]
 fn json_error(e: &serde_json::Error, body: &[u8]) -> Error {
-    let (code, what) = if e.is_data() {
-        ("invalid_body", "invalid request body")
+    let (code, what, diagnostic) = if e.is_data() {
+        ("invalid_body", "invalid request body", "ZL0063")
     } else {
-        ("invalid_json", "invalid JSON body")
+        ("invalid_json", "invalid JSON body", "ZL0062")
     };
     let (line, column) = (e.line(), e.column());
     // serde_json appends the position; it goes into `details` instead.
@@ -359,7 +371,9 @@ fn json_error(e: &serde_json::Error, body: &[u8]) -> Error {
     let msg = msg
         .strip_suffix(&format!(" at line {line} column {column}"))
         .unwrap_or(&msg);
-    let err = Error::unprocessable(format!("{what}: {msg}")).with_code(code);
+    let err = Error::unprocessable(format!("{what}: {msg}"))
+        .with_code(code)
+        .diagnosed(diagnostic, None);
     if line == 0 {
         return err;
     }
@@ -413,7 +427,9 @@ impl<T: DeserializeOwned + Send> FromRequest for Form<T> {
         }
         let b = take_body(req).await?;
         serde_urlencoded::from_bytes(&b).map(Form).map_err(|e| {
-            Error::unprocessable(format!("invalid form body: {e}")).with_code("invalid_form")
+            Error::unprocessable(format!("invalid form body: {e}"))
+                .with_code("invalid_form")
+                .diagnosed("ZL0065", None)
         })
     }
 }

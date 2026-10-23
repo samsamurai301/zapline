@@ -146,9 +146,10 @@ impl Storage {
                 Self::s3(S3::from_env()?)
             }
             #[cfg(not(feature = "s3"))]
-            return Err(Error::internal(
-                "S3_BUCKET is set but zapline's `s3` feature is off",
-            ));
+            return Err(
+                Error::internal("S3_BUCKET is set but zapline's `s3` feature is off")
+                    .diagnosed("ZL0020", Some("s3".to_owned())),
+            );
         } else {
             let dir =
                 std::env::var_os("STORAGE_DIR").map_or_else(|| "storage".into(), PathBuf::from);
@@ -500,6 +501,7 @@ impl FromRequestParts for Storage {
             Error::internal(
                 "no storage registered: add `.storage(Storage::from_env()?)` to the app",
             )
+            .diagnosed("ZL0077", None)
         })
     }
 }

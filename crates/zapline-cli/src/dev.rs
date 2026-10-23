@@ -633,6 +633,13 @@ impl Dev<'_> {
         if self.opts.record {
             cmd.env("ZAPLINE_RECORD", "1");
         }
+        // Where the app records its URL, so `zapline mcp` can talk to it.
+        let addr_file = self.project.root.join(crate::live::ADDR_FILE);
+        if let Some(dir) = addr_file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::remove_file(&addr_file);
+        cmd.env(crate::live::ENV_ADDR_FILE, &addr_file);
         cmd
     }
 

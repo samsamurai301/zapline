@@ -293,6 +293,26 @@ impl ConfigError {
             _ => None,
         }
     }
+
+    /// Its [diagnostic code](crate::codes), e.g. `"ZL0032"` for a missing
+    /// key.
+    ///
+    /// ```
+    /// use zapline::config::Config;
+    ///
+    /// let config = Config::builder().toml_str("name = \"demo\"").build().unwrap();
+    /// let err = config.get::<u16>("server.port").unwrap_err();
+    /// assert_eq!(err.diagnostic_code(), "ZL0032");
+    /// ```
+    pub fn diagnostic_code(&self) -> &'static str {
+        match self {
+            ConfigError::Io { .. } => "ZL0030",
+            ConfigError::Parse { .. } => "ZL0031",
+            ConfigError::Missing { .. } => "ZL0032",
+            ConfigError::Invalid { .. } => "ZL0033",
+            ConfigError::InvalidProfile { .. } => "ZL0034",
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {

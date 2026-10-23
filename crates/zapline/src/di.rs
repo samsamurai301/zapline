@@ -163,8 +163,10 @@ impl<T: ?Sized + Send + Sync + 'static> FromRequestParts for Dep<T> {
 }
 
 fn missing<T: ?Sized>() -> Error {
-    Error::internal(format!("no provider registered for `{}`", type_name::<T>()))
+    let name = type_name::<T>();
+    Error::internal(format!("no provider registered for `{name}`"))
         .with_code("missing_dependency")
+        .diagnosed("ZL0002", Some(name.to_owned()))
 }
 
 impl Resources {
@@ -255,7 +257,9 @@ fn init_failed<T: ?Sized>(e: Error) -> Error {
     if let Some(src) = e.source_error() {
         msg.push_str(&format!(" ({src})"));
     }
-    Error::internal(msg).with_code("dependency_init_failed")
+    Error::internal(msg)
+        .with_code("dependency_init_failed")
+        .diagnosed("ZL0003", Some(type_name::<T>().to_owned()))
 }
 
 impl App {

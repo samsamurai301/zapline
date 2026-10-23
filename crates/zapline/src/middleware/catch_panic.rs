@@ -24,7 +24,6 @@ use super::{Middleware, Next};
 use crate::handler::BoxFuture;
 use crate::request::Request;
 use crate::response::{IntoResponse, Response};
-use crate::Error;
 
 type PanicHandler = Arc<dyn Fn(String) -> Response + Send + Sync>;
 
@@ -96,24 +95,24 @@ struct PanicContext {
 impl PanicContext {
     fn respond(self, payload: Box<dyn Any + Send>) -> Response {
         let msg = panic_message(payload.as_ref());
-        log_panic(&self.method, self.uri.path(), &msg);
+        log_panic_str(self.method.as_str(), self.uri.path(), &msg);
+        // With dev errors on, the default response carries the panic (and
+        // where it happened) for the dev error page.
+        let location = crate::dev::take_panic_location();
         match self.handler {
             // A panicking custom handler must not escape either.
-            Some(h) => {
-                catch_unwind(AssertUnwindSafe(|| h(msg))).unwrap_or_else(|_| default_response())
-            }
-            None => default_response(),
+            Some(h) => catch_unwind(AssertUnwindSafe(|| h(msg)))
+                .unwrap_or_else(|_| default_response(String::new(), None)),
+            None => default_response(msg, location),
         }
     }
 }
 
-fn default_response() -> Response {
-    Error::internal("internal server error")
-        .with_code("panic")
-        .into_response()
+fn default_response(msg: String, location: Option<String>) -> Response {
+    crate::dev::panic_response(msg, location)
 }
 
-fn panic_message(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn panic_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_owned()
     } else if let Some(s) = payload.downcast_ref::<String>() {
@@ -124,11 +123,11 @@ fn panic_message(payload: &(dyn Any + Send)) -> String {
 }
 
 #[cfg(feature = "tracing")]
-fn log_panic(method: &Method, path: &str, msg: &str) {
-    tracing::error!(%method, path, panic = %msg, "request handler panicked");
+pub(crate) fn log_panic_str(method: &str, path: &str, msg: &str) {
+    tracing::error!(method, path, panic = %msg, "request handler panicked");
 }
 
 #[cfg(not(feature = "tracing"))]
-fn log_panic(method: &Method, path: &str, msg: &str) {
+pub(crate) fn log_panic_str(method: &str, path: &str, msg: &str) {
     eprintln!("[zapline] {method} {path}: request handler panicked: {msg}");
 }

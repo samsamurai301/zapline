@@ -21,13 +21,26 @@
 //! The console exists only in debug builds and only answers requests from
 //! the same machine: in a release build [`App::dev_console`] does nothing,
 //! so the call can stay in the code.
+//!
+//! It also turns on the [dev error page](App::dev_errors), lists the recent
+//! errors with their [diagnostic codes](crate::codes), and serves all of it
+//! as JSON at [`DEV_API_PATH`] for tools such as `zapline mcp`:
+//!
+//! ```text
+//! GET /_dev/api
+//! {"requests":[{"method":"GET","path":"/orders","status":500,"micros":812,"code":"ZL0002"}],
+//!  "errors":[{"at_ms":1767225600000,"method":"GET","path":"/orders","status":500,
+//!             "code":"ZL0002","error_code":"missing_dependency",
+//!             "message":"no provider registered for `app::Repo`","fix":".provide(value) ..."}],
+//!  "routes":[{"method":"GET","path":"/orders"}]}
+//! ```
 
 use std::collections::VecDeque;
 use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::Instant;
 
 use crate::handler::BoxFuture;
+#[cfg(feature = "json")]
 use crate::middleware::Next;
 use crate::response::{Html, IntoResponse, Redirect, Response};
 use crate::router::{RouteInfo, Routes};
@@ -37,9 +50,34 @@ use crate::{App, Request, StatusCode};
 mod record;
 #[cfg(feature = "json")]
 pub use record::ENV_RECORD;
+mod errors;
+
+pub use errors::DIAGNOSTIC_HEADER;
+pub(crate) use errors::{install, panic_response, take_panic_location};
+use errors::{DevErrorsOn, ErrorLog};
 
 /// Where [`App::dev_console`] serves the console.
 pub const DEV_CONSOLE_PATH: &str = "/_dev";
+
+/// Where [`App::dev_console`] serves the console's data as JSON.
+pub const DEV_API_PATH: &str = "/_dev/api";
+
+/// Env var naming a file where a debug build writes the URL it listens on
+/// (`http://127.0.0.1:8080`), so tools find the running app. `zapline dev`
+/// sets it to `target/zapline-dev.addr`.
+pub const ENV_DEV_ADDR_FILE: &str = "ZAPLINE_DEV_ADDR_FILE";
+
+/// Record where the server listens, for tools (see [`ENV_DEV_ADDR_FILE`]).
+pub(crate) fn announce(addr: std::net::SocketAddr, tls: bool) {
+    if !cfg!(debug_assertions) {
+        return;
+    }
+    let Some(file) = std::env::var_os(ENV_DEV_ADDR_FILE) else {
+        return;
+    };
+    let scheme = if tls { "https" } else { "http" };
+    let _ = std::fs::write(file, format!("{scheme}://{addr}\n"));
+}
 
 /// How many recent requests the console keeps.
 const RECENT: usize = 50;
@@ -99,6 +137,8 @@ struct Hit {
     path: String,
     status: u16,
     micros: u128,
+    /// The diagnostic code of an error response.
+    code: Option<&'static str>,
 }
 
 #[derive(Clone, Default)]
@@ -138,9 +178,10 @@ impl RouteRow {
 
 impl App {
     /// Serve the [development console](crate::dev) at [`DEV_CONSOLE_PATH`]:
-    /// routes, recent requests, and panels from jobs and the dev mailer.
-    /// Debug builds only, and only to requests from this machine; in a
-    /// release build this does nothing.
+    /// routes, recent requests and errors, and panels from jobs and the dev
+    /// mailer, plus the same data as JSON at [`DEV_API_PATH`]. Also turns on
+    /// the [dev error page](App::dev_errors). Debug builds only, and only to
+    /// requests from this machine; in a release build this does nothing.
     ///
     /// ```
     /// use zapline::App;
@@ -152,59 +193,61 @@ impl App {
             return self;
         }
         let panels = self.panels();
+        // The dev error middleware (installed when the app is built) records
+        // requests and errors here.
         let recent = Recent::default();
-        let log = recent.clone();
+        let errors = ErrorLog::default();
+        self.extensions_mut().insert(recent.clone());
+        self.extensions_mut().insert(errors.clone());
+        self.extensions_mut().insert(DevErrorsOn);
+        // Snapshot recording (`zapline dev --record`): inside the dev error
+        // middleware, so it records what the app itself answered.
         #[cfg(feature = "json")]
         let recorder = record::Recorder::from_env();
         #[cfg(feature = "json")]
-        let rec = recorder.clone();
-        self.wrap(move |req: Request, next: Next| {
-            let log = log.clone();
-            #[cfg(feature = "json")]
-            let rec = rec.clone();
-            async move {
-                if req.path().starts_with(DEV_CONSOLE_PATH) {
-                    return next.run(req).await;
+        let app = {
+            let rec = recorder.clone();
+            self.wrap(move |req: Request, next: Next| {
+                let rec = rec.clone();
+                async move {
+                    if rec.is_on() && !req.path().starts_with(DEV_CONSOLE_PATH) {
+                        rec.record(req, next).await
+                    } else {
+                        next.run(req).await
+                    }
                 }
-                let method = req.method().to_string();
-                let path = req.uri().to_string();
-                let start = Instant::now();
-                #[cfg(feature = "json")]
-                let res = if rec.is_on() {
-                    rec.record(req, next).await
-                } else {
-                    next.run(req).await
-                };
-                #[cfg(not(feature = "json"))]
-                let res = next.run(req).await;
-                let hit = Hit {
-                    method,
-                    path,
-                    status: res.status().as_u16(),
-                    micros: start.elapsed().as_micros(),
-                };
-                let mut log = log.lock();
-                if log.len() == RECENT {
-                    log.pop_front();
-                }
-                log.push_back(hit);
-                res
-            }
-        })
-        .on_build(move |table| {
+            })
+        };
+        #[cfg(not(feature = "json"))]
+        let app = self;
+        app.on_build(move |table| {
             let routes: Arc<[RouteRow]> = table.iter().map(|r| RouteRow::new(r)).collect();
             let page = {
-                let panels = panels.clone();
+                let (routes, recent, errors, panels) = (
+                    routes.clone(),
+                    recent.clone(),
+                    errors.clone(),
+                    panels.clone(),
+                );
                 #[cfg(feature = "json")]
                 let recorder = recorder.clone();
                 move |req: Request| {
-                    let (routes, recent, panels) = (routes.clone(), recent.clone(), panels.clone());
+                    let (routes, recent, errors, panels) = (
+                        routes.clone(),
+                        recent.clone(),
+                        errors.clone(),
+                        panels.clone(),
+                    );
                     #[cfg(feature = "json")]
                     let extra = recorder.section(&req);
                     #[cfg(not(feature = "json"))]
                     let extra = String::new();
-                    async move { console(&req, &routes, &recent, &panels, &extra).await }
+                    async move { console(&req, &routes, &recent, &errors, &panels, &extra).await }
                 }
+            };
+            let api = move |req: Request| {
+                let (routes, recent, errors) = (routes.clone(), recent.clone(), errors.clone());
+                async move { api(&req, &routes, &recent, &errors) }
             };
             let act = move |req: Request| {
                 let panels = panels.clone();
@@ -212,6 +255,7 @@ impl App {
             };
             let routes = Routes::new()
                 .get(DEV_CONSOLE_PATH, page)
+                .get(DEV_API_PATH, api)
                 .post(&format!("{DEV_CONSOLE_PATH}/{{panel}}"), act);
             #[cfg(feature = "json")]
             let routes = routes.merge(recorder.routes());
@@ -304,6 +348,7 @@ async fn console(
     req: &Request,
     routes: &[RouteRow],
     recent: &Recent,
+    errors: &ErrorLog,
     panels: &Panels,
     recording: &str,
 ) -> Response {
@@ -336,7 +381,32 @@ async fn console(
         page.push_str("</section>");
     }
 
+    let errs = errors.lock();
+    if !errs.is_empty() {
+        page.push_str(
+            "<section><h2>Recent errors</h2><table><tr><th>Code<th>Request<th>Error</tr>",
+        );
+        for e in errs.iter().rev() {
+            let code = e.code.unwrap_or("");
+            let fix = e.fix.as_deref().map_or_else(String::new, |f| {
+                format!("<br><small>fix: <code>{}</code></small>", escape(f))
+            });
+            let _ = write!(
+                page,
+                "<tr><td><code>{code}</code><td class=s{}>{} <code>{}</code> {}<td>{}{fix}</tr>",
+                e.status / 100,
+                escape(&e.method),
+                escape(&e.path),
+                e.status,
+                escape(&e.message)
+            );
+        }
+        page.push_str("</table></section>");
+    }
+    drop(errs);
+
     page.push_str(recording);
+
     page.push_str("<section><h2>Recent requests</h2>");
     let hits = recent.lock();
     if hits.is_empty() {
@@ -385,6 +455,73 @@ async fn console(
     }
     page.push_str("</table></section>");
     Html(page).into_response()
+}
+
+/// The console's data as JSON, newest first (no serde needed).
+fn api(req: &Request, routes: &[RouteRow], recent: &Recent, errors: &ErrorLog) -> Response {
+    use crate::error::push_json_str as string;
+    if !local(req) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let opt = |out: &mut String, key: &str, value: Option<&str>| {
+        if let Some(v) = value {
+            let _ = write!(out, ",\"{key}\":");
+            string(out, v);
+        }
+    };
+    let mut out = String::from("{\"requests\":[");
+    for (i, hit) in recent.lock().iter().rev().enumerate() {
+        out.push_str(if i == 0 {
+            "{\"method\":"
+        } else {
+            ",{\"method\":"
+        });
+        string(&mut out, &hit.method);
+        out.push_str(",\"path\":");
+        string(&mut out, &hit.path);
+        let _ = write!(out, ",\"status\":{},\"micros\":{}", hit.status, hit.micros);
+        opt(&mut out, "code", hit.code);
+        out.push('}');
+    }
+    out.push_str("],\"errors\":[");
+    for (i, e) in errors.lock().iter().rev().enumerate() {
+        let _ = write!(
+            out,
+            "{}{{\"at_ms\":{},\"method\":",
+            if i == 0 { "" } else { "," },
+            e.at_ms
+        );
+        string(&mut out, &e.method);
+        out.push_str(",\"path\":");
+        string(&mut out, &e.path);
+        let _ = write!(out, ",\"status\":{}", e.status);
+        opt(&mut out, "code", e.code);
+        opt(&mut out, "error_code", e.error_code.as_deref());
+        out.push_str(",\"message\":");
+        string(&mut out, &e.message);
+        opt(&mut out, "fix", e.fix.as_deref());
+        opt(&mut out, "location", e.location.as_deref());
+        out.push('}');
+    }
+    out.push_str("],\"routes\":[");
+    for (i, r) in routes.iter().enumerate() {
+        out.push_str(if i == 0 {
+            "{\"method\":"
+        } else {
+            ",{\"method\":"
+        });
+        string(&mut out, &r.method);
+        out.push_str(",\"path\":");
+        string(&mut out, &r.path);
+        out.push('}');
+    }
+    out.push_str("]}");
+    let mut res = Response::new(out.into());
+    res.headers_mut().insert(
+        http::header::CONTENT_TYPE,
+        http::HeaderValue::from_static("application/json"),
+    );
+    res
 }
 
 fn duration(micros: u128) -> String {

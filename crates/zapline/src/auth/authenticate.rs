@@ -232,6 +232,7 @@ fn no_role_checker(req: &Request) -> Error {
         req.matched_path().unwrap_or("?")
     ))
     .with_code("auth_misconfigured")
+    .diagnosed("ZL0078", None)
 }
 
 impl<A: Authenticator> Middleware for Authenticate<A> {

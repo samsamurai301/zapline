@@ -1,0 +1,343 @@
+// The registry of zapline's diagnostic codes: the one place they are defined.
+//
+// Each entry has a stable code (never reused or renumbered), a short title, an
+// explanation of the cause, and the fix as the code to add. `{T}` in a fix
+// stands for what the error names: a type, a route, a config key. The
+// `zapline` crate includes this file as `zapline::codes::ALL`; the CLI embeds
+// a copy (crates/zapline-cli/assets/codes.in, kept in sync by
+// scripts/gen-llms.sh) for `zapline explain` and `zapline mcp`. The index in
+// docs/src/errors.md is generated from it.
+&[
+    // ---- state and dependency injection ------------------------------------
+    Code {
+        code: "ZL0001",
+        title: "State not registered",
+        explanation: "A handler takes `State<T>`, but no value of that exact type was registered. \
+            State is looked up by type, so `State<Arc<Db>>` and `State<Db>` are different keys.",
+        fix: "App::new().state(value) // value: {T}; or in a startup hook: res.insert(value)",
+    },
+    Code {
+        code: "ZL0002",
+        title: "No provider for a dependency",
+        explanation: "A handler takes `Dep<T>` (or code calls `res.dep::<T>()`), but nothing \
+            provides `T`. Providers are registered on the app before it starts.",
+        fix: ".provide(value) // value: {T}; to build it at startup: .provide_with(|res: Resources| async move { Ok(value) }); for a trait object: .provide_dyn::<dyn Trait>(Arc::new(imp))",
+    },
+    Code {
+        code: "ZL0003",
+        title: "A dependency failed to initialize",
+        explanation: "The factory given to `provide_with` / `provide_injected` returned an error, \
+            so the app did not start. The message ends with the factory's own error.",
+        fix: "Fix the cause named in the message; inside the factory, resolve what it needs with res.dep::<Other>()? and register Other before it",
+    },
+    Code {
+        code: "ZL0004",
+        title: "Resource not registered",
+        explanation: "`Resources::require::<T>()` found no value of type `T`. Startup hooks run \
+            in the order they were registered, so a hook can only require what an earlier \
+            hook or `.state(..)` inserted.",
+        fix: "Register it first: .state(value) // value: {T}; or res.insert(value) in an earlier on_startup hook",
+    },
+    Code {
+        code: "ZL0005",
+        title: "Request extension missing",
+        explanation: "A handler takes `Extension<T>`, but no middleware inserted a `T` into this \
+            request's extensions, or the middleware runs after the handler is reached.",
+        fix: "In a middleware that runs before the handler: req.extensions_mut().insert(value); // value: {T}, installed with .wrap(..) or .wrap_route(..)",
+    },
+    // ---- routing ------------------------------------------------------------
+    Code {
+        code: "ZL0010",
+        title: "Duplicate route",
+        explanation: "Two handlers were registered for the same method and path. zapline \
+            refuses to pick one silently; `zapline routes` prints the whole table.",
+        fix: "Remove one of the two registrations of {T}, or change its method or path",
+    },
+    Code {
+        code: "ZL0011",
+        title: "Invalid or conflicting route path",
+        explanation: "The router cannot add this path: two routes give the same segment \
+            different parameter names (`/users/{id}` and `/users/{name}`), a catch-all is not \
+            the last segment, or a brace is unbalanced.",
+        fix: "Use one parameter name per position (/users/{id} everywhere) and keep catch-alls last: /files/{*path}",
+    },
+    Code {
+        code: "ZL0012",
+        title: "Route metadata without a route",
+        explanation: "`Routes::meta(..)` (or `App::meta`) attaches metadata to the route \
+            registered just before it, and none was registered yet.",
+        fix: "Call it right after the route: .get(\"/x\", handler).meta(value)",
+    },
+    Code {
+        code: "ZL0013",
+        title: "Route information used before routing",
+        explanation: "`MatchedPath` (or `req.route()`) was used in global middleware, which runs \
+            before the router has matched the request.",
+        fix: "Install that middleware after routing: .wrap_route(mw) instead of .wrap(mw)",
+    },
+    // ---- Cargo features -----------------------------------------------------
+    Code {
+        code: "ZL0020",
+        title: "Cargo feature not enabled",
+        explanation: "The app asks for something that is compiled only with a zapline Cargo \
+            feature that is off.",
+        fix: "In Cargo.toml: zapline = { version = \"0.1\", features = [\"{T}\"] }",
+    },
+    Code {
+        code: "ZL0021",
+        title: "Database URL does not match the backend",
+        explanation: "The database URL names one backend (`postgres://`, `sqlite://`) while the \
+            app's `Database` uses the other, usually because only one of the `postgres` and \
+            `sqlite` features is enabled.",
+        fix: "Use a URL for the compiled backend ({T}), or enable the other feature: zapline = { version = \"0.1\", features = [\"postgres\"] } and Database::postgres(url)",
+    },
+    // ---- configuration ------------------------------------------------------
+    Code {
+        code: "ZL0030",
+        title: "Config file unreadable",
+        explanation: "A configuration file exists but cannot be read (permissions, a directory \
+            in its place, invalid UTF-8).",
+        fix: "Fix the file's permissions or contents: {T}",
+    },
+    Code {
+        code: "ZL0031",
+        title: "Config file malformed",
+        explanation: "A TOML layer (`config/default.toml`, `config/<profile>.toml`) or `.env` \
+            does not parse. The message gives the file and the line.",
+        fix: "Fix the syntax at the reported line; TOML strings need quotes: name = \"value\"",
+    },
+    Code {
+        code: "ZL0032",
+        title: "Config key missing",
+        explanation: "The settings struct has a required field that no layer sets.",
+        fix: "Set {T} in config/default.toml, or as an environment variable (APP__ prefix, __ between levels, e.g. APP__SERVER__PORT=8080), or make the field Option<_> / #[serde(default)]",
+    },
+    Code {
+        code: "ZL0033",
+        title: "Config value has the wrong type",
+        explanation: "A config value does not deserialize into the field's type. The message \
+            says which layer set it.",
+        fix: "Give {T} a value of the field's type in the layer named in the message (numbers unquoted: port = 8080)",
+    },
+    Code {
+        code: "ZL0034",
+        title: "Invalid config profile name",
+        explanation: "The profile (`APP_PROFILE` or `Config::builder().profile(..)`) contains \
+            characters other than ASCII letters, digits, `-` and `_`.",
+        fix: "Use a plain name: APP_PROFILE=production",
+    },
+    // ---- databases ----------------------------------------------------------
+    Code {
+        code: "ZL0040",
+        title: "Database URL not set",
+        explanation: "`Database::from_env()` reads `DATABASE_URL` (or the variable you named), \
+            and it is not set.",
+        fix: "Add to .env: DATABASE_URL=sqlite://app.db?mode=rwc (or postgres://user:pass@localhost/app)",
+    },
+    Code {
+        code: "ZL0041",
+        title: "Cannot connect to the database",
+        explanation: "The pool could not open a connection at startup: the server is down, the \
+            credentials are wrong, or a SQLite file cannot be created.",
+        fix: "Check DATABASE_URL; for SQLite add ?mode=rwc so the file is created; for Postgres start it, e.g. docker run -p 5432:5432 -e POSTGRES_PASSWORD=pass postgres",
+    },
+    Code {
+        code: "ZL0042",
+        title: "Migrations unreadable",
+        explanation: "The migrations directory exists but its files cannot be read or are not \
+            named `<version>_<name>.sql`.",
+        fix: "Create migrations with: zapline db new <name> (names them <timestamp>_<name>.sql)",
+    },
+    Code {
+        code: "ZL0043",
+        title: "Migration failed",
+        explanation: "A migration's SQL failed, or an applied migration was edited (its checksum \
+            changed). Applied migrations are immutable.",
+        fix: "Fix the SQL of the migration named in the message; to change an applied one, add a new migration: zapline db new fix_<name> (in development you can also delete the SQLite file)",
+    },
+    Code {
+        code: "ZL0044",
+        title: "No database registered",
+        explanation: "A handler takes `Db`, but the app never called `.database(..)`. With both \
+            the `postgres` and `sqlite` features on, `Db` means Postgres; use `SqliteDb` for \
+            SQLite.",
+        fix: "App::new().database(Database::from_env())",
+    },
+    Code {
+        code: "ZL0045",
+        title: "Database registered too late",
+        explanation: "Jobs and seed data use the pool that `.database(..)` creates at startup, \
+            so it has to be registered before them.",
+        fix: "App::new().database(Database::from_env()).jobs(Jobs::new().register::<MyJob>()).seed(|db| async move { Ok(()) })",
+    },
+    Code {
+        code: "ZL0046",
+        title: "No seed data",
+        explanation: "`zapline db seed` ran, but the app has no seed function.",
+        fix: ".seed(|db| async move { Factory::new(\"todos\").create(&db).await?; Ok(()) }) // after .database(..)",
+    },
+    // ---- templates ----------------------------------------------------------
+    Code {
+        code: "ZL0050",
+        title: "No templates registered",
+        explanation: "A handler takes `Views`, but the app has no template directory.",
+        fix: "App::new().views(\"templates\")",
+    },
+    Code {
+        code: "ZL0051",
+        title: "Template error",
+        explanation: "A template does not exist, does not parse, or failed while rendering (an \
+            undefined filter, a wrong type). The message names the template and line. \
+            Templates are found relative to the working directory, i.e. the project root under \
+            `cargo run`.",
+        fix: "Fix the template at the reported line; extend layouts with {% extends \"base.html\" %} and pass every variable the template uses: views.render(\"page.html\", context! { title })",
+    },
+    // ---- request rejections -------------------------------------------------
+    Code {
+        code: "ZL0060",
+        title: "Path parameter rejected",
+        explanation: "A `Path<T>` parameter did not parse into its type, e.g. `/users/abc` for \
+            `Path<u64>`. The client gets 400 `invalid_path`.",
+        fix: "Send a value of the parameter's type, or take it as text: Path(id): Path<String>",
+    },
+    Code {
+        code: "ZL0061",
+        title: "Query string rejected",
+        explanation: "`Query<T>` could not deserialize the query string: a missing required \
+            field or a value of the wrong type. The client gets 400 `invalid_query`.",
+        fix: "Make optional fields Option<_> or #[serde(default)] in the query struct",
+    },
+    Code {
+        code: "ZL0062",
+        title: "Malformed JSON body",
+        explanation: "The body of a `Json<T>` request is not valid JSON. `details` has the line \
+            and column. The client gets 422 `invalid_json`.",
+        fix: "Send valid JSON with Content-Type: application/json, e.g. curl -H 'content-type: application/json' -d '{\"name\":\"x\"}'",
+    },
+    Code {
+        code: "ZL0063",
+        title: "JSON body has the wrong shape",
+        explanation: "The body is valid JSON but does not match `T`: a missing field, a wrong \
+            type, an unknown variant. `details.path` points at the value. The client gets 422 \
+            `invalid_body`.",
+        fix: "Match the request type, or relax it: Option<_> / #[serde(default)] for fields clients may leave out",
+    },
+    Code {
+        code: "ZL0064",
+        title: "Wrong Content-Type",
+        explanation: "`Json<T>` needs `application/json` and `Form<T>` needs \
+            `application/x-www-form-urlencoded`. The client gets 415 `unsupported_media_type`.",
+        fix: "Send the header: Content-Type: application/json (fetch: headers: { 'content-type': 'application/json' })",
+    },
+    Code {
+        code: "ZL0065",
+        title: "Form body rejected",
+        explanation: "`Form<T>` could not deserialize the form. The client gets 422 \
+            `invalid_form`.",
+        fix: "Name the inputs like the struct's fields; checkboxes are absent when unchecked, so use #[serde(default)] bool",
+    },
+    Code {
+        code: "ZL0066",
+        title: "Validation failed",
+        explanation: "`Valid<T>` ran the struct's `#[validate(..)]` rules and some failed. \
+            `details` lists them per field. The client gets 422 `validation_error`.",
+        fix: "Send values that pass the rules shown in details, or change the rules: #[validate(length(min = 1))]",
+    },
+    Code {
+        code: "ZL0067",
+        title: "Body too large",
+        explanation: "The request body is larger than the app's limit (2 MiB by default). The \
+            client gets 413.",
+        fix: "Raise the limit: App::new().body_limit(16 * 1024 * 1024); or stream the body with BodyStream",
+    },
+    // ---- services the app did not register ----------------------------------
+    Code {
+        code: "ZL0070",
+        title: "No mailer registered",
+        explanation: "A handler takes `Mailer`, but the app has none.",
+        fix: "App::new().mailer(Mailer::from_env()?) // SMTP_URL; without it, mail goes to the dev inbox at /_dev/mail",
+    },
+    Code {
+        code: "ZL0071",
+        title: "No cache registered",
+        explanation: "A handler takes `Cache`, but the app has none.",
+        fix: "App::new().cache(Cache::memory())",
+    },
+    Code {
+        code: "ZL0072",
+        title: "No Redis registered",
+        explanation: "A handler takes `Redis`, but the app has none.",
+        fix: "App::new().redis(Redis::from_env()?) // REDIS_URL=redis://localhost:6379",
+    },
+    Code {
+        code: "ZL0073",
+        title: "No cookie key",
+        explanation: "Signed or private cookies (and sessions) need a key, and none was \
+            registered.",
+        fix: "App::new().cookie_key(zapline::cookies::key_from_env(\"SESSION_SECRET\")?) // 32+ random bytes: openssl rand -base64 48",
+    },
+    Code {
+        code: "ZL0074",
+        title: "No CSRF middleware",
+        explanation: "A handler takes `CsrfToken`, but the `Csrf` middleware that issues tokens \
+            is not installed.",
+        fix: "App::new().wrap(Csrf::new())",
+    },
+    Code {
+        code: "ZL0075",
+        title: "JWT not configured",
+        explanation: "JWT extraction or signing needs a `JwtConfig`, and none was registered.",
+        fix: "App::new().jwt(JwtConfig::hs256(std::env::var(\"JWT_SECRET\")?))",
+    },
+    Code {
+        code: "ZL0076",
+        title: "No translations registered",
+        explanation: "A handler takes `Locale`, but the app has no translations.",
+        fix: "App::new().i18n(I18n::load(\"locales\")?)",
+    },
+    Code {
+        code: "ZL0077",
+        title: "No file storage registered",
+        explanation: "A handler takes `Storage`, but the app has none.",
+        fix: "App::new().storage(Storage::from_env()?) // a local directory, or S3 when S3_BUCKET is set",
+    },
+    Code {
+        code: "ZL0078",
+        title: "Authorization misconfigured",
+        explanation: "A route requires roles or scopes, but nothing checks them after routing, \
+            or a `Guard` was installed as global middleware. Policies fail closed: the route \
+            answers 500 instead of letting the request through.",
+        fix: "Check roles after routing: .wrap_route(Authenticate::new(authenticator).authorize()) or .wrap_route(guard), never .wrap(guard)",
+    },
+    // ---- runtime ------------------------------------------------------------
+    Code {
+        code: "ZL0080",
+        title: "Handler panicked",
+        explanation: "A handler or middleware panicked. The panic was caught and answered with \
+            500. Panics usually come from `unwrap()`, `expect()` or indexing.",
+        fix: "Return an error instead of panicking: replace .unwrap() with ? (or .ok_or_else(Error::not_found)?) in the function at the reported location",
+    },
+    Code {
+        code: "ZL0081",
+        title: "Unhandled error",
+        explanation: "An error reached the client as a 500 through `?`: any std error converts \
+            into a logged 500 with a generic message. Client mistakes should get a 4xx instead.",
+        fix: "Map expected failures to client errors: .ok_or_else(Error::not_found)? or .map_err(|e| Error::bad_request(e.to_string()))?; keep real failures as Error::internal(\"what failed\").with_source(e)",
+    },
+    // ---- tooling ------------------------------------------------------------
+    Code {
+        code: "ZL0090",
+        title: "Dev console not mounted",
+        explanation: "The live tools of `zapline mcp` read the running app's `/_dev` console, \
+            which this app does not serve. It exists only in debug builds.",
+        fix: "App::new().dev_console() // debug builds only; does nothing in release",
+    },
+    Code {
+        code: "ZL0091",
+        title: "Dev app not running",
+        explanation: "Nothing answers at the app's address. The live tools need the app \
+            running, ideally under `zapline dev`, which records its address in \
+            target/zapline-dev.addr.",
+        fix: "Start it: zapline dev (or pass the address: url = \"http://127.0.0.1:8080\")",
+    },
+]
