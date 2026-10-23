@@ -1,6 +1,6 @@
 //! `ZAPLINE_RECORD=1` and saving snapshots into a project. One test, in its
 //! own binary: it changes the process's environment and working directory.
-#![cfg(all(debug_assertions, feature = "json"))]
+#![cfg(all(debug_assertions, feature = "json", feature = "form"))]
 
 use serde_json::Value;
 use zapline::prelude::*;

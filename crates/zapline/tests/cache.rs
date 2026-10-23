@@ -1,5 +1,5 @@
 //! `Cache`, `ResponseCache` and `ETag`.
-#![cfg(feature = "cache")]
+#![cfg(all(feature = "cache", feature = "macros"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

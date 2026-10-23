@@ -1,5 +1,5 @@
 //! Operation ids for same-named handlers in different modules.
-#![cfg(feature = "openapi")]
+#![cfg(all(feature = "macros", feature = "openapi"))]
 
 use serde_json::Value;
 use zapline::openapi::{spec_for, OpenApi};

@@ -3,7 +3,7 @@
 //! `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`) points at an
 //! S3-compatible server such as MinIO. Set `ZAPLINE_TEST_S3_NO_PRESIGN` for
 //! servers that can't check presigned links (moto).
-#![cfg(feature = "storage")]
+#![cfg(all(feature = "storage", feature = "macros"))]
 
 use std::time::Duration;
 

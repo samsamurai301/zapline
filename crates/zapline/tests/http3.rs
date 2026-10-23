@@ -1,6 +1,6 @@
 //! HTTP/3 (experimental): real QUIC connections with an rcgen self-signed
 //! certificate and an h3-quinn client, next to HTTPS on TCP.
-#![cfg(feature = "http3")]
+#![cfg(all(feature = "http3", feature = "json"))]
 
 mod server_support;
 

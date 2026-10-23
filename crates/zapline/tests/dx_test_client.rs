@@ -3,9 +3,8 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
-use zapline::test::{MultipartForm, SetCookie, TestClient, TestResponse};
+use zapline::test::{MultipartForm, SetCookie, TestClient};
 
 /// A response that sets each of `cookies`.
 fn set_cookies(cookies: &[&'static str]) -> Response {
@@ -234,6 +233,7 @@ async fn cookie_jar_responses_round_trip() {
 #[cfg(feature = "cookies")]
 #[tokio::test]
 async fn session_login_flow() {
+    use serde::Deserialize;
     use serde_json::json;
     use zapline::cookies::Key;
     use zapline::session::{MemoryStore, Session, SessionLayer};
@@ -395,6 +395,9 @@ async fn multipart_content_type_and_body() {
 #[cfg(feature = "query")]
 #[tokio::test]
 async fn query_strings() {
+    use serde::{Deserialize, Serialize};
+    use zapline::test::TestResponse;
+
     #[derive(Serialize, Deserialize, Debug, PartialEq)]
     struct Search {
         q: String,

@@ -1,5 +1,6 @@
 //! Static file serving: content types, index/fallback files, conditional
 //! and range requests, precompressed variants, HEAD, and path security.
+#![cfg(all(feature = "fs", feature = "json"))]
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};

@@ -1,7 +1,7 @@
 //! `zapline::db` against a real Postgres. Runs only when
 //! `ZAPLINE_TEST_POSTGRES_URL` is set (CI starts a Postgres service), e.g.
 //! `ZAPLINE_TEST_POSTGRES_URL=postgres://postgres@localhost/postgres`.
-#![cfg(feature = "postgres")]
+#![cfg(all(feature = "postgres", feature = "json"))]
 
 use serde_json::json;
 use zapline::db::sqlx;

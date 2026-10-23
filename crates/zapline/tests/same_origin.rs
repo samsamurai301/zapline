@@ -1,5 +1,6 @@
 //! `SameOrigin`: cross-site browser requests can't change state; same-site
 //! pages, non-browser clients and safe methods pass.
+#![cfg(feature = "json")]
 
 use zapline::middleware::SameOrigin;
 use zapline::prelude::*;

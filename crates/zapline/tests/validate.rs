@@ -1,4 +1,10 @@
 //! `Valid<T>`: validation of JSON, form, query and path input.
+#![cfg(all(
+    feature = "macros",
+    feature = "validate",
+    feature = "query",
+    feature = "form"
+))]
 
 use std::borrow::Cow;
 

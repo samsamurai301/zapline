@@ -1,5 +1,6 @@
 //! Streaming request bodies (`BodyStream`) and streaming responses
 //! (`StreamBody`, `Body::from_stream`, `Ndjson`).
+#![cfg(feature = "json")]
 
 use std::net::SocketAddr;
 use std::pin::Pin;

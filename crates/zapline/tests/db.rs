@@ -1,6 +1,6 @@
 //! `zapline::db` with in-memory SQLite: pool, migrations, extractor, error
 //! mapping and the health check.
-#![cfg(feature = "sqlite")]
+#![cfg(all(feature = "sqlite", feature = "json"))]
 
 use serde::{Deserialize, Serialize};
 use serde_json::json;

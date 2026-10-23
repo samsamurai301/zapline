@@ -1,5 +1,5 @@
 //! OAuth logins against an in-process fake provider on a real socket.
-#![cfg(feature = "oauth")]
+#![cfg(all(feature = "oauth", feature = "macros"))]
 
 use std::collections::HashMap;
 use std::net::SocketAddr;

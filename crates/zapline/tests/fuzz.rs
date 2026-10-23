@@ -2,6 +2,12 @@
 //! panic on a boundary value, a 5xx, an undeclared status, a response that
 //! breaks its schema, a hang), shrink them to small requests, stay quiet on
 //! a correct app, and be deterministic.
+#![cfg(all(
+    feature = "macros",
+    feature = "openapi",
+    feature = "validate",
+    feature = "query"
+))]
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -379,11 +385,13 @@ async fn events() -> Sse<futures_util::stream::Pending<Result<zapline::sse::Even
     Sse::new(futures_util::stream::pending())
 }
 
+#[cfg(feature = "ws")]
 #[get("/ws")]
 async fn socket(ws: WebSocketUpgrade) -> Response {
     ws.on_upgrade(|_socket| async {})
 }
 
+#[cfg(feature = "ws")]
 #[tokio::test]
 async fn websockets_and_event_streams_are_skipped() {
     let report = App::new().mount((events, socket)).test().fuzz().await;

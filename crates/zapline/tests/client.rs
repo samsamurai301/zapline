@@ -6,7 +6,9 @@
 //! Regenerate the snapshots with
 //! `ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test -p zapline --all-features --test client`.
 #![cfg(all(
+    feature = "macros",
     feature = "openapi",
+    feature = "query",
     feature = "validate",
     feature = "multipart",
     feature = "form"

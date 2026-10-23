@@ -3,7 +3,12 @@
 //! Also compiled without the `openapi` feature (spec assertions are gated) to
 //! check that expansions don't depend on it:
 //! `cargo test -p zapline --no-default-features --features macros,json,query,form --test macros`.
-
+#![cfg(all(
+    feature = "macros",
+    feature = "json",
+    feature = "query",
+    feature = "form"
+))]
 #![allow(clippy::unused_async)]
 
 use schemars::JsonSchema;

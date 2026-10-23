@@ -1,7 +1,7 @@
 //! Redis: the client, and the cache, live updates, sessions and rate limits
 //! shared between instances. Runs when `ZAPLINE_TEST_REDIS_URL` points at a
 //! Redis server it may write to (keys under `zapline:`).
-#![cfg(feature = "redis")]
+#![cfg(all(feature = "redis", feature = "cache", feature = "macros"))]
 
 use std::time::Duration;
 

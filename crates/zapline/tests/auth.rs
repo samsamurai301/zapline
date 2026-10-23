@@ -1,5 +1,6 @@
 //! Credential extractors, the `Authenticate` middleware, `CurrentUser`,
 //! route policies and guards.
+#![cfg(all(feature = "json", feature = "query"))]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 //! Fingerprinted assets: hashed URLs, long caching for current hashes,
 //! plain names still served, and `asset()` in templates.
-#![cfg(feature = "fs")]
+#![cfg(all(feature = "fs", feature = "macros"))]
 
 use zapline::fs::Assets;
 use zapline::prelude::*;

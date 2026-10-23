@@ -1,5 +1,6 @@
 //! Tests for the extension points plugins build on: lifecycle hooks, build
 //! hooks, route metadata, route middleware, error handler, connection info.
+#![cfg(feature = "json")]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

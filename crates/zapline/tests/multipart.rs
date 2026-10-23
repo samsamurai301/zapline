@@ -1,4 +1,5 @@
 //! Multipart form data: fields, file uploads, limits and error mapping.
+#![cfg(all(feature = "multipart", feature = "json"))]
 
 use std::net::SocketAddr;
 use std::time::Duration;

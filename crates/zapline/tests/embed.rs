@@ -4,7 +4,6 @@
 #![cfg(feature = "macros")]
 
 use zapline::embed::{Dir, EmbeddedFile};
-use zapline::prelude::*;
 
 fn embedded_static() -> Dir {
     zapline::embed!("tests/fixtures/embed/static").in_memory()
@@ -86,6 +85,7 @@ fn edits_on_disk_show_up_in_debug_builds_but_not_in_memory() {
 mod static_files {
     use super::*;
     use zapline::fs::ServeDir;
+    use zapline::prelude::*;
 
     fn client() -> zapline::test::TestClient {
         App::new()
@@ -239,6 +239,7 @@ mod static_files {
 #[cfg(all(feature = "views", feature = "fs"))]
 mod views {
     use super::*;
+    use zapline::prelude::*;
     use zapline::view::{context, HxRequest, Views};
 
     #[get("/hello/{name}")]
@@ -295,6 +296,7 @@ mod views {
 mod migrations {
     use super::*;
     use zapline::db::{sqlx, Database, SqliteDb as Db};
+    use zapline::prelude::*;
 
     #[get("/columns")]
     async fn columns(db: Db) -> Result<String> {

@@ -4,7 +4,6 @@
 
 use zapline::admin::AdminBackend;
 use zapline::db::sqlx::{self, Pool};
-use zapline::middleware::Next;
 use zapline::prelude::*;
 use zapline::test::TestClient;
 
@@ -218,7 +217,8 @@ where
     assert_ne!(post(&ro, "/admin/posts/1/delete", "").await.status(), 303);
 }
 
-async fn admins_only(req: Request, next: Next) -> Response {
+#[cfg(feature = "sqlite")]
+async fn admins_only(req: Request, next: zapline::middleware::Next) -> Response {
     if req.headers().get("x-admin").is_none() {
         return Error::forbidden().into_response();
     }

@@ -1,5 +1,5 @@
 //! The development console at `/_dev`.
-#![cfg(debug_assertions)]
+#![cfg(all(debug_assertions, feature = "macros"))]
 
 use std::net::SocketAddr;
 

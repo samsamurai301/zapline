@@ -1,5 +1,6 @@
 //! Dependency injection: providers, trait objects, async factories,
 //! overrides for tests, `Inject`, and request-scoped `Cached<T>`.
+#![cfg(feature = "json")]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};

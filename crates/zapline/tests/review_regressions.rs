@@ -1,4 +1,5 @@
 //! Regression tests for issues found in the pre-release review.
+#![cfg(feature = "query")]
 
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};

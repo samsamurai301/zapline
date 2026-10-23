@@ -1,6 +1,11 @@
 //! Snapshot tests from recorded traffic: recording in the dev console,
 //! redaction, and replay (pass, fail, update).
-#![cfg(all(debug_assertions, feature = "json"))]
+#![cfg(all(
+    debug_assertions,
+    feature = "json",
+    feature = "query",
+    feature = "form"
+))]
 
 use std::net::SocketAddr;
 use std::path::Path as FsPath;

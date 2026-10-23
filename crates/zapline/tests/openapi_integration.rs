@@ -1,7 +1,15 @@
 //! End to end: an app using JWT auth policies, dependency injection,
 //! background tasks, multipart uploads, SSE, raw body streams, validation,
 //! health checks, metrics and static files, and the spec it documents.
-#![cfg(all(feature = "jwt", feature = "multipart", feature = "fs"))]
+#![cfg(all(
+    feature = "macros",
+    feature = "openapi",
+    feature = "query",
+    feature = "validate",
+    feature = "jwt",
+    feature = "multipart",
+    feature = "fs"
+))]
 
 use std::collections::BTreeSet;
 use std::path::Path as FsPath;

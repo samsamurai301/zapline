@@ -1,4 +1,5 @@
 //! Live updates: `Live` pub/sub, over SSE to a real socket.
+#![cfg(feature = "macros")]
 
 use std::net::SocketAddr;
 use std::time::Duration;

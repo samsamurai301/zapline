@@ -3,6 +3,7 @@
 //!
 //! Tests never mutate the process environment: they inject variables with
 //! `env_source` and resolve files against temp dirs with `base_dir`.
+#![cfg(feature = "config")]
 
 use std::collections::HashMap;
 use std::fs;

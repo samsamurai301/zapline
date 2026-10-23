@@ -1,4 +1,5 @@
 //! Server-Sent Events: wire format, headers, error handling and keep-alive.
+#![cfg(feature = "json")]
 
 use std::convert::Infallible;
 use std::net::SocketAddr;

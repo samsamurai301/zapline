@@ -1,5 +1,6 @@
 //! Health checks: liveness, readiness, combined report, check semantics
 //! (critical, timeouts, panics, caching) and the readiness toggle.
+#![cfg(feature = "json")]
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

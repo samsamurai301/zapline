@@ -2,6 +2,13 @@
 //! auth policies (security requirements, `401`/`403`), plumbing extractors,
 //! streaming and multipart bodies, default error responses and
 //! infrastructure routes (docs, health, metrics, static files).
+#![cfg(all(
+    feature = "macros",
+    feature = "openapi",
+    feature = "validate",
+    feature = "query",
+    feature = "form"
+))]
 
 use std::sync::Arc;
 
@@ -14,7 +21,7 @@ use zapline::di::{Cached, Dep};
 use zapline::health::Health;
 use zapline::metrics::Metrics;
 use zapline::middleware::RequestId;
-use zapline::openapi::{spec_for, ApiInput, ApiOutput, AuthKind, OpenApi, OperationDoc};
+use zapline::openapi::{spec_for, ApiInput, AuthKind, OpenApi, OperationDoc};
 use zapline::prelude::*;
 use zapline::sse::{Event, Sse};
 use zapline::stream::{BodyStream, Ndjson, StreamBody};
@@ -597,6 +604,7 @@ fn websocket_handshake_documents_101() {
 fn cookies_sessions_and_csrf() {
     use zapline::auth::CsrfToken;
     use zapline::cookies::{CookieJar, PrivateCookieJar, SignedCookieJar};
+    use zapline::openapi::ApiOutput;
     use zapline::session::Session;
 
     fn known<T: ApiInput>() {}

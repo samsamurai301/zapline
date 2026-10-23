@@ -1,5 +1,6 @@
 //! WebSocket tests: handshake validation in-process, conversations over a
 //! real socket with the tokio-tungstenite client.
+#![cfg(all(feature = "ws", feature = "json"))]
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};

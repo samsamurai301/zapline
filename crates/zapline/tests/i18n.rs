@@ -1,6 +1,6 @@
 //! Translations: loading, language negotiation, the `lang` cookie,
 //! fallbacks, plurals, and `t(...)` in templates.
-#![cfg(feature = "i18n")]
+#![cfg(all(feature = "i18n", feature = "macros"))]
 
 use zapline::i18n::{I18n, Locale};
 use zapline::prelude::*;

@@ -1,6 +1,6 @@
 //! OTLP export: request spans, child spans and events reach a collector
 //! (an in-process fake) as OpenTelemetry JSON, continuing upstream traces.
-#![cfg(feature = "otlp")]
+#![cfg(all(feature = "otlp", feature = "macros"))]
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

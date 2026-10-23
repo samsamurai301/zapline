@@ -1,5 +1,6 @@
 //! Upgraded WebSocket connections and the server: `max_connections`,
 //! `max_upgraded` and graceful shutdown.
+#![cfg(feature = "ws")]
 
 mod server_support;
 

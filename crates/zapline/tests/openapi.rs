@@ -1,5 +1,11 @@
 //! OpenAPI generation: macro routes, builder routes, nested groups, schemas,
 //! docs pages and export.
+#![cfg(all(
+    feature = "macros",
+    feature = "openapi",
+    feature = "validate",
+    feature = "query"
+))]
 
 use std::collections::HashSet;
 
