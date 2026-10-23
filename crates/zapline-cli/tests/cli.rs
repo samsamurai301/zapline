@@ -63,6 +63,99 @@ fn help_lists_every_command_with_examples() {
     assert!(help.contains("cargo zapline"), "{help}");
 }
 
+fn repo_file(name: &str) -> String {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(name);
+    fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+}
+
+/// The lines of `markdown` between the heading `heading` and the next heading.
+fn section<'a>(markdown: &'a str, heading: &str) -> Vec<&'a str> {
+    markdown
+        .lines()
+        .skip_while(|l| l.trim() != heading)
+        .skip(1)
+        .take_while(|l| !l.starts_with('#'))
+        .collect()
+}
+
+/// Features that have shipped and so must not be listed as still to do.
+const SHIPPED: [&str; 4] = ["redis", "otlp", "traceparent", "seaorm"];
+
+#[test]
+fn roadmap_status_lists_every_cli_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let help = stdout(&run_in(tmp.path(), &["--help"]));
+    let commands: Vec<&str> = help
+        .lines()
+        .skip_while(|l| !l.starts_with("Commands:"))
+        .skip(1)
+        .take_while(|l| l.starts_with("  "))
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|c| *c != "help")
+        .collect();
+    assert!(commands.len() > 10, "{help}");
+    let roadmap = repo_file("ROADMAP.md");
+    let row = roadmap
+        .lines()
+        .find(|l| l.starts_with("| CLI:"))
+        .expect("ROADMAP.md has a CLI status row");
+    let listed: Vec<&str> = row
+        .trim_start_matches("| CLI:")
+        .split('|')
+        .next()
+        .unwrap()
+        .split(',')
+        .map(str::trim)
+        .collect();
+    for cmd in &commands {
+        assert!(
+            listed.contains(cmd),
+            "ROADMAP.md CLI row lacks `{cmd}`: {row}"
+        );
+    }
+}
+
+#[test]
+fn roadmap_next_milestones_omit_shipped_features() {
+    let roadmap = repo_file("ROADMAP.md");
+    let next = section(&roadmap, "## Next milestones");
+    assert!(!next.is_empty());
+    for line in next {
+        let lower = line.to_lowercase();
+        for done in SHIPPED {
+            assert!(
+                !lower.contains(done),
+                "ROADMAP.md lists shipped `{done}` as a next milestone: {line}"
+            );
+        }
+    }
+    for needle in ["OTLP", "traceparent", "RedisStore", "RateLimit::redis"] {
+        assert!(roadmap.contains(needle), "ROADMAP.md status lacks {needle}");
+    }
+}
+
+#[test]
+fn readme_planned_next_leaves_no_shipped_item_unchecked() {
+    let readme = repo_file("README.md");
+    let unchecked: Vec<&str> = readme
+        .lines()
+        .skip_while(|l| !l.contains("Planned next"))
+        .take_while(|l| !l.starts_with('#'))
+        .filter(|l| l.trim_start().starts_with("- [ ]"))
+        .collect();
+    for line in unchecked {
+        let lower = line.to_lowercase();
+        for done in SHIPPED.iter().chain(&["database integration guides"]) {
+            assert!(
+                !lower.contains(done),
+                "README.md leaves shipped `{done}` unchecked: {line}"
+            );
+        }
+    }
+}
+
 #[test]
 fn subcommand_help_explains_templates_and_markers() {
     let tmp = tempfile::tempdir().unwrap();

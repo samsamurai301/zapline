@@ -10,11 +10,12 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits (WebSockets included in `max_connections`/`max_upgraded` and the drain) | done |
 | OpenAPI 3.1 and docs UIs, validation | done |
 | DI, layered config, background tasks, cron schedules, durable and cluster-wide cron jobs, job metrics | done |
-| Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed, session-bound) | done |
-| Middleware suite: CORS, compression, rate limit, request IDs, security headers, timeouts, catch-panic, load shedding, path normalization | done |
+| Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions (in-memory, database or Redis `RedisStore`), CSRF (signed, session-bound) | done |
+| Middleware suite: CORS, compression, rate limit (in-memory or Redis-backed `RateLimit::redis`), request IDs, security headers, timeouts, catch-panic, load shedding, path normalization | done |
 | Realtime and content: WebSockets, SSE, streaming, static files, multipart | done |
-| Observability: tracing, Prometheus metrics, health | done |
-| CLI: new, generate, dev, routes, openapi, doctor, bench | done |
+| Observability: tracing, Prometheus metrics, health, OpenTelemetry OTLP traces with W3C `traceparent` propagation (`otlp` feature) | done |
+| Distributed stores: Redis client (`redis` feature, `redis-tls` for `rediss://`), Redis-backed cache, live updates, rate limits and sessions | done |
+| CLI: new, run, generate, add, dev, snap, routes, openapi, client, db, check, test, fuzz, css, explain, mcp, doctor, bench, ship | done |
 | Guide (mdBook, every snippet compile-checked) and examples | done |
 | Ecosystem examples: sqlx transactions, SeaORM, Diesel, Leptos SSR (`examples/ecosystem`) | done |
 | Security review (5 dimensions) and fixes | done. Findings and fixes are in the git history ("Fix review findings ...") |
@@ -30,6 +31,4 @@ Run `./scripts/check.sh` to verify everything locally.
 
 1. **Release:** push to the private repository `samsamurai301/zapline` (run `publish-to-github.ps1` or `.sh`) and watch the first CI run on Linux, macOS and Windows. When going public, publish `zapline-macros`, `zapline-codegen`, `zapline` and `zapline-cli` to crates.io (in that order) and the guide with GitHub Pages.
 2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. The TechEmpower implementation (`bench/tfb/`, all seven tests, verified locally with TFB's checks) still has to be opened as a pull request against TechEmpower/FrameworkBenchmarks once the commit it builds is pushed (`bench/tfb/README.md` has the steps). Consider exposing sqlx's `test_before_acquire` on `Database`: the ping it adds to every checkout cost about a quarter of single-query throughput in `bench/tfb`.
-3. **Distributed stores:** pluggable rate-limit and session stores (Redis).
-4. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
-5. **Protocols:** done: WebSockets over HTTP/2 (RFC 8441) and experimental HTTP/3 (`http3` feature, quinn + h3, `Alt-Svc`). Next: WebSockets over HTTP/3 (RFC 9220), WebTransport, 0-RTT, and taking HTTP/3 out of experimental once `h3` reaches a stable release.
+3. **Protocols:** done: WebSockets over HTTP/2 (RFC 8441) and experimental HTTP/3 (`http3` feature, quinn + h3, `Alt-Svc`). Next: WebSockets over HTTP/3 (RFC 9220), WebTransport, 0-RTT, and taking HTTP/3 out of experimental once `h3` reaches a stable release.

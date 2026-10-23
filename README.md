@@ -222,10 +222,10 @@ zapline is **0.1, pre-release**. The API may change before 1.0. It has about 830
 - [x] WebSockets over HTTP/2 (RFC 8441)
 - [x] HTTP/3 over QUIC (experimental, feature `http3`)
 - [ ] WebTransport, WebSockets over HTTP/3 (RFC 9220)
-- [ ] Pluggable distributed stores for rate limiting and sessions (Redis)
-- [ ] OpenTelemetry OTLP exporter
+- [x] Pluggable distributed stores for rate limiting and sessions (Redis)
+- [x] OpenTelemetry OTLP exporter with `traceparent` propagation (feature `otlp`)
 - [ ] Submit to the TechEmpower Framework Benchmarks (the implementation, with all database tests, is ready in `bench/tfb/`)
-- [ ] Database integration guides (sqlx, SeaORM, Diesel)
+- [x] Database integration guides (sqlx, SeaORM, Diesel, in `examples/ecosystem`)
 
 ## Contributing
 
