@@ -7,6 +7,7 @@
 pub mod auth;
 pub mod db_resource;
 pub mod deploy;
+pub mod evolve;
 pub mod job;
 pub mod mailer;
 pub mod register;
@@ -380,8 +381,6 @@ fn sql_resource(
 ) -> Result<Report> {
     let names = ResourceNames::parse(name, plural)?;
     let mut fields = db_resource::parse_fields(fields)?;
-    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
-    let dialect = dialect_of(&manifest);
     let html = project.root.join("templates/base.html").is_file();
     let mut report = Report::default();
     for field in &mut fields {
@@ -398,23 +397,14 @@ fn sql_resource(
         }
         resolve_parent(project, parent, &mut report);
     }
-    let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
-    let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");
-    let krate = crate_name_of(project);
-    let plan = db_resource::Plan {
-        names: &names,
-        fields: &fields,
-        dialect,
-        html,
-        // Flash messages need sessions: the fullstack template and `g auth` add them.
-        flash: auth::has_sessions(&lib) || project.root.join("src/routes/auth.rs").is_file(),
-        test_crate: testable.then_some(krate.as_str()),
+    let settings = ResourceSettings::of(project);
+    let plan = settings.plan(
+        &names,
+        &fields,
         // Regenerating (--force) rewrites the existing migration instead of adding a second one.
-        migration: crate::db::MigrationFiles::plan(
-            &project.root,
-            &format!("create_{}", names.plural),
-        )?,
-    };
+        crate::db::MigrationFiles::plan(&project.root, &format!("create_{}", names.plural))?,
+    );
+    let testable = plan.test_crate.is_some();
     let files = db_resource::files(&plan);
 
     let edit = plan_route_registration(project, &names.plural)?;
@@ -444,6 +434,49 @@ fn sql_resource(
         report.notes.push(note);
     }
     Ok(report)
+}
+
+/// What a SQL resource's code depends on besides its names and fields: the
+/// same for `generate resource` and for `generate migration` regenerating it.
+pub(crate) struct ResourceSettings {
+    dialect: db_resource::Dialect,
+    html: bool,
+    flash: bool,
+    test_crate: Option<String>,
+}
+
+impl ResourceSettings {
+    /// Reads them from the project.
+    pub(crate) fn of(project: &Project) -> Self {
+        let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
+        let lib = fs::read_to_string(project.root.join("src/lib.rs")).unwrap_or_default();
+        let testable = project.lib_name.is_some() && lib.contains("pub fn app(db: Database)");
+        ResourceSettings {
+            dialect: dialect_of(&manifest),
+            html: project.root.join("templates/base.html").is_file(),
+            // Flash messages need sessions: the fullstack template and `g auth` add them.
+            flash: auth::has_sessions(&lib) || project.root.join("src/routes/auth.rs").is_file(),
+            test_crate: testable.then(|| crate_name_of(project)),
+        }
+    }
+
+    /// The generation plan for `names` and `fields`.
+    pub(crate) fn plan<'a>(
+        &'a self,
+        names: &'a ResourceNames,
+        fields: &'a [db_resource::Field],
+        migration: crate::db::MigrationFiles,
+    ) -> db_resource::Plan<'a> {
+        db_resource::Plan {
+            names,
+            fields,
+            dialect: self.dialect,
+            html: self.html,
+            flash: self.flash,
+            test_crate: self.test_crate.as_deref(),
+            migration,
+        }
+    }
 }
 
 /// The zapline features code for `fields` needs: `chrono` for dates and
@@ -565,12 +598,14 @@ fn migration_kind(slug: &str, has_fields: bool) -> MigrationKind {
 }
 
 /// `ALTER TABLE <table> ADD COLUMN` for each field. A required column gets
-/// a default so rows already there stay valid; one with no sensible default
-/// is an error, or, when `lenient` (re-adding a removed column on the way
-/// down), comes back optional.
+/// a default so rows already there stay valid: the one in `defaults` (from
+/// `name:type=value`), else the type's zero value. One with no sensible
+/// default is an error, or, when `lenient` (re-adding a removed column on
+/// the way down), comes back optional.
 fn add_columns_sql(
     table: &str,
     fields: &[db_resource::Field],
+    defaults: &[(String, String)],
     dialect: db_resource::Dialect,
     lenient: bool,
 ) -> Result<String> {
@@ -578,21 +613,30 @@ fn add_columns_sql(
     let mut sql = String::new();
     for f in fields {
         let mut column = f.column_sql(dialect);
-        let default = match (f.optional, f.ty) {
-            (true, _) | (false, FieldType::Bool) => "",
-            // Existing rows need a value for a required column.
-            (false, FieldType::String | FieldType::Text) => " DEFAULT ''",
-            (false, FieldType::Int | FieldType::Float) => " DEFAULT 0",
-            (false, _) if lenient => {
-                column = column.replace(" NOT NULL", "");
-                ""
+        let given = defaults.iter().find(|(name, _)| *name == f.name);
+        let default = match (given, f.optional, f.ty) {
+            (Some((_, literal)), _, FieldType::Bool) => {
+                column = column.replace(" DEFAULT FALSE", "");
+                format!(" DEFAULT {literal}")
             }
-            (false, _) => bail!(
+            (Some((_, literal)), _, _) => format!(" DEFAULT {literal}"),
+            (None, true, _) | (None, false, FieldType::Bool) => String::new(),
+            // Existing rows need a value for a required column.
+            (None, false, FieldType::String | FieldType::Text) => " DEFAULT ''".into(),
+            (None, false, FieldType::Int | FieldType::Float) => " DEFAULT 0".into(),
+            (None, false, _) if lenient => {
+                column = column.replace(" NOT NULL", "");
+                String::new()
+            }
+            (None, false, _) => bail!(
                 "`{}` can't be added as a required column: rows that already exist have no value for it\n\
-                 hint: add it as optional (`{}:{}?`), fill it in, then make it required in a later migration",
+                 hint: give them one (`{}:{}=<value>`), or add it as optional (`{}:{}?`), fill it in, \
+                 then make it required in a later migration",
                 f.name,
                 f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
-                type_name(f.ty)
+                f.ty.name(),
+                f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
+                f.ty.name()
             ),
         };
         sql.push_str(&format!(
@@ -603,6 +647,44 @@ fn add_columns_sql(
         }
     }
     Ok(sql)
+}
+
+/// Splits `views:int=0` into the field spec and the SQL literal of its
+/// default (checked against the type); `None` without `=`.
+fn split_default(spec: &str, dialect: db_resource::Dialect) -> Result<(String, Option<String>)> {
+    use db_resource::FieldType;
+    let Some((field_spec, raw)) = spec.split_once('=') else {
+        return Ok((spec.to_string(), None));
+    };
+    let field = db_resource::Field::parse(field_spec)?;
+    let value = raw.trim();
+    let bad = |what: &str| anyhow::anyhow!("`{spec}`: `{raw}` is not {what}");
+    let literal = match field.ty {
+        FieldType::Int | FieldType::References => value
+            .parse::<i64>()
+            .map_err(|_| bad("an integer"))?
+            .to_string(),
+        FieldType::Float => {
+            let v = value
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| bad("a number"))?;
+            format!("{v:?}")
+        }
+        FieldType::Bool => match value.to_ascii_lowercase().as_str() {
+            "true" | "1" | "yes" | "on" => "TRUE".into(),
+            "false" | "0" | "no" | "off" => "FALSE".into(),
+            _ => return Err(bad("true or false")),
+        },
+        FieldType::Uuid if dialect == db_resource::Dialect::Sqlite => bail!(
+            "`{spec}`: SQLite stores uuids as bytes, so a uuid column can't get a text default there\n\
+             hint: add it as optional (`{}:uuid?`) and fill it in",
+            field.name
+        ),
+        _ => format!("'{}'", raw.replace('\'', "''")),
+    };
+    Ok((field_spec.to_string(), Some(literal)))
 }
 
 /// `ALTER TABLE <table> DROP COLUMN` for each field, last first (and the
@@ -622,12 +704,13 @@ fn drop_columns_sql(table: &str, fields: &[db_resource::Field]) -> String {
 fn migration_sql(
     kind: &MigrationKind,
     fields: &[db_resource::Field],
+    defaults: &[(String, String)],
     dialect: db_resource::Dialect,
     name: &str,
 ) -> Result<(String, String)> {
     Ok(match kind {
         MigrationKind::AddColumns { table, .. } => (
-            add_columns_sql(table, fields, dialect, false)?,
+            add_columns_sql(table, fields, defaults, dialect, false)?,
             drop_columns_sql(table, fields),
         ),
         MigrationKind::RemoveColumns { table, .. } => {
@@ -643,7 +726,7 @@ fn migration_sql(
                 up,
                 format!(
                     "-- The columns come back empty (with their defaults).\n{}",
-                    add_columns_sql(table, fields, dialect, true)?
+                    add_columns_sql(table, fields, &[], dialect, true)?
                 ),
             )
         }
@@ -661,25 +744,13 @@ fn migration_sql(
     })
 }
 
-fn type_name(ty: db_resource::FieldType) -> &'static str {
-    use db_resource::FieldType;
-    match ty {
-        FieldType::String => "string",
-        FieldType::Text => "text",
-        FieldType::Int => "int",
-        FieldType::Float => "float",
-        FieldType::Bool => "bool",
-        FieldType::Date => "date",
-        FieldType::DateTime => "datetime",
-        FieldType::Uuid => "uuid",
-        FieldType::References => "references",
-    }
-}
-
-/// `zapline generate migration <name> [field:type ...]`: `add_<col>_to_<table>`
-/// adds columns, `remove_<col>_from_<table>` drops them, `create_<table>`
-/// (or any other name with fields) creates a table like `generate resource`
-/// does; anything else is an empty migration.
+/// `zapline generate migration <name> [field:type[=default] ...]`:
+/// `add_<col>_to_<table>` adds columns, `remove_<col>_from_<table>` drops
+/// them, `create_<table>` (or any other name with fields) creates a table
+/// like `generate resource` does; anything else is an empty migration.
+///
+/// Adding or removing columns of a table made by `generate resource` also
+/// updates its module, pages and test (see [`evolve`]).
 pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
     let project = Project::discover(dir)?;
     if !project.root.join(crate::db::MIGRATIONS_DIR).is_dir() {
@@ -689,9 +760,23 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
              or start from `zapline new <name> --template fullstack`"
         );
     }
+    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
+    let dialect = dialect_of(&manifest);
     let slug = snake_case(name);
-    let mut parsed = db_resource::parse_field_list(fields)?;
+    let mut specs = Vec::new();
+    let mut defaults = Vec::new();
+    for spec in fields {
+        let (spec, default) = split_default(spec, dialect)?;
+        if let Some(literal) = default {
+            defaults.push((db_resource::Field::parse(&spec)?.name, literal));
+        }
+        specs.push(spec);
+    }
+    let mut parsed = db_resource::parse_field_list(&specs)?;
     let kind = migration_kind(&slug, !parsed.is_empty());
+    if !defaults.is_empty() && !matches!(kind, MigrationKind::AddColumns { .. }) {
+        bail!("`name:type=value` defaults are for `add_<columns>_to_<table>` migrations");
+    }
     // `add_email_to_users` alone adds a text column `email`.
     if let MigrationKind::AddColumns { columns, .. }
     | MigrationKind::RemoveColumns { columns, .. } = &kind
@@ -700,15 +785,51 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
             parsed = vec![db_resource::Field::parse(columns)?];
         }
     }
-    let manifest = fs::read_to_string(project.root.join("Cargo.toml")).unwrap_or_default();
-    let dialect = dialect_of(&manifest);
+    // A removed column of a generated resource keeps its real type (for
+    // the down file): `remove_author_from_posts` drops `author_id BIGINT`.
+    if let MigrationKind::RemoveColumns { table, .. } = &kind {
+        if let Some(known) = evolve::recorded_fields(&project, table) {
+            for f in &mut parsed {
+                let id = format!("{}_id", f.name);
+                if let Some(k) = known.iter().find(|k| k.name == f.name || k.name == id) {
+                    *f = k.clone();
+                }
+            }
+        }
+    }
     let mut report = Report::default();
     for field in &mut parsed {
         if let Some(parent) = field.parent.as_mut() {
             resolve_parent(&project, parent, &mut report);
         }
     }
-    let (up, down) = migration_sql(&kind, &parsed, dialect, &slug)?;
+    let (up, down) = migration_sql(&kind, &parsed, &defaults, dialect, &slug)?;
+    let up = match (&kind, dialect) {
+        (MigrationKind::RemoveColumns { .. }, db_resource::Dialect::Sqlite) => format!(
+            "-- DROP COLUMN needs SQLite 3.35 or newer (sqlx bundles one), and fails for a\n\
+             -- column that is UNIQUE, a PRIMARY KEY or used by a view, trigger or CHECK.\n{up}"
+        ),
+        _ => up,
+    };
+
+    let header = format!("-- Created by `zapline generate migration {slug}`.\n");
+    let down = match kind {
+        MigrationKind::Blank => down,
+        _ => format!("-- Reverts {slug}.\n{down}"),
+    };
+    let written =
+        crate::db::create_migration(&project.root, &slug, &format!("{header}{up}"), Some(&down))?;
+    let up_file = written
+        .first()
+        .map(|p| display(p.strip_prefix(&project.root).unwrap_or(p)))
+        .unwrap_or_default();
+    for path in written {
+        report.created.push(
+            path.strip_prefix(&project.root)
+                .unwrap_or(&path)
+                .to_path_buf(),
+        );
+    }
 
     match &kind {
         MigrationKind::AddColumns { table, .. } | MigrationKind::RemoveColumns { table, .. } => {
@@ -717,8 +838,32 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
                     "no migration creates the `{table}` table; check the name (tables are plural, like `posts`)"
                 ));
             }
+            if let MigrationKind::AddColumns { .. } = kind {
+                for f in &parsed {
+                    let implied = match f.ty {
+                        _ if f.optional || defaults.iter().any(|(n, _)| *n == f.name) => None,
+                        db_resource::FieldType::String | db_resource::FieldType::Text => Some("''"),
+                        db_resource::FieldType::Int | db_resource::FieldType::Float => Some("0"),
+                        _ => None,
+                    };
+                    if let Some(value) = implied {
+                        report.notes.push(format!(
+                            "`{}` is required, so existing rows get DEFAULT {value}; \
+                             edit {up_file} before it runs, or pass `{}:{}=<value>`",
+                            f.name,
+                            f.name,
+                            f.ty.name()
+                        ));
+                    }
+                }
+            }
+            let change = match kind {
+                MigrationKind::AddColumns { .. } => evolve::Change::Add(parsed.clone()),
+                _ => evolve::Change::Remove(parsed.iter().map(|f| f.name.clone()).collect()),
+            };
+            let updated = evolve::update_resource(&project, table, &change, &mut report)?;
             let module = PathBuf::from(format!("src/routes/{table}.rs"));
-            if project.root.join(&module).is_file() {
+            if !updated && project.root.join(&module).is_file() {
                 let what = match kind {
                     MigrationKind::AddColumns { .. } => {
                         let lines: Vec<String> = parsed
@@ -726,15 +871,19 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
                             .map(|f| format!("\x20 pub {}: {},", f.name, f.rust_type()))
                             .collect();
                         format!(
-                            "{} does not know about the new column(s) yet; add them to its model (and its New/Update structs):\n{}\n\
+                            "{} was not made by `zapline g resource` (it has no `{}` line), so it was not changed; \
+                             add the new column(s) to its model (and its New/Update structs):\n{}\n\
                              and to the column lists of its queries and its `listing()`",
                             display(&module),
+                            db_resource::RECIPE_MARKER,
                             lines.join("\n")
                         )
                     }
                     _ => format!(
-                        "{} still reads the removed column(s); take them out of its structs and queries",
-                        display(&module)
+                        "{} was not made by `zapline g resource` (it has no `{}` line), so it was not changed; \
+                         take the removed column(s) out of its structs and queries",
+                        display(&module),
+                        db_resource::RECIPE_MARKER
                     ),
                 };
                 report.notes.push(what);
@@ -749,24 +898,9 @@ pub fn migration(dir: &Path, name: &str, fields: &[String]) -> Result<Report> {
             enable_zapline_features(&project, &features, &mut report)?;
         }
     }
-
-    let header = format!("-- Created by `zapline generate migration {slug}`.\n");
-    let down = match kind {
-        MigrationKind::Blank => down,
-        _ => format!("-- Reverts {slug}.\n{down}"),
-    };
-    let written =
-        crate::db::create_migration(&project.root, &slug, &format!("{header}{up}"), Some(&down))?;
-    for path in written {
-        report.created.push(
-            path.strip_prefix(&project.root)
-                .unwrap_or(&path)
-                .to_path_buf(),
-        );
-    }
     report.notes.push(
         "the migration runs when the app starts (or run `zapline db migrate`); \
-         `zapline db rollback` runs its .down.sql file"
+         `zapline db status` lists what is applied, `zapline db rollback` runs its .down.sql file"
             .to_string(),
     );
     Ok(report)

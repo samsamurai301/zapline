@@ -118,11 +118,12 @@ The app also applies pending migrations at startup, so `zapline dev` and deploys
 ```sh
 zapline g migration create_tags name slug                             # CREATE TABLE / DROP TABLE
 zapline g migration add_published_at_to_posts published_at:datetime?   # ADD COLUMN / DROP COLUMN
+zapline g migration add_views_to_posts views:int=0                     # ... with the default existing rows get
 zapline g migration remove_legacy_from_posts legacy:bool               # DROP COLUMN / ADD COLUMN
 zapline g migration backfill_slugs                                     # an empty pair to fill in
 ```
 
-A required column added to an existing table gets a default (`''`, `0`, `FALSE`) so the rows already there stay valid; dates, UUIDs and references have to be optional there. `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
+A required column added to an existing table gets a default so the rows already there stay valid: the one after `=`, or `''`, `0`, `FALSE`; dates, UUIDs and references need an `=` value or have to be optional there. When the table came from `zapline g resource`, its module, pages and test are updated to read and write the new columns, your own edits kept ([The resource follows the table](cli.md#the-resource-follows-the-table)). `zapline g resource` and `g auth` write their down file (`DROP TABLE`) too.
 
 ### Status, rollback, redo, reset
 
@@ -143,7 +144,7 @@ VERSION         NAME                APPLIED AT           STATE                  
 2 applied, 1 pending
 ```
 
-`CHANGED since applied` means the file was edited after it ran: the app refuses to start until it matches again (edit a migration that already shipped by adding a new one instead). Nothing is reverted unless every migration involved has a down file; a one-way migration from an older project (`<version>_<name>.sql`) becomes reversible when you add `<version>_<name>.down.sql` next to it. `zapline db new` keeps writing one-way files in a project whose migrations are all one-way, unless you pass `--reversible`.
+`CHANGED since applied` means the file was edited after it ran: the app refuses to start until it matches again (edit a migration that already shipped by adding a new one instead). `zapline db status` then exits non-zero and names the file to restore, as it does for an applied migration whose file was deleted, so a CI step can catch both. Nothing is reverted unless every migration involved has a down file; a one-way migration from an older project (`<version>_<name>.sql`) becomes reversible when you add `<version>_<name>.down.sql` next to it. `zapline db new` keeps writing one-way files in a project whose migrations are all one-way, unless you pass `--reversible`.
 
 Every command but `new` runs your app with `ZAPLINE_MIGRATE=status|up|down:<n>|redo|reset` (plus `ZAPLINE_SEED=1` for `reset`), so it uses exactly the URL and settings the app uses; the app does the work and exits instead of serving. The same commands are there in code, for tests and one-off tools:
 

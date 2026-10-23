@@ -447,7 +447,7 @@ Examples:
         memory: bool,
     },
 
-    /// A SQL migration with its down file: add or remove columns, or create a table
+    /// A SQL migration with its down file: add or remove columns (and update the resource), or create a table
     #[command(after_long_help = "\
 Writes migrations/<timestamp>_<name>.up.sql and .down.sql for the project's database
 (SQLite or Postgres). The name decides what they do (up / down):
@@ -458,10 +458,17 @@ Writes migrations/<timestamp>_<name>.up.sql and .down.sql for the project's data
 Without fields, the column comes from the name (`add_email_to_users` adds `email` text).
 Any other name with fields creates that table; without fields you get an empty pair.
 Field types are the ones `generate resource` takes. A required column added to an existing
-table gets a default ('' or 0); dates, uuids and references must be optional (`?`) there.
+table gets a default: the one after `=` (`views:int=0`, `due:date=2026-01-01`), else '' or
+0; without `=`, dates, uuids and references must be optional (`?`) there.
+
+When `generate resource` made the table, src/routes/<table>.rs, its pages and its test are
+updated too: they become what `generate resource` would write with the new fields, with your
+own edits kept. A file edited where the new code goes is left alone, and the lines to change
+are printed; if that file is the module, nothing is changed.
 
 Examples:
   zapline g migration add_published_at_to_posts published_at:datetime?
+  zapline g migration add_views_to_posts views:int=0
   zapline g migration add_email_to_users
   zapline g migration add_category_to_posts category:references?
   zapline g migration remove_legacy_flag_from_posts
@@ -469,7 +476,7 @@ Examples:
     Migration {
         /// Migration name, e.g. `add_email_to_users`
         name: String,
-        /// Columns: `name:type`, as for `generate resource`
+        /// Columns: `name:type`, as for `generate resource`; `name:type=value` sets the default
         #[arg(value_name = "FIELD:TYPE")]
         fields: Vec<String>,
     },
@@ -751,7 +758,7 @@ Examples:
         #[arg(long, value_name = "NAME")]
         bin: Option<String>,
     },
-    /// Show every migration: version, name, when it was applied, and edited files
+    /// Show every migration: version, name, when it was applied; fails if an applied one was edited or deleted
     Status {
         /// Binary to run [default: the package's only binary]
         #[arg(long, value_name = "NAME")]

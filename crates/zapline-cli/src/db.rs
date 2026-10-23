@@ -464,6 +464,48 @@ pub fn render_status(rows: &[StatusRow], color: bool) -> String {
     out
 }
 
+/// Why `zapline db status` fails: applied migrations whose files were
+/// edited or deleted since, each with the file to restore. `None` when
+/// every applied migration still matches its file.
+pub fn status_problem(root: &Path, rows: &[StatusRow]) -> Option<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root.join(MIGRATIONS_DIR))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.ends_with(".sql") && !n.ends_with(".down.sql"))
+                .collect()
+        })
+        .unwrap_or_default();
+    names.sort();
+    let mut lines = Vec::new();
+    for r in rows {
+        let file = names
+            .iter()
+            .find(|n| n.starts_with(&format!("{}_", r.version)))
+            .map(|n| format!("{MIGRATIONS_DIR}/{n}"))
+            .unwrap_or_else(|| {
+                format!(
+                    "{MIGRATIONS_DIR}/{}_{}.sql",
+                    r.version,
+                    r.name.replace(' ', "_")
+                )
+            });
+        match r.state.as_str() {
+            "checksum-mismatch" => lines.push(format!(
+                "{file} was edited after it was applied: restore it as it was \
+                 (e.g. `git checkout -- {file}`) and put the change in a new migration"
+            )),
+            "missing" => lines.push(format!(
+                "{file} was applied but its file is gone: restore it \
+                 (e.g. `git checkout -- {file}`)"
+            )),
+            _ => {}
+        }
+    }
+    (!lines.is_empty()).then(|| lines.join("\n"))
+}
+
 /// `zapline db status`: every migration and where it stands.
 pub fn status(project: &Project, bin: Option<&str>) -> Result<Vec<StatusRow>> {
     let out = run_command(project, bin, "status", false, &[])?;
@@ -709,5 +751,30 @@ mod tests {
         assert!(table.contains("2 applied, 1 pending"), "{table}");
         assert!(table.contains("changed after being applied"), "{table}");
         assert_eq!(render_status(&[], false), "No migrations in migrations/.\n");
+
+        // Edited and deleted applied migrations make the command fail.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join(MIGRATIONS_DIR)).unwrap();
+        std::fs::write(
+            tmp.path().join("migrations/20260102000000_add_tags.sql"),
+            "",
+        )
+        .unwrap();
+        let problem = status_problem(tmp.path(), &rows).expect("a problem");
+        assert!(
+            problem.contains("migrations/20260102000000_add_tags.sql was edited"),
+            "{problem}"
+        );
+        let missing = parse_status(
+            "zapline-migration\t20260104000000\tmissing\tone-way\t2026-01-04 10:00:00\tdrop old\n",
+        );
+        let problem = status_problem(tmp.path(), &missing).unwrap();
+        assert!(
+            problem.contains(
+                "migrations/20260104000000_drop_old.sql was applied but its file is gone"
+            ),
+            "{problem}"
+        );
+        assert_eq!(status_problem(tmp.path(), &rows[..1]), None);
     }
 }

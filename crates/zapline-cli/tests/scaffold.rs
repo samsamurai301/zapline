@@ -235,6 +235,34 @@ fn sql_resources_with_references_compile_and_pass() {
     assert!(log.contains("_add_rating_to_authors.down.sql"), "{log}");
     let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
     assert!(manifest.contains("\"chrono\""), "{manifest}");
+    // Columns added to a generated resource reach its module, pages and
+    // test, whose round trips then cover them too.
+    let log = expect_success(&run_in(
+        &project,
+        &[
+            "g",
+            "migration",
+            "add_views_to_posts",
+            "views:int=0",
+            "featured:bool",
+            "summary:text?",
+            "score:float?",
+        ],
+    ));
+    for file in [
+        "src/routes/posts.rs",
+        "templates/posts/edit.html",
+        "tests/posts.rs",
+    ] {
+        assert!(log.contains(&format!("Modified {file}")), "{log}");
+    }
+    let log = expect_success(&run_in(
+        &project,
+        &["g", "migration", "remove_published_on_from_posts"],
+    ));
+    assert!(log.contains("Modified src/routes/posts.rs"), "{log}");
+    let module = fs::read_to_string(project.join("src/routes/posts.rs")).unwrap();
+    assert!(module.contains("pub views: i64,") && !module.contains("published_on"));
 
     expect_cargo_ok(&project, &["check", "--all-targets"]);
     let tests = check_like_ci(&project);
@@ -428,4 +456,20 @@ fn fullstack_migrations_roll_back_redo_and_reset() {
     // A release build is refused without --force, before anything is built.
     let log = expect_failure(&zapline_in(&["db", "reset", "--release"]));
     assert!(log.contains("--force"), "{log}");
+
+    // Editing an applied migration fails `db status`, naming the file.
+    let applied = fs::read_dir(project.join("migrations"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_add_notes_to_todos.up.sql"))
+        .unwrap();
+    let sql = fs::read_to_string(&applied).unwrap();
+    fs::write(&applied, format!("{sql}-- edited\n")).unwrap();
+    let out = zapline_in(&["db", "status"]);
+    assert!(!out.status.success());
+    assert!(
+        stderr(&out).contains("_add_notes_to_todos.up.sql was edited after it was applied"),
+        "{}",
+        stderr(&out)
+    );
 }

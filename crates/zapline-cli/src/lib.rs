@@ -274,7 +274,10 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             let rows = db::status(&project, bin.as_deref())?;
             print!("{}", db::render_status(&rows, ui::stdout_color()));
-            Ok(())
+            match db::status_problem(&project.root, &rows) {
+                Some(problem) => Err(anyhow::anyhow!("{problem}")),
+                None => Ok(()),
+            }
         }
         Command::Db(DbCommand::Rollback { steps, target }) => {
             let project = Project::discover(Path::new("."))?;

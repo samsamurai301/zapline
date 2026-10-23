@@ -804,28 +804,52 @@ fn migration_adds_columns_to_an_existing_table() {
          ALTER TABLE posts DROP COLUMN views;\n\
          ALTER TABLE posts DROP COLUMN published_at;\n"
     );
-    // The model doesn't change by itself: the note says what to add.
-    let note = report
+    // The generated resource reads and writes the new columns.
+    for file in [
+        "src/routes/posts.rs",
+        "templates/posts/_row.html",
+        "tests/posts.rs",
+    ] {
+        assert!(
+            report.modified.iter().any(|p| display(p) == file),
+            "{file}: {report:?}"
+        );
+    }
+    let module = read(&root, "src/routes/posts.rs");
+    assert!(
+        module.contains("pub published_at: Option<DateTime<Utc>>,"),
+        "{module}"
+    );
+    assert!(module.contains("pub category_id: Option<i64>,"), "{module}");
+    assert!(module.contains(
+        "// zapline:resource post title:string published_at:datetime? views:int category:references?"
+    ));
+    // `views` is required: existing rows get 0, and the note says so.
+    assert!(report
         .notes
         .iter()
-        .find(|n| n.contains("src/routes/posts.rs"))
-        .expect("a note about the model");
-    assert!(
-        note.contains("pub published_at: Option<DateTime<Utc>>,"),
-        "{note}"
-    );
-    assert!(note.contains("pub category_id: Option<i64>,"), "{note}");
+        .any(|n| n.contains("`views` is required, so existing rows get DEFAULT 0")));
 
     // The column can come from the name alone.
     migration(&root, "add_subtitle_to_posts", &[]).unwrap();
     assert!(migration_text(&root, "_add_subtitle_to_posts.up.sql")
         .contains("ALTER TABLE posts ADD COLUMN subtitle TEXT NOT NULL DEFAULT '';"));
 
-    // A required date has no value for existing rows.
+    // A required date has no value for existing rows, unless one is given.
     let err = migration(&root, "add_due_to_posts", &["due:date".into()])
         .unwrap_err()
         .to_string();
-    assert!(err.contains("`due:date?`"), "{err}");
+    assert!(
+        err.contains("`due:date?`") && err.contains("`due:date=<value>`"),
+        "{err}"
+    );
+    migration(&root, "add_due_to_posts", &["due:date=2026-01-01".into()]).unwrap();
+    assert!(migration_text(&root, "_add_due_to_posts.up.sql")
+        .contains("ALTER TABLE posts ADD COLUMN due TEXT NOT NULL DEFAULT '2026-01-01';"));
+    let err = migration(&root, "add_rank_to_posts", &["rank:int=high".into()])
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("not an integer"), "{err}");
 
     // An unknown table gets a note.
     let report = migration(&root, "add_x_to_nopes", &[]).unwrap();
@@ -833,6 +857,113 @@ fn migration_adds_columns_to_an_existing_table() {
         .notes
         .iter()
         .any(|n| n.contains("no migration creates the `nopes` table")));
+}
+
+/// `g migration add_..` then `remove_..` on a generated resource gives what
+/// `g resource` gives with those fields, user edits kept.
+#[test]
+fn migration_patches_match_generating_the_resource() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    resource_with_fields(&root, "post", None, &["title".into()], false, false).unwrap();
+    let edited = read(&root, "src/routes/posts.rs").replacen(
+        "use zapline::prelude::*;",
+        "use zapline::prelude::*;\n// My own note.",
+        1,
+    );
+    fs::write(root.join("src/routes/posts.rs"), &edited).unwrap();
+
+    migration(
+        &root,
+        "add_views_to_posts",
+        &["views:int=0".into(), "summary:text?".into()],
+    )
+    .unwrap();
+    assert!(migration_text(&root, "_add_views_to_posts.up.sql")
+        .contains("ALTER TABLE posts ADD COLUMN views BIGINT NOT NULL DEFAULT 0;"));
+    let patched: Vec<String> = [
+        "src/routes/posts.rs",
+        "templates/posts/index.html",
+        "templates/posts/_row.html",
+        "templates/posts/show.html",
+        "templates/posts/edit.html",
+        "tests/posts.rs",
+    ]
+    .iter()
+    .map(|f| read(&root, f))
+    .collect();
+    assert!(patched[0].contains("// My own note."));
+
+    // Generating it afresh with all three fields gives the same files.
+    let fields = ["title".into(), "views:int".into(), "summary:text?".into()];
+    resource_with_fields(&root, "post", None, &fields, false, true).unwrap();
+    let fresh: Vec<String> = [
+        "src/routes/posts.rs",
+        "templates/posts/index.html",
+        "templates/posts/_row.html",
+        "templates/posts/show.html",
+        "templates/posts/edit.html",
+        "tests/posts.rs",
+    ]
+    .iter()
+    .map(|f| read(&root, f))
+    .collect();
+    assert_eq!(patched[0].replace("\n// My own note.", ""), fresh[0]);
+    assert_eq!(patched[1..], fresh[1..]);
+
+    // Removing one goes back; the down file re-adds it with its real type.
+    let report = migration(&root, "remove_views_from_posts", &[]).unwrap();
+    assert!(migration_text(&root, "_remove_views_from_posts.down.sql")
+        .contains("ALTER TABLE posts ADD COLUMN views BIGINT NOT NULL DEFAULT 0;"));
+    assert!(report
+        .modified
+        .iter()
+        .any(|p| display(p) == "tests/posts.rs"));
+    let module = read(&root, "src/routes/posts.rs");
+    assert!(!module.contains("pub views: i64"), "{module}");
+    assert!(module.contains("// zapline:resource post title:string summary:text?"));
+}
+
+/// An edit where the new code goes leaves every file alone and prints the
+/// lines to add; so does a module that `g resource` did not make.
+#[test]
+fn migration_leaves_conflicting_or_unknown_modules_alone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    resource_with_fields(&root, "post", None, &["title".into()], false, false).unwrap();
+    let module = read(&root, "src/routes/posts.rs");
+    let edited = module.replacen(
+        "    pub title: String,\n",
+        "    pub title: String,\n    pub mine: i32,\n",
+        1,
+    );
+    assert_ne!(module, edited);
+    fs::write(root.join("src/routes/posts.rs"), &edited).unwrap();
+    let test = read(&root, "tests/posts.rs");
+
+    let report = migration(&root, "add_views_to_posts", &["views:int".into()]).unwrap();
+    assert!(report.modified.is_empty(), "{report:?}");
+    assert_eq!(read(&root, "src/routes/posts.rs"), edited);
+    assert_eq!(read(&root, "tests/posts.rs"), test);
+    let note = report
+        .notes
+        .iter()
+        .find(|n| n.starts_with("src/routes/posts.rs was not changed"))
+        .expect("a note for the module");
+    assert!(note.contains("+ pub views: i64,"), "{note}");
+    assert!(report
+        .notes
+        .iter()
+        .any(|n| n.starts_with("tests/posts.rs was not changed")));
+
+    // The starter `todos` module is hand-written.
+    let report = migration(&root, "add_priority_to_todos", &["priority:int=1".into()]).unwrap();
+    let note = report
+        .notes
+        .iter()
+        .find(|n| n.contains("src/routes/todos.rs"))
+        .expect("a note for todos");
+    assert!(note.contains("pub priority: i64,"), "{note}");
 }
 
 #[test]

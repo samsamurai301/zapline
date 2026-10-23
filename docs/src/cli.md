@@ -7,9 +7,9 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline new <name>.rs` / `zapline run <file.rs>` | A [one-file app](one-file.md): a whole app in a single `.rs` file with no `Cargo.toml`. `dev`, `test`, `check` and `routes` take the file too |
 | `zapline new <name> [-t minimal\|api\|full\|fullstack] [--path DIR]` | Create a project. `api` (the default) includes routes, models, validation, OpenAPI, Docker and CI. `full` adds layered config, DI, health and metrics probes, tracing and a hardened middleware stack. `fullstack` is server-rendered HTML with htmx, SQLite (zero setup) with migrations, database sessions with flash messages, and a JSON API. |
 | `zapline generate resource <name> [field:type ...]` (`g resource`) | Add a resource and mount it automatically. In a project with `migrations/`: a SQL migration with `created_at`/`updated_at`, a sqlx JSON API (list, get, create, `PUT`, `PATCH`, delete), htmx index, show and edit pages (when `templates/base.html` exists; rejected posts come back with a message per field, saves set a flash message) and tests. Otherwise: CRUD handlers over an in-memory store. Types: `string`, `text`, `int`, `float`, `bool`, `date`, `datetime`, `uuid`, `references`; `?` for optional ([details](#database-backed-resources)). |
-| `zapline g migration <name> [field:type ...]` | A reversible migration (`.up.sql` + `.down.sql`) from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table ([details](#migrations-from-the-command-line)) |
+| `zapline g migration <name> [field:type[=default] ...]` | A reversible migration (`.up.sql` + `.down.sql`) from its name: `add_<cols>_to_<table>` adds columns, `remove_<cols>_from_<table>` drops them, `create_<table>` creates a table. Adding or removing columns of a `g resource` table updates its module, pages and test too ([details](#migrations-from-the-command-line)) |
 | `zapline db new <name> [--reversible\|--one-way]` / `zapline db migrate` | Create a SQL migration (an `.up.sql` + `.down.sql` pair) / apply pending ones ([Databases](database.md#migrations)) |
-| `zapline db status` | Every migration: version, name, when it was applied, whether its file changed since, and whether it has a down file |
+| `zapline db status` | Every migration: version, name, when it was applied, whether its file changed since, and whether it has a down file. Fails, naming the file to restore, when an applied migration was edited or deleted |
 | `zapline db rollback [--steps N]` / `zapline db redo` | Revert the last N migrations with their `.down.sql` files / revert the last one and apply it again |
 | `zapline db reset` | Revert every migration, apply them all and insert the seed data. Development only: `rollback`, `redo` and `reset` refuse `--release` and `APP_ENV=production` unless `--force` ([guard rails](database.md#guard-rails)) |
 | `zapline db seed` | Insert the app's [seed data](database.md#seed-data) (`App::seed`) after migrating |
@@ -166,6 +166,7 @@ A reference also gets a `?author_id=` filter on the list, `GET /api/authors/{id}
 
 ```sh
 zapline g migration add_published_at_to_posts published_at:datetime?
+zapline g migration add_views_to_posts views:int=0     # the default existing rows get
 zapline g migration add_email_to_users                 # the column from the name: email TEXT
 zapline g migration add_category_to_posts category:references?
 zapline g migration remove_legacy_flag_from_posts
@@ -179,7 +180,13 @@ ALTER TABLE posts ADD COLUMN published_at TIMESTAMPTZ;
 ALTER TABLE posts DROP COLUMN published_at;
 ```
 
-A required column added to a table that has rows needs a value for them: text gets `DEFAULT ''`, numbers `DEFAULT 0`, booleans `FALSE`. Dates, UUIDs and references have no sensible default, so add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. Any other name with fields creates that table; without fields you get an empty pair (like `zapline db new`). Rolling back a `remove_` migration brings the columns back empty: optional, or with their defaults. The generator doesn't edit your Rust code: when `src/routes/<table>.rs` exists it prints the fields to add to the model and its queries.
+A required column added to a table that has rows needs a value for them: the one after `=` (`views:int=0`, `status=draft`, `due:date=2026-01-01`, `pinned:bool=true`), otherwise text gets `DEFAULT ''`, numbers `DEFAULT 0` (with a note naming the file, in case that is not what you want) and booleans `FALSE`. Dates, UUIDs and references have no zero value, so give one with `=` or add them as optional (`due:date?`), fill them in, then tighten the column in a later migration. On SQLite, `DROP COLUMN` needs 3.35 or newer (sqlx bundles one). Any other name with fields creates that table; without fields you get an empty pair (like `zapline db new`). Rolling back a `remove_` migration brings the columns back empty: optional, or with their defaults.
+
+### The resource follows the table
+
+When `zapline g resource` made the table, the module records what it was generated from on a `// zapline:resource post title:string ...` line near its top. `add_<cols>_to_<table>` and `remove_<cols>_from_<table>` then update `src/routes/<table>.rs`, its pages (`templates/<table>/*.html`) and its test (`tests/<table>.rs`): the structs, every query and its binds, `listing()`'s sort, search and filters, the forms, the table and the show page, the test bodies. The app keeps compiling, and `crud_round_trip` checks the new columns through POST, GET, the list, PUT and PATCH.
+
+The update is a three-way merge, like `git merge-file`: the resource is generated with the old fields and with the new ones, and the difference is applied to your files, so your own edits stay. The result is what `g resource` would write today with the new fields, plus your changes. A file you edited right where the new code goes is left untouched, and the lines to add or remove are printed; if that file is the module, no file is changed, so the module, pages and test never disagree. A hand-written module without the `// zapline:resource` line (such as the `fullstack` template's `todos`, or one generated by an older zapline) gets the fields to add instead. Removing a column of a generated resource also gives the down file the column's real type.
 
 ## How `routes` and `openapi` work
 
@@ -225,7 +232,7 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 | `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_job`, `generate_mailer` | The files created and edited |
 | `db_new_migration` | Creates a migration, with its up (`sql`) and down (`down_sql`) SQL if given |
 | `db_migrate` | Applies pending migrations and names them |
-| `db_status` | The `zapline db status` table |
+| `db_status` | The `zapline db status` table, and the file to restore when an applied migration was edited or deleted |
 | `db_rollback`, `db_redo`, `db_reset` | Revert migrations. They refuse to run without `confirm=true`, so the assistant asks you first |
 | `check`, `test` | The condensed output of `zapline check` / `zapline test` |
 | `routes` | One `METHOD path` line per route |

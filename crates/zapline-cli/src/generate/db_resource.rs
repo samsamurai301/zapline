@@ -5,6 +5,11 @@
 //!
 //! The code is built here rather than from a `.tmpl` file because its shape
 //! depends on the fields; it is formatted with rustfmt after writing.
+//!
+//! The module records the arguments it was generated from on a
+//! [`RECIPE_MARKER`] line, so `zapline generate migration
+//! add_<column>_to_<table>` can carry a schema change into the module, its
+//! pages and its test (see [`super::evolve`]).
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -14,6 +19,10 @@ use anyhow::{bail, Result};
 use crate::db::MigrationFiles;
 use crate::naming::{is_keyword, snake_case, ResourceNames};
 use crate::render::OutputFile;
+
+/// Starts the comment line in a generated module that records what it was
+/// generated from: `// zapline:resource post title:string body:text?`.
+pub const RECIPE_MARKER: &str = "// zapline:resource";
 
 /// A column type on the command line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +68,21 @@ impl FieldType {
                  (add `?` for optional, e.g. `bio:text?`)"
             ),
         })
+    }
+
+    /// The command-line spelling: `string`, `int`, `references`...
+    pub fn name(self) -> &'static str {
+        match self {
+            FieldType::String => "string",
+            FieldType::Text => "text",
+            FieldType::Int => "int",
+            FieldType::Float => "float",
+            FieldType::Bool => "bool",
+            FieldType::Date => "date",
+            FieldType::DateTime => "datetime",
+            FieldType::Uuid => "uuid",
+            FieldType::References => "references",
+        }
     }
 
     fn rust(self) -> &'static str {
@@ -163,6 +187,17 @@ impl Field {
             optional,
             parent,
         })
+    }
+
+    /// The argument that parses back into this field: `bio:text?`,
+    /// `author:references`.
+    pub fn spec(&self) -> String {
+        let name = match &self.parent {
+            Some(p) => p.names.singular.as_str(),
+            None => self.name.as_str(),
+        };
+        let optional = if self.optional { "?" } else { "" };
+        format!("{name}:{}{optional}", self.ty.name())
     }
 
     /// The field's Rust type, `Option<..>` when optional.
@@ -372,6 +407,49 @@ const SQL_RESERVED: &[&str] = &[
     "window",
     "with",
 ];
+
+/// The [`RECIPE_MARKER`] line for a resource: the `generate resource`
+/// arguments, `--plural` only when it is not the regular plural.
+pub fn recipe(names: &ResourceNames, fields: &[Field]) -> String {
+    let mut line = format!("{RECIPE_MARKER} {}", names.singular);
+    let regular = ResourceNames::parse(&names.singular, None).ok();
+    if regular.is_none_or(|r| r.plural != names.plural) {
+        let _ = write!(line, " --plural {}", names.plural);
+    }
+    for f in fields {
+        let _ = write!(line, " {}", f.spec());
+    }
+    line
+}
+
+/// Reads the [`RECIPE_MARKER`] line of a generated module back into the
+/// resource's names and fields (parents not yet resolved). `None` when the
+/// module has no such line.
+pub fn parse_recipe(module: &str) -> Option<Result<(ResourceNames, Vec<Field>)>> {
+    let line = module
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(RECIPE_MARKER))?;
+    let mut words = line.split_whitespace();
+    let parsed = (|| {
+        let singular = words
+            .next()
+            .ok_or_else(|| anyhow::anyhow!("`{RECIPE_MARKER}` names no resource"))?;
+        let mut plural = None;
+        let mut specs = Vec::new();
+        while let Some(word) = words.next() {
+            if word == "--plural" {
+                plural = words.next();
+            } else {
+                specs.push(word.to_string());
+            }
+        }
+        Ok((
+            ResourceNames::parse(singular, plural)?,
+            parse_field_list(&specs)?,
+        ))
+    })();
+    Some(parsed)
+}
 
 /// Parses all field arguments; defaults to `name:string` when there are none.
 pub fn parse_fields(specs: &[String]) -> Result<Vec<Field>> {
@@ -594,7 +672,12 @@ fn module(plan: &Plan<'_>) -> String {
         s,
         "//! Table `{t}` is created by the migration generated alongside this file."
     );
-    s.push('\n');
+    let _ = writeln!(
+        s,
+        "\n{}\n// `zapline g migration add_<columns>_to_{t}` (or `remove_<columns>_from_{t}`) \
+         reads the line above to update this file, its pages and its test.\n",
+        recipe(n, plan.fields)
+    );
     if plan.uses(FieldType::Date) {
         s.push_str("use zapline::chrono::{DateTime, NaiveDate, Utc};\n");
     } else {
@@ -1257,7 +1340,6 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
         format!("{{{}}}", pairs.join(", "))
     };
     let body = json_body(None);
-    let first = &plan.fields[0];
     // The field the PATCH test changes: the first that isn't a reference.
     let patched = plan.fields.iter().find(|f| f.parent.is_none());
 
@@ -1296,21 +1378,27 @@ fn test(plan: &Plan<'_>, krate: &str) -> String {
     );
     let _ = writeln!(
         s,
-        "#[tokio::test]\nasync fn crud_round_trip() {{\n{setup}\n{create}\n    \
+        "#[tokio::test]\nasync fn crud_round_trip() {{\n{setup}\n{create}    \
+         // Every column comes back as it was sent.\n    \
+         let sent = json!({body});\n    \
+         for (field, value) in sent.as_object().unwrap() {{\n        \
+         assert_eq!(&created[field], value, \"`{{field}}` did not round-trip\");\n    }}\n    \
+         assert!(created[\"created_at\"].is_string(), \"{{created}}\");\n\n    \
          let res = client.get(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 200);\n    \
-         assert_eq!(res.json::<Value>()[\"{f}\"], created[\"{f}\"]);\n    \
-         assert!(created[\"created_at\"].is_string(), \"{{created}}\");\n\n    \
+         assert_eq!(res.json::<Value>(), created);\n\n    \
          let list: Value = client.get(\"{api}\").send().await.json();\n    \
          assert_eq!(list[\"total\"], 1);\n    \
-         assert_eq!(list[\"items\"][0][\"id\"], id);\n\n    \
-         let res = client.put(&format!(\"{api}/{{id}}\")).json(&json!({body})).send().await;\n    \
-         assert_eq!(res.status(), 200);\n\n    \
+         assert_eq!(list[\"items\"][0], created);\n\n    \
+         let res = client.put(&format!(\"{api}/{{id}}\")).json(&sent).send().await;\n    \
+         assert_eq!(res.status(), 200);\n    \
+         let replaced: Value = res.json();\n    \
+         for (field, value) in sent.as_object().unwrap() {{\n        \
+         assert_eq!(&replaced[field], value, \"`{{field}}` did not round-trip\");\n    }}\n\n    \
          let res = client.delete(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 204);\n    \
          let res = client.get(&format!(\"{api}/{{id}}\")).send().await;\n    \
          assert_eq!(res.status(), 404);\n}}\n",
-        f = first.name,
     );
     if let Some(changed) = patched {
         let mut keep = String::new();

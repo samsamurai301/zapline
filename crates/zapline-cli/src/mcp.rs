@@ -157,10 +157,10 @@ fn tool_list() -> Value {
         },
         {
             "name": "generate_migration",
-            "description": "Write a reversible SQL migration (.up.sql + .down.sql) for the project's database. add_<cols>_to_<table> adds columns (ALTER TABLE ADD COLUMN / DROP COLUMN), remove_<cols>_from_<table> drops them, create_<table> creates a table with id, the fields and timestamps (down: DROP TABLE). Without fields the column comes from the name; other names get an empty pair.",
+            "description": "Write a reversible SQL migration (.up.sql + .down.sql) for the project's database. add_<cols>_to_<table> adds columns (ALTER TABLE ADD COLUMN / DROP COLUMN), remove_<cols>_from_<table> drops them, create_<table> creates a table with id, the fields and timestamps (down: DROP TABLE). Without fields the column comes from the name; other names get an empty pair. Adding or removing columns of a table made by generate_resource also updates its module, pages and test (edits kept; a conflicting file is left alone and the lines to change are returned).",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
                 "name": { "type": "string", "description": "e.g. add_published_at_to_posts" },
-                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type as for generate_resource, e.g. [\"published_at:datetime?\"]" }
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type as for generate_resource, with =value for the default existing rows get, e.g. [\"published_at:datetime?\", \"views:int=0\"]" }
             }}
         },
         {
@@ -499,7 +499,13 @@ fn run_tool(name: &str, args: &Value) -> Result<String> {
         "db_status" => {
             let project = Project::discover(here)?;
             let rows = with_build_errors(&project, || db::status(&project, s("bin")))?;
-            Ok(db::render_status(&rows, false))
+            let mut table = db::render_status(&rows, false);
+            if let Some(problem) = db::status_problem(&project.root, &rows) {
+                table.push('\n');
+                table.push_str(&problem);
+                table.push('\n');
+            }
+            Ok(table)
         }
         "db_rollback" | "db_redo" | "db_reset" => {
             if args.get("confirm").and_then(Value::as_bool) != Some(true) {

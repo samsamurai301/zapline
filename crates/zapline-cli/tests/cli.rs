@@ -631,6 +631,53 @@ fn generate_migration_writes_sql_from_its_name() {
     assert!(help.contains("add_<cols>_to_<table>"), "{help}");
 }
 
+#[test]
+fn generate_migration_carries_new_columns_into_the_resource() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "blog", "fullstack");
+    expect_success(&run_in(&root, &["g", "resource", "post", "title"]));
+
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "add_views_to_posts", "views:int"],
+    ));
+    assert!(log.contains("_add_views_to_posts.up.sql"), "{log}");
+    for file in [
+        "src/routes/posts.rs",
+        "templates/posts/_row.html",
+        "tests/posts.rs",
+    ] {
+        assert!(log.contains(&format!("Modified {file}")), "{log}");
+    }
+    // No default given: existing rows get the zero value, with a note.
+    assert!(log.contains("existing rows get DEFAULT 0"), "{log}");
+    let module = fs::read_to_string(root.join("src/routes/posts.rs")).unwrap();
+    assert!(
+        module.contains("UPDATE posts SET title = $1, views = $2"),
+        "{module}"
+    );
+    let form = fs::read_to_string(root.join("templates/posts/index.html")).unwrap();
+    assert!(form.contains("name=\"views\""), "{form}");
+
+    // Dropping the column takes it out again.
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "remove_views_from_posts"],
+    ));
+    assert!(log.contains("Modified tests/posts.rs"), "{log}");
+    let module = fs::read_to_string(root.join("src/routes/posts.rs")).unwrap();
+    assert!(!module.contains("pub views: i64"), "{module}");
+    assert!(module.contains("UPDATE posts SET title = $1,"), "{module}");
+
+    // The starter `todos` module is hand-written: instructions instead.
+    let log = expect_success(&run_in(
+        &root,
+        &["g", "migration", "add_priority_to_todos", "priority:int=1"],
+    ));
+    assert!(log.contains("src/routes/todos.rs was not made by"), "{log}");
+    assert!(log.contains("pub priority: i64,"), "{log}");
+}
+
 // ---- add --------------------------------------------------------------------------------
 
 #[test]
