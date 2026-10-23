@@ -161,6 +161,7 @@ pub mod admin;
 pub mod cache;
 #[cfg(feature = "config")]
 pub mod config;
+pub mod cron;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
@@ -179,6 +180,7 @@ pub mod redis;
 #[cfg(feature = "storage")]
 pub mod storage;
 pub mod tasks;
+
 
 // ---- observability -----------------------------------------------------------
 pub mod health;

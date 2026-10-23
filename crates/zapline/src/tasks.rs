@@ -2,8 +2,9 @@
 //!
 //! - [`BackgroundTasks`]: an extractor that queues work to run after the
 //!   handler returns (send an email, write an audit log...).
-//! - [`App::schedule`]: run a job periodically ([`Schedule::every`]) or daily
-//!   at a fixed UTC time ([`Schedule::daily_at`]).
+//! - [`App::schedule`]: run a job periodically ([`Schedule::every`]), on a
+//!   [cron expression](crate::cron) ([`Schedule::cron`]), or daily at a fixed
+//!   UTC time ([`Schedule::daily_at`]).
 //! - [`App::background`]: a long-running worker (queue consumer, cache
 //!   refresher) that stops when the app shuts down.
 //!
@@ -30,6 +31,9 @@
 //!             // delete expired sessions; returning Err(..) is logged
 //!             Ok::<_, Error>(())
 //!         })
+//!         .schedule(Schedule::cron("0 9 * * MON-FRI").name("standup-reminder"), |_res: Resources| async move {
+//!             // 09:00 UTC on weekdays
+//!         })
 //!         .background(|_res: Resources, shutdown: Shutdown| async move {
 //!             while !shutdown.is_shutdown() {
 //!                 tokio::select! {
@@ -55,8 +59,11 @@ use tokio::sync::{watch, Notify};
 use tokio::task::JoinHandle;
 use tokio::time::Instant;
 
+use crate::cron::{Cron, IntoCron};
+use crate::dev::{escape, DevPanel};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
+use crate::metrics::{Counter, Histogram, MetricsHandle};
 use crate::{App, Request, Resources, Result};
 
 /// Default time [`App`] waits for jobs, workers and queued background tasks
@@ -87,12 +94,36 @@ impl<E: fmt::Display + Send + 'static> JobOutput for std::result::Result<(), E> 
 
 type JobResult = std::result::Result<(), String>;
 
+/// How a run ended.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Error,
+    Panic,
+}
+
+impl Outcome {
+    fn as_str(self) -> &'static str {
+        match self {
+            Outcome::Ok => "ok",
+            Outcome::Error => "error",
+            Outcome::Panic => "panic",
+        }
+    }
+}
+
 /// Await `fut`, turning errors and panics into log lines.
-async fn run_logged(what: &str, fut: impl Future<Output = JobResult>) {
+async fn run_logged(what: &str, fut: impl Future<Output = JobResult>) -> Outcome {
     match AssertUnwindSafe(fut).catch_unwind().await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log_error(format_args!("{what} failed: {e}")),
-        Err(panic) => log_error(format_args!("{what} panicked: {}", panic_message(&*panic))),
+        Ok(Ok(())) => Outcome::Ok,
+        Ok(Err(e)) => {
+            log_error(format_args!("{what} failed: {e}"));
+            Outcome::Error
+        }
+        Err(panic) => {
+            log_error(format_args!("{what} panicked: {}", panic_message(&*panic)));
+            Outcome::Panic
+        }
     }
 }
 
@@ -215,6 +246,8 @@ pub(crate) struct Supervisor {
     inflight: AtomicUsize,
     idle: Notify,
     next_id: AtomicUsize,
+    /// Every scheduled job, for the dev console.
+    schedules: Mutex<Vec<Arc<ScheduleState>>>,
     /// The runtime startup hooks ran on (the long-lived system runtime under
     /// `App::run`): queued tasks run there so they outlive the per-core
     /// worker runtimes and can be drained at shutdown.
@@ -246,6 +279,7 @@ impl Supervisor {
             inflight: AtomicUsize::new(0),
             idle: Notify::new(),
             next_id: AtomicUsize::new(1),
+            schedules: Mutex::new(Vec::new()),
             runtime: std::sync::OnceLock::new(),
         }
     }
@@ -335,6 +369,11 @@ impl App {
     /// [`Schedule::allow_overlap`] is set; a run that overruns skips the
     /// missed ticks. Errors and panics are logged and the schedule continues.
     ///
+    /// With the [`Metrics`](crate::metrics::Metrics) plugin installed, each
+    /// run is counted in `scheduled_task_runs_total{task, outcome}` and timed
+    /// in `scheduled_task_duration_seconds{task}`. In debug builds the
+    /// [dev console](crate::dev) lists every schedule with its next run.
+    ///
     /// ```
     /// # use std::time::Duration;
     /// # use zapline::prelude::*;
@@ -343,6 +382,9 @@ impl App {
     /// let app = App::new()
     ///     .schedule(Schedule::every(Duration::from_secs(300)), |res: Resources| async move {
     ///         // refresh a cache, purge expired rows...
+    ///     })
+    ///     .schedule(Schedule::cron("*/10 8-18 * * MON-FRI"), |res: Resources| async move {
+    ///         // every 10 minutes during office hours (UTC)
     ///     })
     ///     .schedule(Schedule::daily_at(3, 30).name("nightly-report"), |res: Resources| async move {
     ///         Ok::<_, Error>(())
@@ -359,13 +401,27 @@ impl App {
             let job = job.clone();
             Box::pin(async move { job(res).await.into_job_result() })
         });
-        self.supervise(move |res, sup, id| {
-            let name = match &schedule.name {
-                Some(n) => format!("job `{n}`"),
-                None => format!("job #{id}"),
-            };
-            run_schedule(job, schedule, res, sup, name)
-        })
+        let (app, sup) = Supervisor::of(self);
+        let id = sup.next_id.load(Ordering::Relaxed);
+        let state = Arc::new(ScheduleState {
+            task: match &schedule.name {
+                Some(n) => n.to_string(),
+                None => format!("#{id}"),
+            },
+            what: schedule.describe(),
+            status: Mutex::new(ScheduleStatus::default()),
+        });
+        let first = {
+            let mut list = lock(&sup.schedules);
+            list.push(state.clone());
+            list.len() == 1
+        };
+        let app = if first {
+            app.dev_panel(schedules_panel(&sup))
+        } else {
+            app
+        };
+        app.supervise(move |res, sup, _id| run_schedule(job, schedule, res, sup, state))
     }
 
     /// Run a long-running worker for the lifetime of the app. It should
@@ -436,11 +492,16 @@ impl App {
     }
 }
 
+fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 // ---------------------------------------------------------------------------
 // Schedules
 
-/// When a scheduled job runs. Build with [`every`](Schedule::every) or
-/// [`daily_at`](Schedule::daily_at), then refine.
+/// When a scheduled job runs. Build with [`every`](Schedule::every),
+/// [`cron`](Schedule::cron) or [`daily_at`](Schedule::daily_at), then
+/// refine.
 ///
 /// ```
 /// # use std::time::Duration;
@@ -449,6 +510,7 @@ impl App {
 /// let s = Schedule::every(Duration::from_secs(30))
 ///     .delay_start(Duration::from_secs(5))
 ///     .name("refresh-cache");
+/// let nightly = Schedule::cron("CRON_TZ=+01:00 0 2 * * *").name("backup"); // 02:00 UTC+1
 /// ```
 #[derive(Clone, Debug)]
 pub struct Schedule {
@@ -459,14 +521,15 @@ pub struct Schedule {
     name: Option<Arc<str>>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Kind {
     Every(Duration),
-    /// Seconds after midnight UTC.
-    Daily(u64),
+    Cron(Arc<Cron>),
 }
 
-const DAY: Duration = Duration::from_secs(24 * 60 * 60);
+/// How often a long wall-clock wait re-reads the clock, so clock changes
+/// (NTP steps, a laptop waking up) delay a cron run by at most this much.
+const WALL_RECHECK: Duration = Duration::from_secs(30);
 
 impl Schedule {
     /// Run every `period`, starting immediately (fixed rate: a run that
@@ -479,7 +542,12 @@ impl Schedule {
         Schedule::new(Kind::Every(period))
     }
 
-    /// Run once a day at `hour:minute` UTC.
+    /// Run once a day at `hour:minute` UTC (the same as
+    /// `Schedule::cron("{minute} {hour} * * *")`).
+    ///
+    /// ```
+    /// let s = zapline::tasks::Schedule::daily_at(3, 30);
+    /// ```
     ///
     /// # Panics
     /// If `hour >= 24` or `minute >= 60`.
@@ -488,7 +556,39 @@ impl Schedule {
             hour < 24 && minute < 60,
             "Schedule::daily_at: invalid time {hour:02}:{minute:02}"
         );
-        Schedule::new(Kind::Daily(u64::from(hour) * 3600 + u64::from(minute) * 60))
+        Schedule::cron(format!("{minute} {hour} * * *"))
+    }
+
+    /// Run on a [cron expression](crate::cron): five fields (`minute hour
+    /// day-of-month month day-of-week`) or six (seconds first), with ranges,
+    /// steps, lists, names (`MON`, `JAN`), `L`/`W`/`#` and macros such as
+    /// `@hourly`. UTC unless the expression starts with `CRON_TZ=<zone>`.
+    ///
+    /// The first run is the first match after startup (or after
+    /// [`delay_start`](Self::delay_start)). The schedule follows the wall
+    /// clock; a run that overruns skips the matches it missed.
+    ///
+    /// ```
+    /// use zapline::cron::Cron;
+    /// use zapline::tasks::Schedule;
+    ///
+    /// let weekdays = Schedule::cron("30 9 * * MON-FRI");
+    /// let first_of_month = Schedule::cron("CRON_TZ=+01:00 0 0 1 * *"); // midnight, UTC+1
+    /// let every_10s = Schedule::cron("*/10 * * * * *");
+    /// // Validate an expression from config without panicking:
+    /// let from_config: Cron = "@hourly".parse()?;
+    /// let hourly = Schedule::cron(from_config);
+    /// # Ok::<(), zapline::cron::CronError>(())
+    /// ```
+    ///
+    /// # Panics
+    /// If the expression is invalid (parse it with [`Cron::parse`] first to
+    /// handle the error).
+    pub fn cron(expr: impl IntoCron) -> Self {
+        match expr.into_cron() {
+            Ok(cron) => Schedule::new(Kind::Cron(Arc::new(cron))),
+            Err(e) => panic!("Schedule::cron: {e}"),
+        }
     }
 
     fn new(kind: Kind) -> Self {
@@ -501,26 +601,44 @@ impl Schedule {
         }
     }
 
-    /// Wait this long after startup before the first run (for `daily_at`,
-    /// the first run is the next occurrence after the delay).
+    /// Wait this long after startup before the first run (for `cron` and
+    /// `daily_at`, the first run is the next occurrence after the delay).
+    ///
+    /// ```
+    /// # use std::time::Duration;
+    /// let s = zapline::tasks::Schedule::every(Duration::from_secs(60)).delay_start(Duration::from_secs(10));
+    /// ```
     pub fn delay_start(mut self, delay: Duration) -> Self {
         self.delay = delay;
         self
     }
 
     /// Let a new run start while the previous one is still running.
+    ///
+    /// ```
+    /// let s = zapline::tasks::Schedule::cron("* * * * *").allow_overlap();
+    /// ```
     pub fn allow_overlap(mut self) -> Self {
         self.overlap = true;
         self
     }
 
     /// Stop after `runs` runs.
+    ///
+    /// ```
+    /// let s = zapline::tasks::Schedule::cron("@daily").limit(7); // one week
+    /// ```
     pub fn limit(mut self, runs: u64) -> Self {
         self.limit = Some(runs);
         self
     }
 
-    /// A name for log messages.
+    /// A name for log messages, metrics (the `task` label) and the dev
+    /// console.
+    ///
+    /// ```
+    /// let s = zapline::tasks::Schedule::cron("@hourly").name("rollup");
+    /// ```
     pub fn name(mut self, name: impl Into<String>) -> Self {
         self.name = Some(name.into().into());
         self
@@ -528,46 +646,82 @@ impl Schedule {
 
     /// Time from `now` until the next run would be due, ignoring
     /// `delay_start` (for diagnostics and tests). For `every`, the period.
+    ///
+    /// ```
+    /// use std::time::{Duration, UNIX_EPOCH};
+    /// use zapline::tasks::Schedule;
+    ///
+    /// let at_1am = UNIX_EPOCH + Duration::from_secs(3600);
+    /// assert_eq!(Schedule::daily_at(3, 30).delay_until_next(at_1am), Duration::from_secs(9000));
+    /// ```
     pub fn delay_until_next(&self, now: SystemTime) -> Duration {
-        match self.kind {
-            Kind::Every(period) => period,
-            Kind::Daily(at) => {
-                let since_epoch = now.duration_since(UNIX_EPOCH).unwrap_or_default();
-                let day_ms = DAY.as_millis();
-                let now_ms = since_epoch.as_millis() % day_ms;
-                let target_ms = u128::from(at) * 1000;
-                let wait = (target_ms + day_ms - now_ms) % day_ms;
-                let wait = if wait == 0 { day_ms } else { wait };
-                Duration::from_millis(wait as u64)
-            }
+        match &self.kind {
+            Kind::Every(period) => *period,
+            Kind::Cron(cron) => cron
+                .next_after(now)
+                .and_then(|next| next.duration_since(now).ok())
+                .unwrap_or(Duration::MAX),
         }
     }
 
-    fn first_run(&self, start: Instant) -> Instant {
-        let start = add(start, self.delay);
-        match self.kind {
-            Kind::Every(_) => start,
-            Kind::Daily(_) => {
+    /// When the next run is due after `now`, ignoring `delay_start`: for
+    /// `cron`, the next match; for `every`, `now + period`.
+    ///
+    /// ```
+    /// use std::time::{Duration, UNIX_EPOCH};
+    /// use zapline::tasks::Schedule;
+    ///
+    /// let next = Schedule::cron("@hourly").next_after(UNIX_EPOCH);
+    /// assert_eq!(next, Some(UNIX_EPOCH + Duration::from_secs(3600)));
+    /// ```
+    pub fn next_after(&self, now: SystemTime) -> Option<SystemTime> {
+        match &self.kind {
+            Kind::Every(period) => now.checked_add(*period),
+            Kind::Cron(cron) => cron.next_after(now),
+        }
+    }
+
+    /// One line for the dev console.
+    fn describe(&self) -> String {
+        match &self.kind {
+            Kind::Every(period) => format!("every {period:?}"),
+            Kind::Cron(cron) => format!("cron `{cron}`"),
+        }
+    }
+
+    fn first_run(&self, start: Instant) -> Option<Due> {
+        match &self.kind {
+            Kind::Every(_) => Some(Due::At(add(start, self.delay))),
+            Kind::Cron(cron) => {
                 let now = SystemTime::now();
                 let then = now.checked_add(self.delay).unwrap_or(now);
-                add(start, self.delay_until_next(then))
+                cron.next_after(then).map(Due::Wall)
             }
         }
     }
 
     /// The next tick after a run that was due at `due`.
-    fn next_run(&self, due: Instant, now: Instant) -> Instant {
-        match self.kind {
-            Kind::Every(period) => {
+    fn next_run(&self, due: &Due) -> Option<Due> {
+        match (&self.kind, due) {
+            (Kind::Every(period), Due::At(due)) => {
+                let (period, due, now) = (*period, *due, Instant::now());
                 let next = add(due, period);
                 if now < next {
-                    return next;
+                    return Some(Due::At(next));
                 }
                 // Overran: stay on the grid, skipping missed ticks.
                 let behind = (now - due).as_nanos() % period.as_nanos();
-                add(now, period - Duration::from_nanos(behind as u64))
+                Some(Due::At(add(
+                    now,
+                    period - Duration::from_nanos(behind as u64),
+                )))
             }
-            Kind::Daily(_) => add(now, self.delay_until_next(SystemTime::now())),
+            (Kind::Cron(cron), Due::Wall(due)) => {
+                // Never the same tick twice, even if the clock stepped back.
+                let now = SystemTime::now().max(*due);
+                cron.next_after(now).map(Due::Wall)
+            }
+            _ => None,
         }
     }
 }
@@ -578,6 +732,51 @@ fn add(t: Instant, d: Duration) -> Instant {
     t.checked_add(d.min(FAR)).unwrap_or(t)
 }
 
+/// When the next run is due.
+enum Due {
+    /// `every`: on the monotonic clock.
+    At(Instant),
+    /// `cron`: on the wall clock.
+    Wall(SystemTime),
+}
+
+impl Due {
+    /// Sleep until due. `false` if shutdown came first.
+    async fn wait(&self, shutdown: &Shutdown) -> bool {
+        match self {
+            Due::At(at) => {
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait() => false,
+                    _ = tokio::time::sleep_until(*at) => true,
+                }
+            }
+            // Sleep in short steps, re-reading the wall clock each time.
+            Due::Wall(at) => loop {
+                let left = match at.duration_since(SystemTime::now()) {
+                    Ok(left) if !left.is_zero() => left,
+                    _ => return true,
+                };
+                tokio::select! {
+                    biased;
+                    _ = shutdown.wait() => return false,
+                    _ = tokio::time::sleep(left.min(WALL_RECHECK)) => {}
+                }
+            },
+        }
+    }
+
+    /// The due time on the wall clock.
+    fn wall(&self) -> Option<SystemTime> {
+        match self {
+            Due::At(at) => {
+                SystemTime::now().checked_add(at.saturating_duration_since(Instant::now()))
+            }
+            Due::Wall(at) => Some(*at),
+        }
+    }
+}
+
 type JobFn = Arc<dyn Fn(Resources) -> BoxFuture<JobResult> + Send + Sync>;
 
 async fn run_schedule(
@@ -585,33 +784,181 @@ async fn run_schedule(
     schedule: Schedule,
     res: Resources,
     sup: Arc<Supervisor>,
-    name: String,
+    state: Arc<ScheduleState>,
 ) {
     let shutdown = sup.shutdown.clone();
-    let name: Arc<str> = name.into();
+    let name: Arc<str> = match &schedule.name {
+        Some(n) => format!("job `{n}`").into(),
+        None => format!("job {}", state.task).into(),
+    };
+    let metrics = res
+        .get::<MetricsHandle>()
+        .map(|m| Arc::new(TaskMetrics::new(&m, &state.task)));
     let mut due = schedule.first_run(Instant::now());
     let mut runs = 0u64;
-    loop {
-        tokio::select! {
-            biased;
-            _ = shutdown.wait() => break,
-            _ = tokio::time::sleep_until(due) => {}
+    while let Some(at) = due {
+        lock(&state.status).next = at.wall();
+        if !at.wait(&shutdown).await {
+            break;
         }
+        let run = {
+            let (job, res, name) = (job.clone(), res.clone(), name.clone());
+            let (state, metrics) = (state.clone(), metrics.clone());
+            async move {
+                let started = SystemTime::now();
+                let clock = Instant::now();
+                let outcome = run_logged(&name, job(res)).await;
+                let took = clock.elapsed();
+                if let Some(m) = &metrics {
+                    m.record(outcome, took);
+                }
+                let mut status = lock(&state.status);
+                status.runs += 1;
+                if outcome != Outcome::Ok {
+                    status.failures += 1;
+                }
+                status.last = Some((started, took, outcome));
+            }
+        };
         if schedule.overlap {
             let guard = sup.track();
-            let (job, res, name) = (job.clone(), res.clone(), name.clone());
             tokio::spawn(async move {
-                run_logged(&name, job(res)).await;
+                run.await;
                 drop(guard);
             });
         } else {
-            run_logged(&name, job(res.clone())).await;
+            run.await;
         }
         runs += 1;
         if schedule.limit.is_some_and(|max| runs >= max) {
             break;
         }
-        due = schedule.next_run(due, Instant::now());
+        due = schedule.next_run(&at);
+    }
+    let mut status = lock(&state.status);
+    status.next = None;
+    status.stopped = true;
+}
+
+/// Per-task metrics, registered when the app has the metrics plugin.
+struct TaskMetrics {
+    ok: Counter,
+    error: Counter,
+    panic: Counter,
+    duration: Histogram,
+}
+
+/// Buckets for task and job durations: 5 ms to 15 minutes.
+pub(crate) const RUN_BUCKETS: &[f64] = &[
+    0.005, 0.025, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 300.0, 900.0,
+];
+
+impl TaskMetrics {
+    fn new(metrics: &MetricsHandle, task: &str) -> Self {
+        let registry = metrics.registry();
+        let runs = registry.counter(
+            "scheduled_task_runs_total",
+            "Runs of scheduled tasks, by outcome (ok, error, panic).",
+            &["task", "outcome"],
+        );
+        let duration = registry.histogram_with_buckets(
+            "scheduled_task_duration_seconds",
+            "How long scheduled task runs took.",
+            &["task"],
+            RUN_BUCKETS,
+        );
+        TaskMetrics {
+            ok: runs.with_labels(&[task, Outcome::Ok.as_str()]),
+            error: runs.with_labels(&[task, Outcome::Error.as_str()]),
+            panic: runs.with_labels(&[task, Outcome::Panic.as_str()]),
+            duration: duration.with_labels(&[task]),
+        }
+    }
+
+    fn record(&self, outcome: Outcome, took: Duration) {
+        match outcome {
+            Outcome::Ok => self.ok.inc(),
+            Outcome::Error => self.error.inc(),
+            Outcome::Panic => self.panic.inc(),
+        }
+        self.duration.observe(took.as_secs_f64());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dev console
+
+/// A scheduled job as the dev console shows it.
+struct ScheduleState {
+    /// The name, or `#id`.
+    task: String,
+    what: String,
+    status: Mutex<ScheduleStatus>,
+}
+
+#[derive(Default)]
+struct ScheduleStatus {
+    next: Option<SystemTime>,
+    stopped: bool,
+    runs: u64,
+    failures: u64,
+    last: Option<(SystemTime, Duration, Outcome)>,
+}
+
+fn schedules_panel(sup: &Arc<Supervisor>) -> DevPanel {
+    let sup = sup.clone();
+    DevPanel::new("schedules", "Scheduled tasks", move |_req: &Request| {
+        let html = render_schedules(&lock(&sup.schedules));
+        Box::pin(async move { html }) as BoxFuture<String>
+    })
+}
+
+fn render_schedules(list: &[Arc<ScheduleState>]) -> String {
+    let now = SystemTime::now();
+    let mut html = String::from(
+        "<table><tr><th>Task<th>Schedule<th>Next run<th>Runs<th>Failures<th>Last run</tr>",
+    );
+    for s in list {
+        let st = lock(&s.status);
+        let next = match st.next {
+            Some(at) => format!("{} (in {})", http_date(at), until(now, at)),
+            None if st.stopped => "stopped".to_owned(),
+            None => "not started".to_owned(),
+        };
+        let last = st.last.map_or_else(String::new, |(at, took, outcome)| {
+            let class = if outcome == Outcome::Ok { "" } else { " class=s5" };
+            format!(
+                "<span{class}>{}</span>, {}, took {took:.1?}",
+                outcome.as_str(),
+                http_date(at)
+            )
+        });
+        html.push_str(&format!(
+            "<tr><td><code>{}</code><td><code>{}</code><td>{}<td>{}<td>{}<td>{last}</tr>",
+            escape(&s.task),
+            escape(&s.what),
+            escape(&next),
+            st.runs,
+            st.failures,
+        ));
+    }
+    html.push_str("</table>");
+    html
+}
+
+/// `Tue, 02 Jan 2024 03:04:05 GMT`.
+pub(crate) fn http_date(t: SystemTime) -> String {
+    httpdate::fmt_http_date(t.max(UNIX_EPOCH))
+}
+
+/// `3m 20s`, `2h 5m`, `4d 1h`.
+pub(crate) fn until(now: SystemTime, at: SystemTime) -> String {
+    let s = at.duration_since(now).map_or(0, |d| d.as_secs());
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {}s", s / 60, s % 60),
+        3600..86_400 => format!("{}h {}m", s / 3600, s / 60 % 60),
+        _ => format!("{}d {}h", s / 86_400, s / 3600 % 24),
     }
 }
 
