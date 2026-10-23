@@ -1,0 +1,16 @@
+[package]
+name = "leptos-ssr"
+description = "Server-rendered Leptos components served by zapline, with forms that work without JavaScript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+zapline = { workspace = true, features = ["sqlite"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["derive"] }
+# Leptos 0.8 (MSRV 1.88), rendering to HTML strings on the server.
+leptos = { version = "0.8", default-features = false, features = ["ssr"] }
+
+[dev-dependencies]
+tokio.workspace = true

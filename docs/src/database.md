@@ -187,3 +187,7 @@ async fn lists_only_published_posts() {
 `create` returns a `Record`: `get("title")` as text, `int("id")`, `json()` with typed numbers and booleans (compare it with your API's response), or `parse::<Post>()` into your own type. `.null("column")` stores `NULL`. It works on SQLite and Postgres, in tests and in seeds.
 
 If your SQL is portable between SQLite and Postgres you can test against SQLite and run Postgres in production; otherwise point a test at a real Postgres with `Database::postgres(url)`.
+
+## Going further
+
+[Ecosystem](ecosystem.md) has complete, tested apps for transactions, savepoints and idempotency keys with sqlx, and for SeaORM, Diesel and Leptos.

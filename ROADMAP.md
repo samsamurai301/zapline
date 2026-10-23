@@ -16,6 +16,7 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Observability: tracing, Prometheus metrics, health | done |
 | CLI: new, generate, dev, routes, openapi, doctor, bench | done |
 | Guide (mdBook, every snippet compile-checked) and examples | done |
+| Ecosystem examples: sqlx transactions, SeaORM, Diesel, Leptos SSR (`examples/ecosystem`) | done |
 | Security review (5 dimensions) and fixes | done. Findings and fixes are in the git history ("Fix review findings ...") |
 
 Run `./scripts/check.sh` to verify everything locally.
@@ -32,4 +33,3 @@ Run `./scripts/check.sh` to verify everything locally.
 3. **Distributed stores:** pluggable rate-limit and session stores (Redis).
 4. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
 5. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.
-6. **Database guides:** sqlx, SeaORM and Diesel examples with DI and health checks, and transactional patterns.

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Full local verification: what CI runs, in one command.
 #
-#   ./scripts/check.sh          # everything
-#   ./scripts/check.sh quick    # fmt + clippy + tests (all features)
+#   ./scripts/check.sh            # everything
+#   ./scripts/check.sh quick      # fmt + clippy + tests (all features)
+#   ./scripts/check.sh ecosystem  # everything, plus examples/ecosystem
+#                                 # (sqlx, SeaORM, Diesel, Leptos: heavy deps)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,5 +38,18 @@ cargo build -p zapline-examples --examples
 
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps
+
+if [[ "${1:-}" == "ecosystem" ]]; then
+  step "ecosystem examples (sqlx, SeaORM, Diesel, Leptos)"
+  # Their own workspace and lockfile, so their dependencies stay out of the
+  # main build.
+  (
+    cd examples/ecosystem
+    export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PWD/../../target/ecosystem}"
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cargo test --workspace -q
+  )
+fi
 
 echo; echo "All checks passed."
