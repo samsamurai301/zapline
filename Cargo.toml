@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-cli", "examples", "bench/servers"]
+# Their own workspaces, with their own lockfiles: they never slow down this one.
+exclude = ["examples/saas", "examples/ecosystem"]
 
 [workspace.package]
 version = "0.1.0"

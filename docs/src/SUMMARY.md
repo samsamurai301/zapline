@@ -32,6 +32,7 @@
 # Full-stack
 
 - [Databases (Postgres, SQLite)](database.md)
+- [Ecosystem: sqlx, SeaORM, Diesel, Leptos](ecosystem.md)
 - [Views & htmx](views.md)
 - [Durable jobs](jobs.md)
 - [Email](mail.md)

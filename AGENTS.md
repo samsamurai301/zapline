@@ -13,6 +13,7 @@ with `zapline new` get their own `AGENTS.md`.
 | `crates/zapline-macros` | `#[get]`/`#[post]`/... route macros |
 | `crates/zapline-cli` | `zapline` / `cargo zapline`: new, generate, dev, routes, openapi, doctor, bench. Templates in `templates/*.tmpl` |
 | `examples/examples` | Runnable examples; `cheatsheet.rs` is the canonical-usage file included in the guide |
+| `examples/ecosystem` | sqlx / SeaORM / Diesel / Leptos example apps: their own workspace and lockfile, checked by `./scripts/check.sh ecosystem` |
 | `docs/src` | The mdBook guide. `llms.txt` / `llms-full.txt` are generated from it |
 | `bench/` | zapline vs axum vs actix-web harness (`./bench/run.sh`) |
 
@@ -25,6 +26,7 @@ path.
 ```sh
 ./scripts/check.sh quick                  # fmt + clippy + tests: run before every commit
 ./scripts/check.sh                        # + feature matrix, examples, docs (what CI runs)
+./scripts/check.sh ecosystem              # + the examples/ecosystem workspace (heavy deps)
 cargo test -p zapline --all-features --test <name>   # one integration test file
 ./scripts/gen-llms.sh                     # regenerate docs/src/llms*.txt after editing docs
 ./bench/run.sh                            # before/after numbers for hot-path changes

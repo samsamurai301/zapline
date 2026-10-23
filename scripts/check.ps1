@@ -1,7 +1,8 @@
 # Full local verification on Windows: what CI runs, in one command.
 #
-#   .\scripts\check.ps1          # everything
-#   .\scripts\check.ps1 quick    # fmt + clippy + tests (all features)
+#   .\scripts\check.ps1            # everything
+#   .\scripts\check.ps1 quick      # fmt + clippy + tests (all features)
+#   .\scripts\check.ps1 ecosystem  # everything, plus examples/ecosystem
 #
 # If script execution is disabled, run it with:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\check.ps1
@@ -53,5 +54,21 @@ Step "docs"
 $env:RUSTDOCFLAGS = "-D warnings"
 Run cargo @("doc", "-p", "zapline", "--all-features", "--no-deps")
 Remove-Item Env:\RUSTDOCFLAGS
+
+if ($Mode -eq "ecosystem") {
+    Step "ecosystem examples (sqlx, SeaORM, Diesel, Leptos)"
+    # Their own workspace and lockfile, so their dependencies stay out of the main build.
+    Push-Location examples/ecosystem
+    $setTarget = -not $env:CARGO_TARGET_DIR
+    if ($setTarget) { $env:CARGO_TARGET_DIR = (Join-Path $PSScriptRoot "../target/ecosystem") }
+    try {
+        Run cargo @("fmt", "--all", "--check")
+        Run cargo @("clippy", "--workspace", "--all-targets", "--", "-D", "warnings")
+        Run cargo @("test", "--workspace", "-q")
+    } finally {
+        if ($setTarget) { Remove-Item Env:\CARGO_TARGET_DIR }
+        Pop-Location
+    }
+}
 
 Write-Host "`nAll checks passed." -ForegroundColor Green
