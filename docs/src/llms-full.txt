@@ -499,7 +499,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
-| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()` ([Several instances](scaling.md)) |
+| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
@@ -7903,7 +7903,7 @@ What already works across instances, because it lives in the database:
 | [Durable jobs](jobs.md) | The `zapline_jobs` table (`FOR UPDATE SKIP LOCKED` on Postgres, so instances share one queue) |
 | [Uploaded files](storage.md) with `Storage::s3` | The bucket |
 
-For the rest, the `redis` feature adds a small built-in Redis client (no extra dependency) and Redis-backed versions of the in-memory pieces:
+For the rest, the `redis` feature adds a small built-in Redis client (no extra dependency; `redis-tls` adds `rediss://`) and Redis-backed versions of the in-memory pieces:
 
 ```rust
 use zapline::cache::Cache;
@@ -7940,7 +7940,47 @@ async fn visit(redis: Redis) -> Result<String> {
 
 A Redis error reply becomes an error (`500`), and an unreachable Redis a `503`. Idle connections are kept for reuse (up to 16), and a command on one that the server closed is retried once on a fresh connection.
 
-The client speaks RESP2 over TCP with `AUTH` (password, or user and password) and a database number from the URL. TLS (`rediss://`) is not supported yet, so run Redis on a private network (your platform's internal network, a VPC, or a sidecar), or reach a TLS-only service through a tunnel.
+The client speaks RESP2 with `AUTH` (password, or user and password) and a database number from the URL: over TCP for `redis://`, and over TLS for `rediss://` (below).
+
+## Redis over TLS
+
+Managed Redis services (AWS ElastiCache and MemoryDB, Azure Cache, Upstash, Redis Cloud, Heroku, DigitalOcean...) usually hand out a `rediss://` URL. Turn on the `redis-tls` feature and use it as is:
+
+```toml
+zapline = { version = "0.1", features = ["redis-tls"] } # includes `redis`
+```
+
+```sh
+REDIS_URL=rediss://default:password@my-cache.example.com:6380/0
+```
+
+Everything above (the cache, live updates, rate limits, sessions, `Redis::cmd`) then runs over TLS 1.2 or 1.3 with rustls, and nothing else changes: connections are still pooled, and one the server closed is replaced by a fresh handshake. The server's certificate is checked against the Mozilla root store (compiled in, so it works in `scratch` and distroless images) for the URL's host, which is also sent as SNI.
+
+For a self-hosted Redis with its own CA, or a certificate for a name other than the host you connect to, add parameters to the URL (values percent-encoded):
+
+| Parameter | Meaning |
+|---|---|
+| `ca_file` | A PEM file of CA certificates to trust instead of the Mozilla roots: your private CA, or a self-signed server certificate |
+| `sni` | The name sent as SNI and checked on the certificate, when it differs from the host: connecting by IP, through a tunnel or port-forward, or to a load balancer |
+| `cert_file`, `key_file` | A client certificate chain and its key (PKCS#8, PKCS#1 or SEC1 PEM), for servers that require mutual TLS (`tls-auth-clients yes`) |
+
+```sh
+REDIS_URL='rediss://:s3cret@10.0.0.5:6380/0?ca_file=/etc/redis/ca.pem&sni=redis.internal'
+REDIS_URL='rediss://:s3cret@redis.internal:6380?ca_file=/run/secrets/ca.pem&cert_file=/run/secrets/client.pem&key_file=/run/secrets/client.key'
+```
+
+Files are read when the client is made (`Redis::new` / `Redis::from_env`), so a missing or invalid one stops the app at startup rather than on the first request. When the PEM lives in a secret rather than a file, pass it in memory instead:
+
+```rust
+let secret = |name: &str| std::env::var(name).map_err(|_| Error::internal(format!("{name} is not set")));
+let redis = Redis::from_env()? // REDIS_URL=rediss://...
+    .with_ca_pem(secret("REDIS_CA_PEM")?)?
+    .with_client_cert_pem(secret("REDIS_CLIENT_CERT")?, secret("REDIS_CLIENT_KEY")?)?;
+```
+
+There is deliberately no switch to skip certificate verification: for a self-signed server, trust its certificate with `ca_file`. A handshake that fails (an unknown CA, a certificate for another name, a missing client certificate) is a `503` whose message says why, for example `TLS handshake with Redis at 10.0.0.5:6380 failed: invalid peer certificate: UnknownIssuer`.
+
+Without the `redis-tls` feature, a `rediss://` URL is refused at startup with an error that names the feature, and the `redis` feature alone pulls in no TLS code.
 
 ## Without Redis
 
@@ -8098,6 +8138,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
+| `redis-tls` | `full` | `rediss://` URLs for the Redis client: TLS with rustls, the Mozilla root store or your own CA (`?ca_file=`, `Redis::with_ca_pem`), and an SNI override (`?sni=`) ([Running several instances](scaling.md#redis-over-tls)) | `redis` | `tokio-rustls`, `webpki-roots` |
 | `otlp` | `full` | OpenTelemetry trace export over OTLP/HTTP: `Telemetry::otlp`, or just `OTEL_EXPORTER_OTLP_ENDPOINT` ([Observability](observability.md#traces-to-opentelemetry-otlp)) | `tracing`, `json` | `hyper-rustls` (hyper client, rustls) |
 | `tz` | `full` | IANA time zones (`CRON_TZ=Europe/Paris`) in [cron schedules](cron.md#time-zones). UTC and fixed offsets work without it. | | `jiff` (system tz database; bundled on Windows) |
 | `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |

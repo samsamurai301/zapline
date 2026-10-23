@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views",
-    "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "otlp", "tz",
+    "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "redis-tls", "otlp", "tz",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -29,6 +29,8 @@ i18n = ["dep:toml"]
 # IANA time zones (`Europe/Paris`) in cron schedules; UTC and fixed offsets need nothing.
 tz = ["dep:jiff"]
 redis = ["json"]
+# `rediss://`: the Redis client over TLS (rustls, Mozilla roots or your own CA).
+redis-tls = ["redis", "dep:tokio-rustls", "dep:webpki-roots"]
 otlp = ["tracing", "json", "_http-client"]
 tracing = ["dep:tracing", "dep:tracing-subscriber"]
 http2 = ["hyper/http2", "hyper-util/http2", "hyper-util/server-auto"]
@@ -93,6 +95,7 @@ jsonwebtoken = { version = "11", optional = true, default-features = false, feat
 cookie = { version = "0.18", optional = true, features = ["percent-encode", "signed", "private"] }
 getrandom = { version = "0.2", optional = true }
 argon2 = { version = "0.5", optional = true, default-features = false, features = ["alloc", "password-hash"] }
+webpki-roots = { version = "1", optional = true }
 hyper-rustls = { version = "0.27", optional = true, default-features = false, features = ["http1", "ring", "tls12", "webpki-roots"] }
 lettre = { version = "0.11.19", optional = true, default-features = false, features = ["builder", "smtp-transport", "hostname", "tokio1-rustls", "ring", "webpki-roots"] }
 minijinja = { version = "2.24", optional = true, features = ["loader"] }

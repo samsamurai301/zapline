@@ -97,6 +97,7 @@
 //! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
 //! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
 //! | `redis` | | [`redis`]: Redis client; shared cache, live updates, rate limits and sessions |
+//! | `redis-tls` | | `rediss://` for [`redis`]: TLS with rustls, Mozilla roots or your own CA |
 //! | `otlp` | | OpenTelemetry traces over OTLP/HTTP from [`telemetry`] |
 //! | `tz` | | IANA time zones (`CRON_TZ=Europe/Paris`) in [`cron`] schedules |
 //! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |

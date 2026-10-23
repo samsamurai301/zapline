@@ -4133,6 +4133,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "validator",
+ "webpki-roots 1.0.10",
  "zapline-codegen",
  "zapline-macros",
 ]
