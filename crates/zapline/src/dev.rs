@@ -327,7 +327,9 @@ fn loopback_host(req: &Request) -> bool {
 }
 
 async fn act(req: Request, panels: Panels) -> Response {
-    if !local(&req) {
+    // Same-origin too: any web page the developer visits could otherwise
+    // post a form here (the browser connects from loopback).
+    if !local(&req) || !crate::middleware::SameOrigin::new().allows(&req) {
         return StatusCode::NOT_FOUND.into_response();
     }
     let id = req.param("panel").unwrap_or_default().into_owned();

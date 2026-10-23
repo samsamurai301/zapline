@@ -166,6 +166,53 @@ mod jobs {
             .await
             .assert_status(400);
     }
+
+    /// A web page on another site can't drive the panels: the browser
+    /// connects from loopback, but says the request is cross-site.
+    #[tokio::test]
+    async fn panel_actions_refuse_cross_site_posts() {
+        let client = App::new()
+            .database(Database::sqlite_memory())
+            .jobs_in::<Sqlite>(|q| q.register::<Broken>().workers(0))
+            .dev_console()
+            .test();
+        let jobs: Jobs<Sqlite> = client.resources().await.require().unwrap();
+        jobs.enqueue(Broken).await.unwrap();
+        jobs.run_pending().await.unwrap();
+        let id = jobs.failed(10).await.unwrap()[0].id;
+
+        for path in [
+            "/_dev/jobs-sqlite".to_owned(),
+            format!("/_dev/jobs-sqlite?discard={id}"),
+        ] {
+            client
+                .post(&path)
+                .header("sec-fetch-site", "cross-site")
+                .header("origin", "https://evil.example")
+                .send()
+                .await
+                .assert_status(404);
+            client
+                .post(&path)
+                .header("origin", "https://evil.example")
+                .send()
+                .await
+                .assert_status(404);
+        }
+        let stats = jobs.stats().await.unwrap();
+        assert_eq!(
+            (stats.queued, stats.failed),
+            (0, 1),
+            "nothing retried or discarded"
+        );
+
+        client
+            .post("/_dev/jobs-sqlite")
+            .header("sec-fetch-site", "same-origin")
+            .send()
+            .await
+            .assert_status(303);
+    }
 }
 
 #[cfg(feature = "mail")]
