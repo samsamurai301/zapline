@@ -21,7 +21,7 @@ full = [
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
 query = ["dep:serde_urlencoded"]
-form = ["dep:serde_urlencoded"]
+form = ["dep:serde_urlencoded", "dep:form_urlencoded"]
 openapi = ["json", "dep:schemars", "zapline-macros?/openapi"]
 validate = ["json", "dep:validator", "zapline-macros?/validate"]
 config = ["dep:toml"]
@@ -39,7 +39,7 @@ jwt = ["json", "dep:jsonwebtoken"]
 cookies = ["json", "dep:cookie", "dep:getrandom", "dep:hmac", "dep:sha2"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls-ring-webpki"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
-views = ["dep:minijinja"]
+views = ["dep:minijinja", "dep:serde_path_to_error"]
 password = ["dep:argon2", "dep:getrandom", "dep:sha2"]
 mail = ["dep:lettre"]
 cache = ["json"]
@@ -74,6 +74,8 @@ httpdate = "1"
 # optional
 serde_json = { version = "1", optional = true }
 serde_urlencoded = { version = "0.7", optional = true }
+form_urlencoded = { version = "1", optional = true }
+serde_path_to_error = { version = "0.1", optional = true }
 schemars = { version = "1", optional = true }
 validator = { version = "0.21", optional = true, features = ["derive"] }
 toml = { version = "1", optional = true }
