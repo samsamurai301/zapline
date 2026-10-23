@@ -1154,6 +1154,9 @@ struct AssetsInner {
     root: PathBuf,
     /// Relative path -> (size, mtime, hash).
     hashes: std::sync::Mutex<std::collections::HashMap<PathBuf, Fingerprint>>,
+    /// Re-hash files that changed (debug builds and `zapline dev`), instead
+    /// of hashing each file once.
+    live: bool,
 }
 
 /// A file's size and modification time when it was hashed, and the hash.
@@ -1177,6 +1180,7 @@ impl Assets {
             prefix: prefix.trim().trim_end_matches('/').to_owned(),
             root,
             hashes: std::sync::Mutex::default(),
+            live: cfg!(debug_assertions) || crate::dev::live_reload(),
         }))
     }
 
@@ -1203,11 +1207,12 @@ impl Assets {
     }
 
     /// The content hash of `rel`, recomputed when its size or mtime changes
-    /// (in debug builds; release builds hash each file once).
+    /// (in debug builds and under `zapline dev`; release builds hash each
+    /// file once).
     fn hash_of(&self, rel: &Path) -> Option<String> {
         let path = self.0.root.join(rel);
         let lock = || self.0.hashes.lock().unwrap_or_else(|e| e.into_inner());
-        if !cfg!(debug_assertions) {
+        if !self.0.live {
             if let Some((_, _, hash)) = lock().get(rel) {
                 return Some(hash.clone());
             }

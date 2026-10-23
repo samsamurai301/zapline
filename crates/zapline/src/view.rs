@@ -181,11 +181,18 @@ fn template_error(err: minijinja::Error) -> Error {
     Error::internal(msg).with_source(err)
 }
 
+/// Re-read templates on every render in debug builds, and under
+/// `zapline dev` (`ZAPLINE_DEV=1`) even in release builds, so its browser
+/// live reload shows edits without a restart. Decided once, at build time.
+fn reload_by_default() -> bool {
+    cfg!(debug_assertions) || crate::dev::live_reload()
+}
+
 impl App {
     /// Render HTML templates from `dir` (relative to the working directory,
     /// i.e. the project root under `cargo run`). Handlers take [`Views`].
     pub fn views(self, dir: impl Into<PathBuf>) -> Self {
-        self.state(Views::build(dir.into(), None, cfg!(debug_assertions)))
+        self.state(Views::build(dir.into(), None, reload_by_default()))
     }
 
     /// Like [`views`](Self::views), with a hook to add filters, functions
@@ -203,11 +210,7 @@ impl App {
         dir: impl Into<PathBuf>,
         configure: impl Fn(&mut Environment<'static>) + Send + Sync + 'static,
     ) -> Self {
-        let views = Views::build(
-            dir.into(),
-            Some(Arc::new(configure)),
-            cfg!(debug_assertions),
-        );
+        let views = Views::build(dir.into(), Some(Arc::new(configure)), reload_by_default());
         self.state(views)
     }
 }

@@ -319,7 +319,7 @@ const GENERIC_500: &str = "internal server error";
 /// in production, where those details are for the logs only.
 pub const ENV_DEV: &str = "ZAPLINE_DEV";
 
-fn dev_mode() -> bool {
+pub(crate) fn dev_mode() -> bool {
     static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *DEV.get_or_init(|| std::env::var_os(ENV_DEV).is_some_and(|v| v == "1"))
 }
