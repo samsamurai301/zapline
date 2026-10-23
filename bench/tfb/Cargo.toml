@@ -1,0 +1,25 @@
+[package]
+name = "zapline-tfb"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "zapline's TechEmpower Framework Benchmarks implementation"
+license = "MIT OR Apache-2.0"
+
+# Not part of the zapline workspace: TFB builds this directory on its own
+# (see README.md), and it needs its own lockfile and release profile.
+# prepare-submission.sh rewrites the zapline dependency for a TFB checkout.
+[workspace]
+
+[dependencies]
+zapline = { path = "../../crates/zapline", default-features = false, features = ["json", "postgres", "views", "cache"] }
+serde = { version = "1", features = ["derive"] }
+mimalloc = { version = "0.1", default-features = false }
+fastrand = "2"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = false

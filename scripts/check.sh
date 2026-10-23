@@ -36,6 +36,11 @@ cargo build -p zapline-examples --examples
 # The flagship app is its own project (own lockfile, sqlite only).
 (cd examples/saas && CARGO_TARGET_DIR="$PWD/../../target/saas" cargo test -q)
 
+step "TechEmpower app"
+# Its own project (TFB builds it alone); `./bench/tfb/run.sh` verifies it
+# against Postgres.
+(cd bench/tfb && cargo clippy -q --all-targets -- -D warnings && cargo test -q)
+
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps
 
