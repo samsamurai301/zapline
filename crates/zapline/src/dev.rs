@@ -33,6 +33,11 @@ use crate::response::{Html, IntoResponse, Redirect, Response};
 use crate::router::{RouteInfo, Routes};
 use crate::{App, Request, StatusCode};
 
+#[cfg(feature = "json")]
+mod record;
+#[cfg(feature = "json")]
+pub use record::ENV_RECORD;
+
 /// Where [`App::dev_console`] serves the console.
 pub const DEV_CONSOLE_PATH: &str = "/_dev";
 
@@ -149,8 +154,14 @@ impl App {
         let panels = self.panels();
         let recent = Recent::default();
         let log = recent.clone();
+        #[cfg(feature = "json")]
+        let recorder = record::Recorder::from_env();
+        #[cfg(feature = "json")]
+        let rec = recorder.clone();
         self.wrap(move |req: Request, next: Next| {
             let log = log.clone();
+            #[cfg(feature = "json")]
+            let rec = rec.clone();
             async move {
                 if req.path().starts_with(DEV_CONSOLE_PATH) {
                     return next.run(req).await;
@@ -158,6 +169,13 @@ impl App {
                 let method = req.method().to_string();
                 let path = req.uri().to_string();
                 let start = Instant::now();
+                #[cfg(feature = "json")]
+                let res = if rec.is_on() {
+                    rec.record(req, next).await
+                } else {
+                    next.run(req).await
+                };
+                #[cfg(not(feature = "json"))]
                 let res = next.run(req).await;
                 let hit = Hit {
                     method,
@@ -177,20 +195,27 @@ impl App {
             let routes: Arc<[RouteRow]> = table.iter().map(|r| RouteRow::new(r)).collect();
             let page = {
                 let panels = panels.clone();
+                #[cfg(feature = "json")]
+                let recorder = recorder.clone();
                 move |req: Request| {
                     let (routes, recent, panels) = (routes.clone(), recent.clone(), panels.clone());
-                    async move { console(&req, &routes, &recent, &panels).await }
+                    #[cfg(feature = "json")]
+                    let extra = recorder.section(&req);
+                    #[cfg(not(feature = "json"))]
+                    let extra = String::new();
+                    async move { console(&req, &routes, &recent, &panels, &extra).await }
                 }
             };
             let act = move |req: Request| {
                 let panels = panels.clone();
                 async move { act(req, panels).await }
             };
-            internal(
-                Routes::new()
-                    .get(DEV_CONSOLE_PATH, page)
-                    .post(&format!("{DEV_CONSOLE_PATH}/{{panel}}"), act),
-            )
+            let routes = Routes::new()
+                .get(DEV_CONSOLE_PATH, page)
+                .post(&format!("{DEV_CONSOLE_PATH}/{{panel}}"), act);
+            #[cfg(feature = "json")]
+            let routes = routes.merge(recorder.routes());
+            internal(routes)
         })
     }
 
@@ -275,7 +300,13 @@ async fn act(req: Request, panels: Panels) -> Response {
     }
 }
 
-async fn console(req: &Request, routes: &[RouteRow], recent: &Recent, panels: &Panels) -> Response {
+async fn console(
+    req: &Request,
+    routes: &[RouteRow],
+    recent: &Recent,
+    panels: &Panels,
+    recording: &str,
+) -> Response {
     if !local(req) {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -305,6 +336,7 @@ async fn console(req: &Request, routes: &[RouteRow], recent: &Recent, panels: &P
         page.push_str("</section>");
     }
 
+    page.push_str(recording);
     page.push_str("<section><h2>Recent requests</h2>");
     let hits = recent.lock();
     if hits.is_empty() {

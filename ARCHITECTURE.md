@@ -46,6 +46,7 @@ TCP accept (per-core runtime, SO_REUSEPORT)            server.rs
 | `ServerConfig` (`#[non_exhaustive]`, lives in `server.rs`) | Server tuning. Add new fields with defaults. |
 | `ENV_PRINT_ROUTES` (`ZAPLINE_PRINT_ROUTES=1`) | `App::run` prints the route table as JSON and exits. Used by the CLI. |
 | `ZAPLINE_EXPORT_OPENAPI=<path>` | The OpenAPI plugin writes the spec from its `on_build` hook and exits. Used by the CLI. |
+| `ZAPLINE_RECORD=1` (`dev::ENV_RECORD`) | The dev console records request/response pairs from startup (debug builds); `zapline snap` saves them as snapshot tests that `TestClient::replay_snapshots` replays. Set by `zapline dev --record`. |
 
 Inherent `impl App { ... }` / `impl Routes { ... }` blocks may live in a feature module's own file. For example, `openapi/mod.rs` can add `App::openapi(...)`. That keeps each feature self-contained.
 

@@ -22,6 +22,9 @@
 //! - **Assertions**: [`TestResponse::assert_status`] and
 //!   [`assert_header`](TestResponse::assert_header) chain, and their panic
 //!   messages include the response body.
+//! - **Snapshots**: [`TestClient::replay_snapshots`] replays traffic
+//!   recorded in the [dev console](crate::dev) and fails with a diff when a
+//!   response changed.
 //!
 //! ```
 //! # use zapline::prelude::*;
@@ -58,6 +61,9 @@ use crate::body::ReqBody;
 use crate::lifecycle::{Lifecycle, Resources};
 use crate::request::ConnInfo;
 use crate::router::RouteInfo;
+
+#[cfg(feature = "json")]
+pub use crate::snapshot::{Replay, ReplayReport, ENV_UPDATE_SNAPSHOTS};
 
 struct Started {
     app: AppInner,
