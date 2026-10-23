@@ -1259,7 +1259,8 @@ impl Replay {
     }
 
     /// Rewrite changed snapshots instead of failing (the default comes from
-    /// [`ENV_UPDATE_SNAPSHOTS`]).
+    /// [`ENV_UPDATE_SNAPSHOTS`]). A file with a changed exchange is stored
+    /// whole as this run saw it, so its ids stay consistent.
     ///
     /// ```no_run
     /// # async fn t(client: zapline::test::TestClient) {
@@ -1339,10 +1340,6 @@ impl Replay {
             let fill_in =
                 exchange.response.body_not_recorded.is_some() && actual.body_not_recorded.is_none();
             if self.update && (problem.is_some() || fill_in) {
-                rewritten.exchanges[n] = Exchange {
-                    request,
-                    response: actual,
-                };
                 changed += 1;
             } else if let Some(problem) = problem {
                 report.failures.push(format!(
@@ -1352,6 +1349,15 @@ impl Replay {
                     request.uri()
                 ));
             }
+            // An updated file is stored as this run saw it, every exchange
+            // with the ids this run produced: an updated response carries
+            // the new ids, so the next run learns nothing from it, and a
+            // request after it that kept the old ids (or a response that
+            // taught the old ones) would no longer line up.
+            rewritten.exchanges[n] = Exchange {
+                request,
+                response: actual,
+            };
         }
         if changed > 0 {
             match std::fs::write(file, rewritten.to_pretty()) {

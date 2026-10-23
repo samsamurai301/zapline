@@ -262,7 +262,7 @@ Click through your app once and keep what happened as a regression test. In a de
    If the new responses are right, accept them with ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test
    ```
 
-4. **Accept changes.** When the new responses are right, `ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test --test snapshots` rewrites the snapshots that changed (and only those). Review the change in your diff like any other code.
+4. **Accept changes.** When the new responses are right, `ZAPLINE_UPDATE_SNAPSHOTS=1 cargo test --test snapshots` rewrites the snapshot files that changed (and only those), each as the replay saw it: every exchange in an updated file is stored with the ids and values of this run, so the requests after a changed response still line up on the next run. Review the change in your diff like any other code.
 
 ### What may differ between runs
 

@@ -739,3 +739,37 @@ async fn csrf_protected_forms_and_htmx_requests_replay_with_a_fresh_token() {
     assert!(report.passed(), "{report}");
     assert_eq!(report.exchanges, 3);
 }
+
+#[tokio::test]
+async fn update_mode_keeps_the_id_chain_of_unchanged_exchanges() {
+    let dir = tempfile::tempdir().unwrap();
+    // Recorded against a store whose ids start at 100, with a create whose
+    // name has since changed (the response says "Bob").
+    let mut rec = record_session(100).await;
+    rec["exchanges"][0]["response"]["json"]["name"] = json!("Bob");
+    write(dir.path(), "items", &rec);
+
+    let report = api(1, false)
+        .test()
+        .replay_snapshots(dir.path())
+        .update(true)
+        .report()
+        .await;
+    assert!(report.passed(), "{report}");
+    assert_eq!(report.updated, 1);
+    let file: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("items.json")).unwrap())
+            .unwrap();
+    assert_eq!(file["exchanges"][0]["response"]["json"]["id"], 1);
+    // The fetch that matched is stored as this run saw it, with the new id.
+    assert_eq!(file["exchanges"][1]["request"]["path"], "/items/1");
+    assert_eq!(file["exchanges"][1]["response"]["json"]["id"], 1);
+
+    // The updated snapshot passes on the next run.
+    let report = api(1, false)
+        .test()
+        .replay_snapshots(dir.path())
+        .report()
+        .await;
+    assert!(report.passed(), "{report}");
+}
