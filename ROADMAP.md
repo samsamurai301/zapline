@@ -10,7 +10,7 @@ This file tracks what is done, what was deliberately deferred, and what comes ne
 | Server: thread-per-core, graceful shutdown, HTTP/2, TLS, Unix sockets, limits | done |
 | OpenAPI 3.1 and docs UIs, validation | done |
 | DI, layered config, background tasks and scheduled jobs | done |
-| Auth: Bearer, Basic, API key, JWT, policies (fail-closed), cookies, sessions, CSRF (signed) | done |
+| Auth: Bearer, Basic, API key, JWT (key rotation, JWKS), policies (fail-closed), cookies, sessions, CSRF (signed) | done |
 | Middleware suite: CORS, compression, rate limit, request IDs, security headers, timeouts, catch-panic, load shedding, path normalization | done |
 | Realtime and content: WebSockets, SSE, streaming, static files, multipart | done |
 | Observability: tracing, Prometheus metrics, health | done |
@@ -32,7 +32,7 @@ Run `./scripts/check.sh` to verify everything locally.
 
 1. **Release:** push to the private repository `samsamurai301/zapline` (run `publish-to-github.ps1` or `.sh`) and watch the first CI run on Linux, macOS and Windows. When going public, publish `zapline-macros`, `zapline` and `zapline-cli` to crates.io (in that order) and the guide with GitHub Pages.
 2. **Benchmarks:** run `./bench/run.sh` on dedicated hardware with separate client and server machines. Prepare a TechEmpower Framework Benchmarks submission (needs the database tests: single query, multiple queries, fortunes, updates).
-3. **Distributed stores:** pluggable rate-limit and session stores (Redis), and JWKS / key rotation for JWT.
+3. **Distributed stores:** pluggable rate-limit and session stores (Redis).
 4. **Scheduling:** full cron expressions, with job metrics.
 5. **Telemetry:** an OpenTelemetry OTLP exporter and trace-context propagation (`traceparent`).
 6. **Protocols:** WebSockets over HTTP/2 (RFC 8441), with HTTP/3 as an experiment.

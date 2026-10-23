@@ -5,7 +5,8 @@
 //!   `WWW-Authenticate` challenge and the codes `missing_credentials` /
 //!   `invalid_credentials`.
 //! - **JWT** (feature `jwt`): [`JwtConfig`], [`Claims`], the [`Jwt`]
-//!   extractor and [`JwtAuthenticator`].
+//!   extractor and [`JwtAuthenticator`]; key rotation with [`JwtKey`], and
+//!   remote JWK Sets with [`Jwks`] (feature `jwks`).
 //! - **Pluggable authentication**: implement [`Authenticator`] (or pass a
 //!   closure) and install [`Authenticate`] as route middleware; handlers read
 //!   the user with [`CurrentUser`].
@@ -50,6 +51,8 @@ mod bearer;
 #[cfg(feature = "cookies")]
 mod csrf;
 mod guard;
+#[cfg(feature = "jwks")]
+mod jwks;
 #[cfg(feature = "jwt")]
 pub mod jwt;
 #[cfg(feature = "oauth")]
@@ -66,8 +69,13 @@ pub use csrf::{Csrf, CsrfToken};
 pub use guard::{
     AllowAnonymous, Guard, HasRoles, RequireAuth, RequireRoles, RequireScopes, RoutePolicy,
 };
+#[cfg(feature = "jwks")]
+pub use jwks::Jwks;
 #[cfg(feature = "jwt")]
-pub use jwt::{Algorithm, Claims, DecodingKey, EncodingKey, Jwt, JwtAuthenticator, JwtConfig};
+pub use jwt::{
+    Algorithm, Claims, DecodingKey, EncodingKey, Jwk, JwkSet, Jwt, JwtAuthenticator, JwtConfig,
+    JwtKey,
+};
 
 /// Compare two byte strings in constant time (with respect to their
 /// contents), so secrets such as API keys and tokens cannot be recovered

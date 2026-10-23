@@ -30,7 +30,8 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `fs` | `full` | `zapline::fs`: `ServeDir`, `ServeFile` and `App::static_files` ([Static files](files.md)) | | `mime_guess`, `tokio-util` (`io`) |
 | `multipart` | `full` | `zapline::multipart`: the `Multipart` extractor ([Uploads](files.md#uploads-with-multipart)) | | `multer` |
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
-| `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
+| `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt`; key rings with `JwtKey` (rotate, retire) and `App::serve_jwks` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (aws-lc backend, PEM keys) |
+| `jwks` | `full` | `Jwks`: verify tokens with an identity provider's JWK Set, cached with a TTL, refreshed on unknown `kid` (rate limited), stale keys kept on errors, OpenID discovery ([JWKS](auth.md#tokens-from-an-identity-provider-jwks)) | `jwt` | `hyper-rustls` (hyper client, rustls) |
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |

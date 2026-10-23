@@ -3400,6 +3400,8 @@ fn app() -> App {
 | `JwtConfig::es256_pem(public_pem, Some(private_pem))` | ECDSA P-256 (PKCS#8 private key) |
 | `JwtConfig::try_rs256_pem` / `try_es256_pem` | Fallible versions that return an error instead of panicking on a bad key |
 | `JwtConfig::new(algorithm, decoding_key, encoding_key)` | Full control over algorithm and keys |
+| `JwtConfig::from_key(jwt_key)` | Starts from a named [`JwtKey`](#key-rotation), which also covers EdDSA (Ed25519) |
+| `JwtConfig::from_jwks(Jwks::new(url))` | Verify-only, with the keys an identity provider publishes ([JWKS](#tokens-from-an-identity-provider-jwks), feature `jwks`) |
 
 | Builder method | Effect |
 |---|---|
@@ -3408,10 +3410,11 @@ fn app() -> App {
 | `.ttl(duration)` | Lifetime of issued tokens when the claims have no `exp` (default 1 hour) |
 | `.leeway(duration)` | Clock-skew tolerance for `exp` and `nbf` (default 60 s) |
 | `.required_claims(names)` | Claims that must be present, from `exp`, `nbf`, `iss`, `aud`, `sub` (default: `exp`) |
-| `.key_id(kid)` | `kid` header for issued tokens (key rotation) |
+| `.key_id(kid)` | Names the config's key: issued tokens carry this `kid`, and tokens naming it verify with it ([key rotation](#key-rotation)) |
+| `.jwks(Jwks::new(url))` | Also accept tokens signed with a remote JWK Set's keys (feature `jwks`) |
 | `.validation(\|v\| ..)` | Adjust the underlying `jsonwebtoken::Validation` |
 
-The configured algorithm is pinned, so a token cannot choose its own (no `alg: none`, no HS/RS confusion). `exp` is required and validated, `nbf` is validated when present, and tokens longer than 16 KiB are rejected before parsing. `encode` fills in a missing `iat`, `exp` (now + ttl), `iss` and `aud`.
+The configured algorithm is pinned, so a token cannot choose its own (no `alg: none`, no HS/RS confusion). With several keys, each key keeps its own algorithm: a token naming an RS256 key with `alg: HS256` is rejected. `exp` is required and validated, `nbf` is validated when present, and tokens longer than 16 KiB are rejected before parsing. `encode` fills in a missing `iat`, `exp` (now + ttl), `iss` and `aud`.
 
 ### `Claims`
 
@@ -3456,6 +3459,125 @@ fn api() -> Routes {
         .wrap(Authenticate::new(JwtAuthenticator::<AppClaims>::new()).required().authorize())
 }
 ```
+
+### Key rotation
+
+A `JwtConfig` holds a key ring: the key that signs, and every key that still verifies. Tokens name their key in the `kid` header, and the ring picks the key by that name. A `JwtKey` is one entry: a `kid`, an algorithm and the key material.
+
+| `JwtKey` constructor | Algorithm |
+|---|---|
+| `JwtKey::hs256(kid, secret)` | HMAC-SHA256 (errors if the secret is shorter than 32 bytes) |
+| `JwtKey::rs256_pem(kid, public_pem, Some(private_pem))` | RSA |
+| `JwtKey::es256_pem(kid, public_pem, Some(private_pem))` | ECDSA P-256 |
+| `JwtKey::ed25519_pem(kid, public_pem, Some(private_pem))` | EdDSA (Ed25519) |
+| `JwtKey::from_jwk(&jwk)` | A public JWK (RSA, EC P-256/P-384, Ed25519). Symmetric and encryption keys are refused. |
+| `JwtKey::new(kid, algorithm, decoding_key, encoding_key)` | Full control |
+
+Pass `None` for the private key to get a key that only verifies. Three methods change the ring while the app runs. Every clone of the config shares the ring, so calling them on the `State<JwtConfig>` a handler extracted takes effect for the whole app:
+
+| Method | Effect |
+|---|---|
+| `jwt.rotate(key)` | Sign with `key` from now on. The previous signing key stays and keeps verifying the tokens it issued. Errors if `key` has no private part or no `kid`. |
+| `jwt.add_key(key)` | Add a key that only verifies: an old key kept after a restart, or the next key published before you start signing with it |
+| `jwt.retire(kid)` | Stop accepting a key's tokens. The current signing key can't be retired. |
+| `jwt.key_ids()` | The `kid`s in the ring, the signing key's first |
+
+```rust
+use zapline::auth::{Claims, JwtConfig, JwtKey};
+use zapline::prelude::*;
+
+fn jwt() -> Result<JwtConfig> {
+    let current = std::env::var("JWT_SECRET")?;
+    let jwt = JwtConfig::hs256(current).key_id("2026-10");
+    // Tokens signed with last month's key keep working until they expire.
+    if let Ok(previous) = std::env::var("JWT_SECRET_PREVIOUS") {
+        jwt.add_key(JwtKey::hs256("2026-09", previous)?);
+    }
+    Ok(jwt)
+}
+
+// Rotate without a restart, for example from an admin endpoint.
+async fn rotate(State(jwt): State<JwtConfig>) -> Result<&'static str> {
+    let next = std::env::var("JWT_SECRET_NEXT")?;
+    jwt.rotate(JwtKey::hs256("2026-11", next)?)?;
+    Ok("rotated")
+}
+```
+
+How a key is picked:
+
+- If the token's `kid` names a key in the ring, only that key is tried. The key's algorithm must match the token's `alg`.
+- Keys without a `kid` (a config built without `.key_id(..)`) accept any `kid` with their algorithm, so configs that predate key ids keep working.
+- A token without `kid` verifies only when the choice is unambiguous: a key without a `kid`, or a ring with a single key.
+- Otherwise the token is `401 invalid_token`, or it is looked up in the remote JWK Set when one is configured.
+
+A config with a single unnamed key (the usual `JwtConfig::hs256(secret)`) verifies without reading the token header, as before. Rotations live in memory. When several instances sign tokens, give each instance the same keys at startup with `add_key`, or let one service issue tokens and have the others follow its JWK Set.
+
+### Publishing your keys
+
+`App::serve_jwks(path)` serves the public half of every RSA, EC and Ed25519 key in the registered config as a JWK Set ([RFC 7517](https://www.rfc-editor.org/rfc/rfc7517)). HMAC keys are never published. The set is read on every request, so a rotation shows up at once. Responses carry `Cache-Control: public, max-age=300`, and the route is left out of the OpenAPI document.
+
+```rust
+use zapline::auth::{JwtConfig, JwtKey};
+use zapline::prelude::*;
+
+fn app() -> Result<App> {
+    let public = std::fs::read("keys/2026-10.pub.pem")?;
+    let private = std::fs::read("keys/2026-10.pem")?;
+    let key = JwtKey::es256_pem("2026-10", &public, Some(&private))?;
+    Ok(App::new()
+        .jwt(JwtConfig::from_key(key).issuer("https://auth.example.com"))
+        .serve_jwks("/.well-known/jwks.json"))
+}
+```
+
+`jwt.public_jwks()` returns the same set (a `JwkSet`) if you serve it some other way.
+
+To rotate without failing any request, publish the next key first with `jwt.add_key(next_public_key)`. Wait at least as long as verifiers cache the set, then switch with `jwt.rotate(next_key)`. Zapline verifiers don't need the wait: they refetch the set when a token names a key they haven't seen.
+
+### Tokens from an identity provider (JWKS)
+
+With the `jwks` feature, a config can verify tokens signed by keys that an identity provider publishes at its `jwks_uri`: Auth0, Okta, Keycloak, Cognito, Entra ID, Google, or another zapline app's `serve_jwks`.
+
+```rust
+use std::time::Duration;
+use zapline::auth::{Authenticate, Jwks, JwtConfig};
+use zapline::prelude::*;
+
+fn app() -> App {
+    let issuer = "https://example.eu.auth0.com/";
+    let jwt = JwtConfig::from_jwks(Jwks::discover(issuer))
+        .issuer(issuer)
+        .audience("https://api.example.com");
+    App::new()
+        .jwt(jwt)
+        .nest("/api", Routes::new().get("/me", || async { "hi" }).wrap(Authenticate::jwt()))
+}
+```
+
+`Jwks::new(url)` takes the JWK Set URL directly. `Jwks::discover(issuer)` reads `jwks_uri` from `{issuer}/.well-known/openid-configuration` (OpenID Connect Discovery) and checks that the document names the same issuer. `JwtConfig::hs256(secret).jwks(..)` combines your own keys with the provider's: local `kid`s are checked first and never cause a fetch.
+
+How the cache behaves:
+
+- **Startup.** `App::jwt` fetches the set before the server starts accepting requests. This is best effort: if the provider is down, the failure is logged and the first request tries again.
+- **TTL.** Keys are fresh for `.ttl(..)` (default 10 minutes). After that, the next request still verifies with the cached keys while a background task refreshes them. No request waits for a refresh of keys it already has.
+- **Unknown `kid`.** A token naming a key the cache doesn't have triggers a refresh, so a provider's rotation is picked up at once. Refreshes happen at most once per `.min_refresh_interval(..)` (default 30 s), however many made-up `kid`s arrive. Concurrent requests share one fetch.
+- **Timeouts.** A request waits at most `.timeout(..)` (default 5 s) for a fetch.
+- **Failures.** On an error status, malformed JSON, a set with no usable keys, or a timeout, the cached keys are kept and keep verifying (stale on error). A token whose key the cache can't have while the provider is failing gets `503 jwks_unavailable`, not a misleading `401`.
+
+The algorithm comes from the JWK's `alg`, or from its key type when `alg` is absent: RS256 for RSA, ES256/ES384 for P-256/P-384, EdDSA for Ed25519. Keys whose `alg` doesn't fit their key type, symmetric (`oct`) keys, encryption keys (`"use": "enc"`) and unknown key types are skipped. `.algorithms([Algorithm::RS256])` narrows the set further. HMAC algorithms are never accepted from a remote set, so a public key can't be turned into an HMAC secret.
+
+| `Jwks` method | Effect |
+|---|---|
+| `Jwks::new(url)` / `Jwks::discover(issuer)` | Where the keys come from |
+| `.ttl(d)` | How long fetched keys are fresh (default 10 min) |
+| `.min_refresh_interval(d)` | Fetch at most this often (default 30 s) |
+| `.timeout(d)` | The longest a request waits for a fetch (default 5 s) |
+| `.algorithms([..])` | Accept only keys for these algorithms |
+| `jwks.refresh().await` | Fetch now. Returns the number of usable keys. |
+| `jwks.key_ids()` | The cached `kid`s |
+
+`jwt.decode(token)` is synchronous and uses only cached keys. A key it is missing is fetched in the background. The `Jwt` extractor, `Authenticate::jwt()` and `jwt.verify(token).await` wait for the fetch.
 
 ## Custom authenticators
 
@@ -6419,7 +6541,8 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `fs` | `full` | `zapline::fs`: `ServeDir`, `ServeFile` and `App::static_files` ([Static files](files.md)) | | `mime_guess`, `tokio-util` (`io`) |
 | `multipart` | `full` | `zapline::multipart`: the `Multipart` extractor ([Uploads](files.md#uploads-with-multipart)) | | `multer` |
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
-| `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
+| `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt`; key rings with `JwtKey` (rotate, retire) and `App::serve_jwks` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (aws-lc backend, PEM keys) |
+| `jwks` | `full` | `Jwks`: verify tokens with an identity provider's JWK Set, cached with a TTL, refreshed on unknown `kid` (rate limited), stale keys kept on errors, OpenID discovery ([JWKS](auth.md#tokens-from-an-identity-provider-jwks)) | `jwt` | `hyper-rustls` (hyper client, rustls) |
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
