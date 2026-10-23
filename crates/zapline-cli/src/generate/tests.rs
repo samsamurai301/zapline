@@ -908,29 +908,30 @@ fn migration_follows_the_project_dialect() {
 
 #[test]
 fn zapline_features_are_added_once_in_every_manifest_style() {
-    let patch = |m: &str| add_zapline_features(m, &["chrono", "uuid"]);
+    let patch =
+        |m: &str| add_zapline_features(&format!("[dependencies]\n{m}"), &["chrono", "uuid"]);
+    let dep = |m: &str| format!("[dependencies]\n{m}");
     assert_eq!(
-        patch("[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\"] }\n")
-            .unwrap(),
-        "[dependencies]\nzapline = { version = \"0.1\", features = [\"chrono\", \"uuid\", \"sqlite\"] }\n"
+        patch("zapline = { version = \"0.1\", features = [\"sqlite\"] }\n").unwrap(),
+        dep("zapline = { version = \"0.1\", features = [\"chrono\", \"sqlite\", \"uuid\"] }\n")
     );
     assert_eq!(
         patch("zapline = { path = \"../z\" }\n").unwrap(),
-        "zapline = { path = \"../z\", features = [\"chrono\", \"uuid\"] }\n"
+        dep("zapline = { path = \"../z\", features = [\"chrono\", \"uuid\"] }\n")
     );
     assert_eq!(
         patch("zapline = \"0.1\"\n").unwrap(),
-        "zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n"
+        dep("zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n")
     );
     assert_eq!(
         patch("zapline = { version = \"0.1\", features = [] }\n").unwrap(),
-        "zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n"
+        dep("zapline = { version = \"0.1\", features = [\"chrono\", \"uuid\"] }\n")
     );
     assert_eq!(
         patch("zapline = { version = \"0.1\", features = [\"uuid\", \"chrono\"] }\n"),
         None
     );
-    assert_eq!(patch("[dependencies]\nserde = \"1\"\n"), None);
+    assert_eq!(patch("serde = \"1\"\n"), None);
 }
 
 #[test]

@@ -273,44 +273,13 @@ pub fn dialect_of(manifest: &str) -> db_resource::Dialect {
     }
 }
 
-/// `manifest` with `features` added to the `zapline = { .. }` dependency
-/// line, or `None` when nothing changed (they are all there already, or
-/// there is no such line to edit).
+/// `manifest` with `features` added to the zapline dependency (see
+/// [`crate::features::add_features`]), or `None` when nothing changed (they
+/// are all there already, or there is no zapline dependency to edit).
 pub fn add_zapline_features(manifest: &str, features: &[&str]) -> Option<String> {
-    let line = manifest.lines().find(|l| {
-        l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline=")
-    })?;
-    let missing: Vec<String> = features
-        .iter()
-        .filter(|f| !line.contains(&format!("\"{f}\"")))
-        .map(|f| format!("\"{f}\""))
-        .collect();
-    if missing.is_empty() {
-        return None;
-    }
-    let mut new_line = line.to_string();
-    let added = missing.join(", ");
-    if let Some(pos) = new_line.find("features = [") {
-        let at = pos + "features = [".len();
-        let sep = if new_line[at..].trim_start().starts_with(']') {
-            ""
-        } else {
-            ", "
-        };
-        new_line.insert_str(at, &format!("{added}{sep}"));
-    } else if let Some(pos) = new_line.rfind('}') {
-        let before = new_line[..pos].trim_end().len();
-        new_line.replace_range(before..pos, &format!(", features = [{added}] "));
-    } else {
-        // `zapline = "0.1"`.
-        let (key, version) = new_line.split_once('=')?;
-        new_line = format!(
-            "{}= {{ version = {}, features = [{added}] }}",
-            key,
-            version.trim()
-        );
-    }
-    Some(manifest.replacen(line, &new_line, 1))
+    crate::features::add_features(manifest, features)
+        .ok()
+        .filter(|patched| patched != manifest)
 }
 
 /// Turns on the zapline features generated code needs in the project's

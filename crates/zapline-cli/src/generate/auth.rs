@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use super::db_resource::Dialect;
 use super::{apply, crate_name_of, plan_route_registration, warn_if_not_zapline, Report};
 use crate::db::MigrationFiles;
+use crate::features;
 use crate::project::Project;
 use crate::render::{render, OutputFile};
 use crate::templates;
@@ -122,9 +123,19 @@ pub fn files(
 /// Adds the zapline features auth needs and compiles Argon2 optimized in
 /// debug builds (unoptimized, one hash takes most of a second). Returns the
 /// new manifest, or `None` if it already had everything.
-pub fn patch_manifest(manifest: &str) -> Option<String> {
-    let mut out = super::add_zapline_features(manifest, &["cookies", "mail", "oauth", "password"])
-        .unwrap_or_else(|| manifest.to_string());
+pub fn patch_manifest(manifest: &str) -> Result<Option<String>> {
+    // A project that depends on zapline some other way (a renamed or
+    // workspace-only dependency) keeps its manifest; `warn_if_not_zapline`
+    // speaks up when it does not depend on zapline at all.
+    let has_zapline = toml::from_str::<toml::Table>(manifest)
+        .ok()
+        .and_then(|doc| doc.get("dependencies")?.get("zapline").cloned())
+        .is_some();
+    let mut out = if has_zapline {
+        features::add_features(manifest, &["cookies", "mail", "oauth", "password"])?
+    } else {
+        manifest.to_string()
+    };
     if !out.contains("[profile.dev.package.argon2]") {
         if !out.ends_with('\n') {
             out.push('\n');
@@ -134,7 +145,7 @@ pub fn patch_manifest(manifest: &str) -> Option<String> {
              [profile.dev.package.argon2]\nopt-level = 3\n",
         );
     }
-    (out != manifest).then_some(out)
+    Ok((out != manifest).then_some(out))
 }
 
 /// The variables auth reads, appended to `.env.example` when missing.
@@ -222,7 +233,7 @@ pub fn generate(project: &Project, force: bool) -> Result<Report> {
     let mut report = Report::default();
     let edit = plan_route_registration(project, "auth")?;
     apply(project, files, edit, force, &mut report)?;
-    if let Some(patched) = patch_manifest(&manifest) {
+    if let Some(patched) = patch_manifest(&manifest)? {
         fs::write(&manifest_path, patched)?;
         report.modified.push(PathBuf::from("Cargo.toml"));
     }
@@ -261,14 +272,16 @@ mod tests {
     fn manifest_gets_features_and_a_fast_argon2() {
         let m =
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
-        let p = patch_manifest(m).unwrap();
+        let p = patch_manifest(m).unwrap().unwrap();
         assert!(
             p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
-        assert_eq!(patch_manifest(&p), None);
-        let bare = patch_manifest("[dependencies]\nzapline = { version = \"0.1\" }\n").unwrap();
+        assert_eq!(patch_manifest(&p).unwrap(), None);
+        let bare = patch_manifest("[dependencies]\nzapline = { version = \"0.1\" }\n")
+            .unwrap()
+            .unwrap();
         assert!(
             bare.contains(
                 "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\"] }"

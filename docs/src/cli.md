@@ -19,11 +19,12 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline g mailer <name>` | An [email from templates](mail.md#templated-email-zapline-g-mailer): `src/mail/<name>.rs` (declared in `src/mail/mod.rs`), `templates/mail/<name>.html` and `.txt`, and a test against the outbox mailer; enables the `mail` and `views` features |
 | `zapline g auth` | Add accounts: users migration, sign-up/log-in/log-out, password reset by email (JSON API and htmx pages), database sessions, a `CurrentUser` extractor and tests ([Accounts](auth.md#accounts-in-one-command-zapline-g-auth)) |
 | `zapline g deploy fly\|railway\|render\|compose` | [Hosting config](deployment.md#hosting-configs-zapline-g-deploy) for the project's Dockerfile, with volumes, databases, health checks and secrets filled in |
+| `zapline add <feature>...` / `zapline add --list` | Turn on zapline [features](features.md) in `Cargo.toml` (`zapline add ws redis`), whatever shape the `zapline` dependency has. The list stays sorted, the rest of the file is untouched, features already on are reported and skipped, and a misspelled name gets a suggestion (`wss`: did you mean `ws`?). `--list` prints every feature with a one-line description and marks the ones the project has |
 | `zapline g tailwind` | [Tailwind CSS without Node](files.md#tailwind-css-without-node): `styles/app.css` compiled to `static/app.css` by the standalone Tailwind binary |
 | `zapline dev [--bin X] [--no-proxy] [-- app args]` | The [dev loop](#the-dev-loop-zapline-dev): template, translation and static file changes reload open pages without a restart, CSS is swapped in place, Rust changes rebuild in the background and swap in the new binary with no downtime, and compile errors show as an overlay in the browser. Sets `ZAPLINE_DEV=1`, so 500 responses show the real error on the [dev error page](errors.md#the-dev-error-page), and records the app's address in `target/zapline-dev.addr` for `zapline mcp`. With Tailwind, also rebuilds `static/app.css` as you save. |
 | `zapline ship <user@host> [--dry-run] [--static] [--rollback]` | [Build a release binary, copy it over ssh and swap it in](deployment.md#one-binary-one-command) next to the running one on the same port, with systemd. The first run creates the user, `/etc/<app>/env` (with generated secrets) and the unit. Any failure leaves the old release serving. `--env K=V` sets a setting, `--keep N` keeps N releases |
 | `zapline css [--minify\|--watch]` | Build `static/app.css` from `styles/app.css` with Tailwind |
-| `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix |
+| `zapline check [--clippy]` | Type-check (or lint) all targets and print one line per error or warning: location, code, message, the span label and the first suggested fix. When an error comes from a zapline feature the project has not enabled, it says which ([below](#missing-features)) |
 | `zapline test [filter]` | Run the tests and print only the failures (with the start of each panic message) and a summary line. `filter` is a test-name filter, or a `tests/<file>` name |
 | `zapline fuzz [--seed N] [--cases N]` | Run `tests/fuzz.rs`, which [fuzzes every route](testing.md#fuzz-every-route) from its OpenAPI schemas, and print the report: each panic, 5xx, timeout, undeclared status or response that breaks its schema, with a minimal reproducing request. The report is kept for the MCP `last_results` tool |
 | `zapline explain [ZL0002]` | What a [diagnostic code](errors.md#diagnostic-codes) means and the code that fixes it; without a code, the list |
@@ -37,6 +38,24 @@ The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev 
 | `zapline bench <url> [-c 256 -d 10s -t N]` | Load-test with wrk |
 
 `-C <dir>` runs any command as if it had been started in `<dir>`.
+
+## Missing features
+
+Most of zapline is opt-in, so code copied from the guide can need a feature the project does not have yet. Plain `cargo check` only says `` could not find `ws` in `zapline` ``. `zapline check` and `zapline test` add the fix:
+
+```text
+error[E0432] src/routes/chat.rs:1:14: unresolved import `zapline::ws`
+    could not find `ws` in `zapline`
+    hint: enable the `ws` feature: zapline add ws
+error[E0599] src/lib.rs:12:10: no method named `views` found for struct `zapline::App` in the current scope
+    method not found in `zapline::App`
+    hint: enable the `views` feature: zapline add views
+error[E0425] src/routes/posts.rs:8:20: cannot find type `Db` in this scope
+    not found in this scope
+    hint: enable the `sqlite` or `postgres` feature: zapline add sqlite
+```
+
+The hint covers unresolved imports and paths (`zapline::ws`, `zapline::auth::Jwt`), unknown types (`WebSocketUpgrade`, `Views`, `Db`, `JwtConfig`, `Cache`...) and builder methods that a feature adds (`App::views`, `App::database`, `Storage::s3`...). It only appears when none of the features that provide the name is on, so an error that has another cause gets no hint. The `check` and `test` MCP tools show the same hint, and `add_feature` applies it.
 
 ## Generated layout (`api` template)
 
@@ -202,6 +221,7 @@ A `.js` or `.mjs` output (`zapline client -o static/api.js`) gets the same clien
 |---|---|
 | `docs` | No topic: the cheatsheet and the list of guide pages. With a topic (`"database migrations"`, `"htmx"`, `"errors"`): only the best-matching guide sections, from a copy of the guide built into the binary (no network) |
 | `new_project` | Creates a project from a template |
+| `add_feature` | Turns on zapline features in `Cargo.toml` (like `zapline add`); with no `features`, the list of features and what each one unlocks |
 | `generate_resource`, `generate_migration`, `generate_handler`, `generate_middleware`, `generate_auth`, `generate_job`, `generate_mailer` | The files created and edited |
 | `db_new_migration` | Creates a migration, with its up (`sql`) and down (`down_sql`) SQL if given |
 | `db_migrate` | Applies pending migrations and names them |

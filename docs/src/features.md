@@ -10,6 +10,15 @@ zapline = { version = "0.1", features = ["full"] }          # everything
 zapline = { version = "0.1", default-features = false, features = ["json", "macros"] }   # a minimal build
 ```
 
+Or let the CLI edit `Cargo.toml`:
+
+```sh
+zapline add ws fs          # Added features: ws, fs
+zapline add --list         # every feature, one line each; * marks the ones you have
+```
+
+When code uses something behind a feature that is off, `zapline check` and `zapline test` say which one to add: `` hint: enable the `ws` feature: zapline add ws `` ([details](cli.md#missing-features)).
+
 ## Every feature
 
 The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `validate`, `config` and `tracing`. The `full` feature enables the defaults plus everything else.
@@ -75,7 +84,7 @@ Some modules have no feature flag because they add no dependencies:
 - **A typical JSON API**: the defaults. Add `jwt` and `compression` when you need them.
 - **A web app with server-rendered pages**: `cookies` (sessions, CSRF) and `fs` (assets), plus `multipart` for uploads.
 - **Realtime features**: `ws`. Server-Sent Events need no feature.
-- **A slim microservice**: `default-features = false, features = ["json", "macros"]` and add `config` or `tracing` if you use them. Types and macros behind a missing feature are not compiled, so the compiler tells you when you reach for one.
+- **A slim microservice**: `default-features = false, features = ["json", "macros"]` and add `config` or `tracing` if you use them. Types and macros behind a missing feature are not compiled, so the compiler tells you when you reach for one, and `zapline check` names the feature to add.
 - **Everything while exploring**: `full`. The examples in the repository (`cargo run -p zapline-examples --example openapi`) are built with it.
 
 Features are additive and unify across your dependency tree, so one crate enabling `full` enables it for all. The same applies to the macros: `#[get(..)]` works without `openapi`, it just doesn't document anything.
