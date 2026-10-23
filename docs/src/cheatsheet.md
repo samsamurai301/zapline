@@ -41,8 +41,8 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`, then `put(key, bytes)`, `get`, `delete`, `url(key, ttl)` (local or S3, [File storage](storage.md)) |
-| Dev console | `App::dev_console()`: routes, recent requests, jobs, mail at `/_dev` (debug builds, localhost only) |
+| Dev console | `App::dev_console()`: routes, requests, errors (with `ZL` codes and fixes), jobs, mail at `/_dev` (debug, localhost only) |
 | Metrics | `.plugin(Metrics::new())` serves Prometheus `/metrics` |
 | Tests | `app().test().get("/x").bearer(token).send().await` then `.status()`, `.json::<T>()`, `.text()` |
-| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `mcp` (MCP server for AI assistants) |
+| CLI | `zapline new <app> --template fullstack`, `dev`, `generate resource post title body:text done:bool`, `g auth` (accounts, password reset, GitHub/Google login), `g job <name>` (durable job), `g tailwind` + `css` (Tailwind, no Node), `g deploy fly\|railway\|render\|compose`, `db new/migrate`, `routes --json`, `openapi`, `client -o web/api.ts` (typed TS client), `check`, `test`, `explain ZL0002`, `mcp` (MCP server for AI assistants) |
 | HTML forms | `#[serde(default, deserialize_with = "zapline::extract::empty_as_none")]` for optional inputs, `zapline::extract::checkbox` for checkboxes |

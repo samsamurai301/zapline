@@ -14,10 +14,12 @@ pub mod brief;
 pub mod build;
 pub mod cli;
 pub mod client;
+pub mod codes;
 pub mod db;
 pub mod dev;
 pub mod doctor;
 pub mod generate;
+pub mod live;
 pub mod mcp;
 pub mod naming;
 pub mod new;
@@ -218,6 +220,13 @@ pub fn execute(cli: Cli) -> Result<()> {
             }
         }
         Command::Mcp => mcp::run(),
+        Command::Explain { code } => {
+            match code {
+                Some(code) => print!("{}", codes::explain(&code)?),
+                None => print!("{}", codes::list()),
+            }
+            Ok(())
+        }
         Command::Doctor => doctor::run(),
         Command::Bench(a) => {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());

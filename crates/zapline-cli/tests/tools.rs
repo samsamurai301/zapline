@@ -234,6 +234,11 @@ mod dev {
         );
         let old_pid = pid_from_line(&dev.seen[running]).expect("pid in Running line");
         assert!(process_alive(old_pid));
+        // The app was told where to record its address, for `zapline mcp`.
+        assert_eq!(
+            fs::read_to_string(app.join("target/zapline-dev.addr")).unwrap(),
+            "http://127.0.0.1:1\n"
+        );
 
         // Edit the source: the app is rebuilt and restarted.
         write_fake_main(&app, "v2");

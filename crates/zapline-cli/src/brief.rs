@@ -174,6 +174,7 @@ pub fn check(project: &Project, clippy: bool) -> Result<(bool, String)> {
         )
     });
     out.push('\n');
+    crate::live::save_last_results(&project.root, "check", &out);
     Ok((ok, out))
 }
 
@@ -283,6 +284,7 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
             out.push_str(&d.line());
             out.push('\n');
         }
+        crate::live::save_last_results(&project.root, "test", &out);
         return Ok((false, out));
     }
     let mut cmd = cargo();
@@ -338,6 +340,7 @@ pub fn test(project: &Project, filter: Option<&str>) -> Result<(bool, String)> {
             ));
         }
     }
+    crate::live::save_last_results(&project.root, "test", &out);
     Ok((status.success(), out))
 }
 

@@ -21,6 +21,7 @@ zapline generate job <name>         # durable background job (needs a database)
 zapline generate tailwind           # Tailwind CSS without Node; then `zapline css`
 zapline generate deploy fly         # or railway, render, compose: hosting config
 zapline db seed                     # insert the demo data from App::seed
+zapline explain ZL0002              # what an error code means, and the fix
 ```
 
 Run `zapline test` after every change (it wraps `cargo test` and prints a
@@ -30,6 +31,11 @@ fraction of the output). A change is done when `cargo fmt`,
 With an MCP-capable assistant, `zapline mcp` serves all of this as tools
 (plus `docs`, which answers with just the guide section you need):
 `claude mcp add zapline -- zapline mcp`.
+
+Debugging: framework mistakes carry a stable code such as `ZL0002` with the
+exact fix (in startup errors, on the dev error page, in `zapline explain`).
+While `zapline dev` runs, the MCP tools `recent_errors`, `recent_requests` and
+`call_route` read and call the running app; prefer them to asking for logs.
 
 ## Conventions (one way to do each thing)
 

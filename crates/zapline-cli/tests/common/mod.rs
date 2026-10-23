@@ -92,6 +92,10 @@ pub fn write_fake_main(root: &Path, version: &str) {
         std::fs::write(path, spec).unwrap();
         return;
     }
+    // Like a debug build of a zapline app run by `zapline dev`.
+    if let Some(file) = std::env::var_os("ZAPLINE_DEV_ADDR_FILE") {
+        std::fs::write(file, "http://127.0.0.1:1\n").unwrap();
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     println!("fake-app __VERSION__ running args={args:?}");
     std::thread::sleep(std::time::Duration::from_secs(120));

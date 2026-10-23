@@ -573,3 +573,22 @@ fn generate_job_registers_it_in_the_app() {
     let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
     assert!(log.contains("no migrations/ directory"), "{log}");
 }
+
+#[test]
+fn explain_prints_a_code_and_lists_them_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let out = run_in(tmp.path(), &["explain", "zl2"]);
+    expect_success(&out);
+    let text = stdout(&out);
+    assert!(
+        text.starts_with("ZL0002: No provider for a dependency\n"),
+        "{text}"
+    );
+    assert!(text.contains("\nFix:\n    .provide(value)"), "{text}");
+
+    let list = stdout(&run_in(tmp.path(), &["explain"]));
+    assert!(list.contains("ZL0010  Duplicate route\n"), "{list}");
+
+    let err = expect_failure(&run_in(tmp.path(), &["explain", "ZL9999"]));
+    assert!(err.contains("unknown code `ZL9999`"), "{err}");
+}

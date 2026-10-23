@@ -40,3 +40,6 @@ signal-hook = { version = "0.4", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
+# tests/mcp_live.rs runs a real app for the live MCP tools (path-only: not published).
+zapline = { path = "../zapline" }
+tokio = { version = "1", features = ["rt", "net", "macros"] }

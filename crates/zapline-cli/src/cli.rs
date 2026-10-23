@@ -30,6 +30,7 @@ Examples:
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
   zapline db new create_posts              Add a SQL migration
   zapline db migrate                       Apply pending migrations
+  zapline explain ZL0002                   What an error code means and the code that fixes it
   zapline doctor                           Check your toolchain
   zapline bench http://localhost:8080/     Load test with wrk
 
@@ -175,11 +176,27 @@ Examples:
         watch: bool,
     },
 
+    /// Explain a diagnostic code (ZL0002): its cause and the code that fixes it
+    #[command(after_long_help = "\
+zapline's startup errors, panics on invalid setup, dev error pages and dev console name
+the mistake with a stable code such as ZL0002. Without a code, lists them all.
+
+Examples:
+  zapline explain ZL0002
+  zapline explain 10
+  zapline explain")]
+    Explain {
+        /// The code, e.g. ZL0002 (or just 2)
+        code: Option<String>,
+    },
+
     /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
     #[command(after_long_help = "\
 Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
 new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
-db_migrate, check, test, routes, openapi. Start it from the project directory.
+db_migrate, check, test, routes, openapi, explain_error; and, against the running dev app,
+recent_requests, recent_errors, call_route and last_results. Start it from the project
+directory.
 
 Setup:
   Claude Code   claude mcp add zapline -- zapline mcp
