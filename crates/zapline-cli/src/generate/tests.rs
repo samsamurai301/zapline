@@ -625,3 +625,88 @@ fn generated_files_are_formatted_for_long_names_too() {
         assert_rustfmt_clean(rel, &read(&root, rel));
     }
 }
+
+// ---- mailer ---------------------------------------------------------------------------------
+
+#[test]
+fn mailer_writes_the_email_its_templates_and_a_test() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Fullstack);
+    let project = Project::discover(&root).unwrap();
+    let report = mailer::generate(&project, "order-shipped", false).unwrap();
+    assert_eq!(
+        names(&report.created),
+        [
+            "src/mail/order_shipped.rs",
+            "templates/mail/order_shipped.html",
+            "templates/mail/order_shipped.txt",
+            "tests/order_shipped_email.rs",
+            "src/mail/mod.rs"
+        ]
+    );
+    assert_eq!(names(&report.modified), ["src/lib.rs", "Cargo.toml"]);
+    let lib = read(&root, "src/lib.rs");
+    assert!(lib.contains("pub mod mail;\npub mod routes;\n"), "{lib}");
+    let manifest = read(&root, "Cargo.toml");
+    assert!(
+        manifest.contains("\"mail\", \"sqlite\", \"views\""),
+        "{manifest}"
+    );
+    // The fullstack app registers views but no mailer: the note says how.
+    let notes = report.notes.join("\n");
+    assert!(
+        notes.contains(".mailer(Mailer::from_env().expect("),
+        "{notes}"
+    );
+    assert!(!notes.contains(".views(\"templates\")"), "{notes}");
+
+    // A second email joins the module; regenerating needs --force and
+    // never declares anything twice.
+    let report = mailer::generate(&project, "welcome", false).unwrap();
+    assert_eq!(names(&report.modified), ["src/mail/mod.rs"]);
+    let mod_rs = read(&root, "src/mail/mod.rs");
+    assert!(
+        mod_rs.contains("pub mod order_shipped;\npub mod welcome;\n"),
+        "{mod_rs}"
+    );
+    assert!(mailer::generate(&project, "welcome", false).is_err());
+    mailer::generate(&project, "welcome", true).unwrap();
+    assert_eq!(
+        read(&root, "src/mail/mod.rs")
+            .matches("pub mod welcome;")
+            .count(),
+        1
+    );
+    assert_eq!(
+        read(&root, "src/lib.rs").matches("pub mod mail;").count(),
+        1
+    );
+    assert!(mailer::generate(&project, "fn", false).is_err());
+
+    if rustfmt_available() {
+        for rel in [
+            "src/mail/mod.rs",
+            "src/mail/order_shipped.rs",
+            "tests/order_shipped_email.rs",
+            "src/lib.rs",
+        ] {
+            assert_rustfmt_clean(rel, &read(&root, rel));
+        }
+    }
+}
+
+#[test]
+fn mailer_in_an_api_project_adds_both_features_and_notes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = scaffold(tmp.path(), Template::Api);
+    let project = Project::discover(&root).unwrap();
+    let report = mailer::generate(&project, "welcome", false).unwrap();
+    let manifest = read(&root, "Cargo.toml");
+    assert!(
+        manifest.contains("zapline = { version = \"0.1\", features = [\"mail\", \"views\"] }"),
+        "{manifest}"
+    );
+    let notes = report.notes.join("\n");
+    assert!(notes.contains(".views(\"templates\")"), "{notes}");
+    assert!(read(&root, "src/lib.rs").contains("pub mod mail;"));
+}

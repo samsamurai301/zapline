@@ -185,6 +185,16 @@ pub const JOB: &str = include_str!("../templates/generate/job.rs.tmpl");
 pub const JOB_TEST: &str = include_str!("../templates/generate/job_test.rs.tmpl");
 /// `src/jobs/mod.rs` for the first generated job.
 pub const JOBS_MOD: &str = include_str!("../templates/generate/jobs_mod.rs.tmpl");
+/// An email built from templates (`zapline generate mailer`).
+pub const MAILER: &str = include_str!("../templates/generate/mailer.rs.tmpl");
+/// The HTML template of a generated email.
+pub const MAILER_HTML: &str = include_str!("../templates/generate/mailer.html.tmpl");
+/// The plain-text template of a generated email.
+pub const MAILER_TEXT: &str = include_str!("../templates/generate/mailer.txt.tmpl");
+/// The test for a generated email.
+pub const MAILER_TEST: &str = include_str!("../templates/generate/mailer_test.rs.tmpl");
+/// `src/mail/mod.rs` for the first generated email.
+pub const MAIL_MOD: &str = include_str!("../templates/generate/mail_mod.rs.tmpl");
 /// Source of a generated middleware module.
 pub const MIDDLEWARE: &str = include_str!("../templates/generate/middleware.rs.tmpl");
 /// Integration test for a generated middleware.

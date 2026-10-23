@@ -84,36 +84,7 @@ pub fn files(
 /// debug builds (unoptimized, one hash takes most of a second). Returns the
 /// new manifest, or `None` if it already had everything.
 pub fn patch_manifest(manifest: &str) -> Option<String> {
-    let mut out = manifest.to_string();
-    // The `zapline = { ... features = [..] }` line.
-    let line_start = out
-        .lines()
-        .find(|l| l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline="))
-        .map(str::to_string);
-    if let Some(line) = line_start {
-        let missing: Vec<String> = ["cookies", "mail", "oauth", "password"]
-            .iter()
-            .filter(|f| !line.contains(&format!("\"{f}\"")))
-            .map(|f| format!("\"{f}\""))
-            .collect();
-        let mut new_line = line.clone();
-        let added = missing.join(", ");
-        if missing.is_empty() {
-            // Nothing to add.
-        } else if let Some(pos) = new_line.find("features = [") {
-            let at = pos + "features = [".len();
-            let sep = if new_line[at..].trim_start().starts_with(']') {
-                ""
-            } else {
-                ", "
-            };
-            new_line.insert_str(at, &format!("{added}{sep}"));
-        } else if let Some(pos) = new_line.rfind('}') {
-            let before = new_line[..pos].trim_end().len();
-            new_line.replace_range(before..pos, &format!(", features = [{added}] "));
-        }
-        out = out.replacen(&line, &new_line, 1);
-    }
+    let mut out = super::add_zapline_features(manifest, &["cookies", "mail", "oauth", "password"]);
     if !out.contains("[profile.dev.package.argon2]") {
         if !out.ends_with('\n') {
             out.push('\n');

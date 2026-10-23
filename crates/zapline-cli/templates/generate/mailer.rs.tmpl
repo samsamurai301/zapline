@@ -1,0 +1,18 @@
+//! The `@@name@@` email, rendered from `templates/mail/@@name@@.html` and
+//! `templates/mail/@@name@@.txt` (the subject is the HTML's `{% block subject %}`).
+//!
+//! Send it from a handler that takes `views: Views, mail: Mailer`:
+//! `mail.send(@@name@@(&views, &user.email)?).await?`, or enqueue it with
+//! `jobs.enqueue(@@name@@(&views, &user.email)?).await?` to send it in the
+//! background with retries. While developing it shows up at /_dev/mail.
+
+use zapline::mail::Email;
+use zapline::prelude::*;
+use zapline::view::{context, Views};
+
+/// The `@@name@@` email to `to`.
+pub fn @@name@@(views: &Views, to: &str) -> Result<Email> {
+    // Everything the templates use: add names, links, ...
+    let ctx = context! { to };
+    Email::to(to).template(views, "mail/@@name@@", ctx)
+}

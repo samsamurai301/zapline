@@ -8,6 +8,7 @@ pub mod auth;
 pub mod db_resource;
 pub mod deploy;
 pub mod job;
+pub mod mailer;
 pub mod register;
 
 use std::fs;
@@ -419,6 +420,50 @@ fn existing_migration(project: &Project, suffix: &str) -> Option<String> {
         .filter_map(|e| e.ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .find(|n| n.ends_with(suffix))
+}
+
+/// The manifest with `features` added to the `zapline = { .. }` dependency
+/// line (those it lacks, in front). Unchanged if there is no such line or
+/// nothing is missing.
+pub fn add_zapline_features(manifest: &str, features: &[&str]) -> String {
+    let Some(line) = manifest
+        .lines()
+        .find(|l| l.trim_start().starts_with("zapline ") || l.trim_start().starts_with("zapline="))
+    else {
+        return manifest.to_string();
+    };
+    let missing: Vec<String> = features
+        .iter()
+        .filter(|f| !line.contains(&format!("\"{f}\"")))
+        .map(|f| format!("\"{f}\""))
+        .collect();
+    if missing.is_empty() {
+        return manifest.to_string();
+    }
+    let mut new_line = line.to_string();
+    let added = missing.join(", ");
+    if let Some(pos) = new_line.find("features = [") {
+        let at = pos + "features = [".len();
+        let sep = if new_line[at..].trim_start().starts_with(']') {
+            ""
+        } else {
+            ", "
+        };
+        new_line.insert_str(at, &format!("{added}{sep}"));
+    } else if let Some(pos) = new_line.rfind('}') {
+        let before = new_line[..pos].trim_end().len();
+        new_line.replace_range(before..pos, &format!(", features = [{added}] "));
+    } else if let Some((name, version)) = new_line.split_once('=') {
+        // `zapline = "0.1"`: the table form, to have somewhere to put them.
+        let version = version.trim();
+        if version.starts_with('"') {
+            new_line = format!(
+                "{} = {{ version = {version}, features = [{added}] }}",
+                name.trim_end()
+            );
+        }
+    }
+    manifest.replacen(line, &new_line, 1)
 }
 
 fn crate_name_of(project: &Project) -> String {
