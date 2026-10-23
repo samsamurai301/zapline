@@ -491,6 +491,8 @@ fn sections<'a>(page: &Page<'a>) -> Vec<Section<'a>> {
 
 /// Most text returned for one query.
 const DOCS_BUDGET: usize = 9_000;
+/// Most text for the "Also relevant" pointers after it.
+const ALSO_BUDGET: usize = 200;
 
 fn page_list(pages: &[Page<'_>]) -> String {
     let names: Vec<String> = pages
@@ -586,8 +588,22 @@ pub fn docs(topic: Option<&str>) -> String {
             more.push(format!("{} › {}", s.title, s.heading));
         }
     }
-    if !more.is_empty() {
-        out.push_str(&format!("Also relevant: {}\n", more.join("; ")));
+    // Pointers to the sections that didn't fit, as many as fit in their own
+    // small budget, so the answer never grows past both.
+    let mut also = String::from("Also relevant: ");
+    let mut listed = 0;
+    for name in &more {
+        let sep = if listed == 0 { "" } else { "; " };
+        if also.len() + sep.len() + name.len() + 1 > ALSO_BUDGET {
+            break;
+        }
+        also.push_str(sep);
+        also.push_str(name);
+        listed += 1;
+    }
+    if listed > 0 {
+        also.push('\n');
+        out.push_str(&also);
     }
     out
 }
@@ -655,7 +671,7 @@ mod tests {
         assert!(docs(Some("errors")).contains("not_found"));
         let db = docs(Some("database migrations"));
         assert!(db.to_lowercase().contains("migrat"), "{db}");
-        assert!(db.len() <= DOCS_BUDGET + 200);
+        assert!(db.len() <= DOCS_BUDGET + ALSO_BUDGET);
         let htmx = docs(Some("htmx partial"));
         assert!(htmx.contains("HxRequest"), "{htmx}");
         assert!(docs(Some("qwertyuiop")).starts_with("No section"));
