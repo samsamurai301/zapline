@@ -467,6 +467,53 @@ where
     deserializer.deserialize_any(form_helpers::Checkbox)
 }
 
+/// Serde helper for a JSON field that an HTML form can fill too: a string
+/// holding a JSON object or array (what a `<textarea>` sends) is parsed, an
+/// empty string is `null`, and anything else is kept as it is. So a JSON body
+/// may send `{"meta": {"a": 1}}` and a form `meta={"a": 1}` for the same
+/// field. Works for `serde_json::Value`, for `Option<Value>` (empty is `None`;
+/// pair it with `#[serde(default)]`) and for any type JSON deserializes into.
+///
+/// ```
+/// # use serde::Deserialize;
+/// #[derive(Deserialize)]
+/// struct Settings {
+///     #[serde(deserialize_with = "zapline::extract::json_text")]
+///     meta: serde_json::Value,
+/// }
+///
+/// let from_form: Settings = serde_urlencoded::from_str("meta=%7B%22a%22%3A1%7D").unwrap();
+/// assert_eq!(from_form.meta["a"], 1);
+/// let from_json: Settings = serde_json::from_str(r#"{"meta": {"a": 1}}"#).unwrap();
+/// assert_eq!(from_json.meta, from_form.meta);
+/// assert!(serde_urlencoded::from_str::<Settings>("meta=%7Bnope").is_err());
+/// ```
+#[cfg(all(feature = "form", feature = "json"))]
+pub fn json_text<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    use serde::de::Error as _;
+    use serde::Deserialize as _;
+    use serde_json::Value;
+    let value = match Value::deserialize(deserializer)? {
+        Value::String(text) => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                Value::Null
+            } else if trimmed.starts_with(['{', '[']) {
+                serde_json::from_str(trimmed)
+                    .map_err(|e| D::Error::custom(format!("is not valid JSON: {e}")))?
+            } else {
+                Value::String(text)
+            }
+        }
+        other => other,
+    };
+    serde_json::from_value(value).map_err(D::Error::custom)
+}
+
 /// Serde helper for `<input type="datetime-local">`: accepts what browsers
 /// send (`2026-01-31T09:30`, read as UTC) as well as RFC 3339
 /// (`2026-01-31T09:30:00Z`, `2026-01-31T10:30:00+01:00`), so one struct can

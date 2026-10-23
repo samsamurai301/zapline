@@ -149,7 +149,7 @@ fn tool_list() -> Value {
             "description": "Generate a CRUD resource: routes, tests and registration. In a project with migrations/ it is SQL-backed: migration with created_at/updated_at, JSON API with PATCH, and index/show/edit htmx pages if templates/base.html exists.",
             "inputSchema": { "type": "object", "required": ["name"], "properties": {
                 "name": { "type": "string", "description": "Singular, e.g. product" },
-                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type with type string|text|int|float|bool|date|datetime|uuid|references, `?` suffix for optional, e.g. [\"name\", \"price:float\", \"notes:text?\", \"author:references\"]. `author:references` adds author_id (foreign key to authors), a filter and GET /api/authors/{id}/<plural>." },
+                "fields": { "type": "array", "items": { "type": "string" }, "description": "name:type with type string|text|int|float|bool|date|datetime|uuid|json|references, `?` suffix for optional, `:unique` or `:index` after the type, e.g. [\"name\", \"price:float\", \"notes:text?\", \"email:string:unique\", \"author:references\"]. `author:references` adds author_id (foreign key to authors, which must be generated first), a filter and GET /api/authors/{id}/<plural>; `author:ref:users` points at users." },
                 "plural": { "type": "string" },
                 "memory": { "type": "boolean", "description": "In-memory store even if the project has a database" },
                 "force": { "type": "boolean", "description": "Overwrite existing files" }

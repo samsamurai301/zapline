@@ -198,9 +198,11 @@ fn generated_resources_handlers_and_middleware_compile_and_pass() {
     }
 }
 
-/// The database-backed generator on SQLite: dates, references (foreign key,
-/// nested list, `<select>`), timestamps, PATCH, show/edit pages, plus a
-/// `generate migration` that adds a column. The generated tests must pass.
+/// The database-backed generator on SQLite: dates, JSON, references (foreign
+/// key, nested list, `<select>`, a 422 for a missing parent; to another table
+/// name, to the own table, twice to one table), `:unique` (a named 409) and
+/// `:index`, timestamps, PATCH, show/edit pages, plus a `generate migration`
+/// that adds a column. The generated tests must pass.
 #[test]
 #[ignore = "slow: compiles zapline with sqlite, views and chrono"]
 fn sql_resources_with_references_compile_and_pass() {
@@ -221,6 +223,43 @@ fn sql_resources_with_references_compile_and_pass() {
     ));
     assert!(log.contains("Created templates/posts/edit.html"), "{log}");
     assert!(!log.contains("no migration creates"), "{log}");
+    expect_success(&run_in(
+        &project,
+        &[
+            "g",
+            "resource",
+            "product",
+            "name",
+            "sku:string:unique",
+            "specs:json?",
+        ],
+    ));
+    let log = expect_success(&run_in(
+        &project,
+        &[
+            "g",
+            "resource",
+            "review",
+            "body:text",
+            "product:references",
+            "rating:int:index",
+            "details:json",
+            "reply_to:ref:reviews?",
+            "writer:ref:authors",
+            "checker:ref:authors?",
+        ],
+    ));
+    assert!(log.contains("refer to the same table, `authors`"), "{log}");
+    let sql = fs::read_dir(project.join("migrations"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with("_create_reviews.up.sql"))
+        .map(|p| fs::read_to_string(p).unwrap())
+        .unwrap();
+    assert!(
+        sql.contains("CREATE INDEX reviews_rating_idx ON reviews (rating);"),
+        "{sql}"
+    );
     let log = expect_success(&run_in(
         &project,
         &[
@@ -272,6 +311,11 @@ fn sql_resources_with_references_compile_and_pass() {
         "show_and_edit_pages",
         "rejected_forms_come_back_with_errors",
         "listed_under_their_author",
+        "duplicate_sku_is_409",
+        "missing_product_is_422",
+        "missing_writer_is_422",
+        "listed_under_their_product",
+        "listed_under_their_reply_to",
     ] {
         assert!(
             tests.contains(&format!("test {name} ... ok")),
@@ -280,6 +324,7 @@ fn sql_resources_with_references_compile_and_pass() {
     }
     assert!(tests.contains("tests/posts.rs"), "{tests}");
     assert!(tests.contains("tests/authors.rs"), "{tests}");
+    assert!(tests.contains("tests/reviews.rs"), "{tests}");
 }
 
 /// `zapline routes` and `zapline openapi` against a real app built on zapline

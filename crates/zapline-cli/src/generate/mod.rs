@@ -383,20 +383,7 @@ fn sql_resource(
     let mut fields = db_resource::parse_fields(fields)?;
     let html = project.root.join("templates/base.html").is_file();
     let mut report = Report::default();
-    for field in &mut fields {
-        let Some(parent) = field.parent.as_mut() else {
-            continue;
-        };
-        if parent.names.plural == names.plural {
-            bail!(
-                "`{}` would make {} refer to itself, which the generator does not support; \
-                 add the column with `zapline g migration` and write the query yourself",
-                field.name,
-                names.plural
-            );
-        }
-        resolve_parent(project, parent, &mut report);
-    }
+    resolve_parents(project, &names, &mut fields, true, &mut report)?;
     let settings = ResourceSettings::of(project);
     let plan = settings.plan(
         &names,
@@ -406,6 +393,21 @@ fn sql_resource(
     );
     let testable = plan.test_crate.is_some();
     let files = db_resource::files(&plan);
+    for (table, columns) in db_resource::ambiguous_references(&fields) {
+        report.notes.push(format!(
+            "{} refer to the same table, `{table}`, so there is no nested `{}/{{id}}{}` route (it would be \
+             ambiguous); filter the list instead, e.g. `{}?{}=1`",
+            columns
+                .iter()
+                .map(|c| format!("`{c}`"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            plan_api_prefix(html, &table),
+            names.path,
+            plan_api_prefix(html, &names.plural),
+            columns[0]
+        ));
+    }
 
     let edit = plan_route_registration(project, &names.plural)?;
     if apply(project, files, edit, force, &mut report)? {
@@ -529,6 +531,68 @@ fn creating_migration(project: &Project, table: &str) -> Option<(String, String)
     })
 }
 
+/// `/api/posts` (or `/posts` without pages) for table `posts`.
+fn plan_api_prefix(html: bool, table: &str) -> String {
+    format!(
+        "{}/{}",
+        if html { "/api" } else { "" },
+        crate::naming::kebab_case(table)
+    )
+}
+
+/// Fills in each `references` field of resource `names`. A reference to
+/// the resource's own table must be optional (the first row has nothing to
+/// point at) and takes its label from `fields`. With `strict`, a parent
+/// table that no migration creates is an error (the foreign key would fail
+/// when the migration runs); otherwise it is a note.
+pub(crate) fn resolve_parents(
+    project: &Project,
+    names: &ResourceNames,
+    fields: &mut [db_resource::Field],
+    strict: bool,
+    report: &mut Report,
+) -> Result<()> {
+    let own_label = db_resource::label_field(fields);
+    let html = project.root.join("templates/base.html").is_file();
+    for field in fields.iter_mut() {
+        let spec = field.spec();
+        let optional = field.optional;
+        let Some(parent) = field.parent.as_mut() else {
+            continue;
+        };
+        if parent.names.plural == names.plural {
+            if strict && !optional {
+                bail!(
+                    "`{spec}` refers to {} itself, so it must be optional: the first row has \
+                     nothing to point at\nhint: `{spec}?`",
+                    names.plural
+                );
+            }
+            parent.label = own_label.clone();
+            parent.page = html;
+            continue;
+        }
+        if strict && creating_migration(project, &parent.names.plural).is_none() {
+            let own = if parent.role == "parent" {
+                format!(
+                    "\nfor a reference to this resource's own table, name it: `parent:ref:{}?`",
+                    names.plural
+                )
+            } else {
+                String::new()
+            };
+            bail!(
+                "`{spec}` refers to the `{table}` table, but no migration creates it \
+                 (the foreign key would fail)\nhint: run `zapline g resource {}` first{own}",
+                parent.names.singular,
+                table = parent.names.plural,
+            );
+        }
+        resolve_parent(project, parent, report);
+    }
+    Ok(())
+}
+
 /// Fills in what the project knows about a `references` field's table: the
 /// column to show in `<select>`s and whether it has pages to link to.
 fn resolve_parent(project: &Project, parent: &mut db_resource::Parent, report: &mut Report) {
@@ -538,7 +602,7 @@ fn resolve_parent(project: &Project, parent: &mut db_resource::Parent, report: &
         None => report.notes.push(format!(
             "no migration creates the `{table}` table this resource refers to; generate it first, e.g.\n\
              \x20 zapline g resource {} name\n\
-             then regenerate this resource with --force so its migration runs after the new one \
+             and make sure its migration runs before this one \
              (Postgres refuses a foreign key to a table that doesn't exist yet)",
             parent.names.singular
         )),
@@ -614,7 +678,7 @@ fn add_columns_sql(
     for f in fields {
         let mut column = f.column_sql(dialect);
         let given = defaults.iter().find(|(name, _)| *name == f.name);
-        let default = match (given, f.optional, f.ty) {
+        let mut default = match (given, f.optional, f.ty) {
             (Some((_, literal)), _, FieldType::Bool) => {
                 column = column.replace(" DEFAULT FALSE", "");
                 format!(" DEFAULT {literal}")
@@ -633,18 +697,22 @@ fn add_columns_sql(
                  hint: give them one (`{}:{}=<value>`), or add it as optional (`{}:{}?`), fill it in, \
                  then make it required in a later migration",
                 f.name,
-                f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
+                f.role(),
                 f.ty.name(),
-                f.parent.as_ref().map_or(f.name.as_str(), |p| p.names.singular.as_str()),
+                f.role(),
                 f.ty.name()
             ),
         };
+        // Coming back empty, a unique column must allow NULLs (which never
+        // clash) rather than give every row the same default.
+        if lenient && f.unique {
+            column = column.replace(" NOT NULL", "");
+            default = String::new();
+        }
         sql.push_str(&format!(
             "ALTER TABLE {table} ADD COLUMN {column}{default};\n"
         ));
-        if f.parent.is_some() {
-            sql.push_str(&db_resource::index_sql(table, &f.name));
-        }
+        sql.push_str(&f.index_sql(table));
     }
     Ok(sql)
 }
@@ -688,13 +756,11 @@ fn split_default(spec: &str, dialect: db_resource::Dialect) -> Result<(String, O
 }
 
 /// `ALTER TABLE <table> DROP COLUMN` for each field, last first (and the
-/// index of a `references` column before the column).
+/// column's index before the column).
 fn drop_columns_sql(table: &str, fields: &[db_resource::Field]) -> String {
     let mut sql = String::new();
     for f in fields.iter().rev() {
-        if f.parent.is_some() {
-            sql.push_str(&format!("DROP INDEX {table}_{}_idx;\n", f.name));
-        }
+        sql.push_str(&f.drop_index_sql(table, false));
         sql.push_str(&format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name));
     }
     sql
@@ -714,12 +780,10 @@ fn migration_sql(
             drop_columns_sql(table, fields),
         ),
         MigrationKind::RemoveColumns { table, .. } => {
-            // Drop the index along with a removed `references` column.
+            // Drop the column's index along with it.
             let mut up = String::new();
             for f in fields {
-                if f.parent.is_some() {
-                    up.push_str(&format!("DROP INDEX IF EXISTS {table}_{}_idx;\n", f.name));
-                }
+                up.push_str(&f.drop_index_sql(table, true));
                 up.push_str(&format!("ALTER TABLE {table} DROP COLUMN {};\n", f.name));
             }
             (

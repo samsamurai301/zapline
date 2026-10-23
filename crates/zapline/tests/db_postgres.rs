@@ -81,7 +81,7 @@ mod day_two {
     use zapline::prelude::*;
 
     /// A new empty database on the test server, dropped by `drop_database`.
-    async fn create_database(base: &str) -> (PgPool, String, String) {
+    pub(super) async fn create_database(base: &str) -> (PgPool, String, String) {
         let admin = PgPool::connect(base).await.unwrap();
         let name = format!("zl_migrate_{}", super::unique("db").replace('-', "_"));
         sqlx::query(&format!("CREATE DATABASE {name}"))
@@ -92,7 +92,7 @@ mod day_two {
         (admin, name.clone(), format!("{prefix}/{name}"))
     }
 
-    async fn drop_database(admin: &PgPool, name: &str) {
+    pub(super) async fn drop_database(admin: &PgPool, name: &str) {
         sqlx::query(&format!("DROP DATABASE IF EXISTS {name} WITH (FORCE)"))
             .execute(admin)
             .await
@@ -263,5 +263,111 @@ mod day_two {
 
         pool.close().await;
         drop_database(&admin, &name).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// What `zapline g resource` generates for Postgres: JSONB columns bound as
+// `JsonValue`, a unique index whose name `write_error` matches, foreign-key
+// violations it turns into `<parent>_not_found`, and a reference to the
+// table itself.
+
+mod generated_resource {
+    use serde_json::json;
+    use zapline::db::sqlx::types::JsonValue;
+    use zapline::db::sqlx::{self, PgPool};
+
+    fn database_error(err: sqlx::Error) -> Box<dyn sqlx::error::DatabaseError> {
+        match err {
+            sqlx::Error::Database(e) => e,
+            other => panic!("not a database error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn jsonb_unique_index_and_foreign_keys_behave_as_generated_code_expects() {
+        let Some(base) = super::url() else {
+            return;
+        };
+        let (admin, name, url) = super::day_two::create_database(&base).await;
+        let pool = PgPool::connect(&url).await.unwrap();
+        // The SQL `zapline g resource product name` and `zapline g resource
+        // review slug:string:unique product:references details:json
+        // rating:int:index reply_to:ref:reviews?` write.
+        for sql in [
+            "CREATE TABLE products (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL)",
+            "CREATE TABLE reviews (
+                id BIGSERIAL PRIMARY KEY,
+                slug TEXT NOT NULL,
+                product_id BIGINT NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+                details JSONB NOT NULL,
+                rating BIGINT NOT NULL,
+                reply_to_id BIGINT REFERENCES reviews(id) ON DELETE SET NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )",
+            "CREATE UNIQUE INDEX reviews_slug_key ON reviews (slug)",
+            "CREATE INDEX reviews_product_id_idx ON reviews (product_id)",
+            "CREATE INDEX reviews_rating_idx ON reviews (rating)",
+            "CREATE INDEX reviews_reply_to_id_idx ON reviews (reply_to_id)",
+            "INSERT INTO products (name) VALUES ('p')",
+        ] {
+            sqlx::query(sql).execute(&pool).await.unwrap();
+        }
+        let insert = |slug: &'static str, product: i64, reply_to: Option<i64>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (i64, JsonValue)>(
+                    "INSERT INTO reviews (slug, product_id, details, rating, reply_to_id) \
+                     VALUES ($1, $2, $3, $4, $5) RETURNING id, details",
+                )
+                .bind(slug)
+                .bind(product)
+                .bind(json!({"tags": ["a", "b"], "n": 1}))
+                .bind(5_i64)
+                .bind(reply_to)
+                .fetch_one(&pool)
+                .await
+            }
+        };
+        let (first, details) = insert("a", 1, None).await.unwrap();
+        assert_eq!(details, json!({"tags": ["a", "b"], "n": 1}));
+        insert("b", 1, Some(first)).await.unwrap();
+
+        // PATCH: `COALESCE($1, details)` keeps the value for `None`.
+        let patch = |details: Option<JsonValue>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, JsonValue>(
+                    "UPDATE reviews SET details = COALESCE($1, details), \
+                     updated_at = CURRENT_TIMESTAMP WHERE id = $2 RETURNING details",
+                )
+                .bind(&details)
+                .bind(first)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        assert_eq!(patch(None).await, json!({"tags": ["a", "b"], "n": 1}));
+        assert_eq!(patch(Some(json!({"n": 2}))).await, json!({"n": 2}));
+
+        let e = database_error(insert("a", 1, None).await.unwrap_err());
+        assert!(e.is_unique_violation());
+        assert_eq!(e.constraint(), Some("reviews_slug_key"));
+        let e = database_error(insert("c", 999_999, None).await.unwrap_err());
+        assert!(e.is_foreign_key_violation());
+        let e = database_error(insert("d", 1, Some(999_999)).await.unwrap_err());
+        assert!(e.is_foreign_key_violation());
+        // What `missing` asks to tell which parent it was.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM products WHERE id = $1")
+            .bind(999_999_i64)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        pool.close().await;
+        super::day_two::drop_database(&admin, &name).await;
     }
 }

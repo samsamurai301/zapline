@@ -417,10 +417,13 @@ In a project with a migrations/ directory (the fullstack template), the resource
 database-backed: a SQL migration (with created_at/updated_at), sqlx queries, a JSON API
 (list, get, create, PUT, PATCH, delete), htmx pages when templates/base.html exists
 (index, show, edit) and tests. Field types: string, text, int, float, bool, date,
-datetime, uuid and references; append `?` for optional.
+datetime, uuid, json and references; append `?` for optional, and `:unique` (409
+`<field>_taken` on a duplicate) or `:index` after the type.
 
 `author:references` adds `author_id`, a foreign key to `authors(id)` with an index, a
-`?author_id=` filter, `GET /api/authors/{id}/posts`, and a <select> of authors in forms.
+`?author_id=` filter, `GET /api/authors/{id}/posts`, and a <select> of authors in forms;
+a missing author is a 422 `author_not_found`. `author:ref:users` points at `users`
+instead. Generate the parent first.
 
 Examples:
   zapline generate resource post
@@ -429,6 +432,9 @@ Examples:
   zapline g resource event title starts_at:datetime day:date token:uuid
   zapline g resource author name
   zapline g resource post title body:text published_on:date author:references
+  zapline g resource user email:string:unique name prefs:json?
+  zapline g resource review body:text product:references rating:int:index
+  zapline g resource category name parent:ref:categories?
   zapline g resource blog-post
   zapline g resource person --plural people")]
     Resource {
@@ -436,7 +442,8 @@ Examples:
         name: String,
         /// Columns for a database-backed resource: `title`, `body:text`, `views:int`,
         /// `price:float`, `done:bool`, `due:date`, `at:datetime`, `key:uuid`,
-        /// `author:references`; add `?` for optional (`bio:text?`)
+        /// `meta:json`, `author:references`, `author:ref:users`; add `?` for optional
+        /// (`bio:text?`), `:unique` or `:index` after the type (`email:string:unique`)
         #[arg(value_name = "FIELD:TYPE")]
         fields: Vec<String>,
         /// Plural form, for irregular nouns the built-in rules get wrong
