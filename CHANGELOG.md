@@ -2,6 +2,14 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Reliability
+- `ServerConfig::body_read_timeout` (default 30s): a buffered request body (`Json`, `Form`, `String`, `Bytes`, ...) that takes longer to arrive gets `408` (`ZL0068`) and the connection is closed, so clients that send bodies slowly can't hold connections and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are not limited.
+- `ServerConfig::pipeline_flush` now defaults to `false`: malformed or oversized request heads get their `400`/`414`/`431` again instead of a closed connection, and pipelined responses are never lost (the hyper 1.12 bug only bites with it on). The TechEmpower app and the benchmark servers turn it on explicitly.
+- WebSockets start with an 8 KiB read buffer (`ws::DEFAULT_READ_BUFFER_SIZE`) instead of tungstenite's 128 KiB, which grows for larger messages: 2,000 idle sockets went from 258 MiB to 23 MiB.
+- `bench/chaos`: hostile-traffic, chaos and soak scenarios against a real server (slowloris, slow bodies, never-read responses, malformed and smuggling-style requests, oversized inputs, abrupt disconnects, file descriptor exhaustion, HTTP/2 rapid reset and floods, WebSocket abuse, mixed-load soak). `fuzz/`: coverage-guided fuzzing of request handling through every extractor and the common middleware. `deny.toml`: cargo-deny supply-chain policy.
+
 ## [0.1.0] - Unreleased
 
 The first public release.

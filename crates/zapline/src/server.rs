@@ -140,6 +140,21 @@ pub struct ServerConfig {
     /// HTTP/2 connections that send no request for this long. `None`
     /// disables it. Default: 30s.
     pub header_read_timeout: Option<Duration>,
+    /// Answer `408` and close the connection when a buffered request body
+    /// (`Json`, `Form`, `Bytes`, `String`, ...) takes longer than this to
+    /// arrive, so clients that send bodies slowly cannot hold connections
+    /// and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are
+    /// not limited: they set their own pace. `None` disables it. Default:
+    /// 30s.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use zapline::prelude::*;
+    ///
+    /// let mut app = App::new();
+    /// app.server_config_mut().body_read_timeout = Some(Duration::from_secs(10));
+    /// ```
+    pub body_read_timeout: Option<Duration>,
     /// TCP listen backlog. Default: 4096.
     pub backlog: i32,
     /// Print one startup line (address, workers, runtime, protocols) and a
@@ -149,12 +164,12 @@ pub struct ServerConfig {
     /// HTTP/1.1 keep-alive. Default: `true`.
     pub keep_alive: bool,
     /// Batch responses to pipelined HTTP/1.1 requests into fewer writes, a
-    /// large win for pipelining clients. Trade-off (a hyper 1.12 bug): a
-    /// malformed or oversized request head then closes the connection
-    /// without the automatic `400`/`414`/`431` response, and responses to
-    /// earlier pipelined requests still buffered on that connection are lost
-    /// too. The guide's "Upstream issues" page has the details. Default:
-    /// `true`.
+    /// large win for pipelining clients (benchmarks such as TechEmpower
+    /// plaintext). Trade-off (a hyper 1.12 bug): a malformed or oversized
+    /// request head then closes the connection without the automatic
+    /// `400`/`414`/`431` response, and responses to earlier pipelined
+    /// requests still buffered on that connection are lost too. The guide's
+    /// "Upstream issues" page has the details. Default: `false`.
     pub pipeline_flush: bool,
     /// Maximum open connections per accept loop: per worker in
     /// [`RuntimeMode::PerCore`], in total otherwise. At the limit the server
@@ -227,10 +242,11 @@ impl Default for ServerConfig {
             workers: None,
             runtime: RuntimeMode::default(),
             header_read_timeout: Some(Duration::from_secs(30)),
+            body_read_timeout: Some(Duration::from_secs(30)),
             backlog: 4096,
             banner: true,
             keep_alive: true,
-            pipeline_flush: true,
+            pipeline_flush: false,
             max_connections: None,
             max_upgraded: None,
             max_header_size: None,

@@ -12,6 +12,7 @@
 //! the IO type here.
 
 use std::future::poll_fn;
+#[cfg(feature = "http2")]
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;

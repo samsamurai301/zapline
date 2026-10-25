@@ -91,6 +91,10 @@ use crate::Error;
 pub const DEFAULT_MAX_MESSAGE_SIZE: usize = 16 << 20;
 /// Default maximum incoming frame size: 16 MiB.
 pub const DEFAULT_MAX_FRAME_SIZE: usize = 16 << 20;
+/// Default per-connection read buffer: 8 KiB. It grows for larger messages;
+/// tungstenite's own default (128 KiB, allocated up front) would cost about
+/// 1 GiB per 8,000 mostly idle sockets.
+pub const DEFAULT_READ_BUFFER_SIZE: usize = 8 << 10;
 
 // ---------------------------------------------------------------------------
 // Upgrade extractor
@@ -214,8 +218,9 @@ impl WebSocketUpgrade {
         self
     }
 
-    /// Size of the per-connection read buffer (tungstenite default: 128 KiB).
-    /// Lower it for many mostly-idle connections.
+    /// Size of the per-connection read buffer (default
+    /// [`DEFAULT_READ_BUFFER_SIZE`], 8 KiB). Raise it for sockets that mostly
+    /// receive large messages.
     pub fn read_buffer_size(mut self, bytes: usize) -> Self {
         self.config.read_buffer_size = Some(bytes);
         self
@@ -398,7 +403,7 @@ impl FromRequestParts for WebSocketUpgrade {
             config: Config {
                 max_message_size: Some(DEFAULT_MAX_MESSAGE_SIZE),
                 max_frame_size: Some(DEFAULT_MAX_FRAME_SIZE),
-                read_buffer_size: None,
+                read_buffer_size: Some(DEFAULT_READ_BUFFER_SIZE),
                 write_buffer_size: None,
                 max_write_buffer_size: None,
             },

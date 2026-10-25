@@ -385,6 +385,7 @@ impl Prepared {
         let shared = Arc::new(Shared {
             states: self.resources.snapshot().into(),
             body_limit: self.body_limit,
+            body_timeout: self.config.body_read_timeout,
             #[cfg(feature = "ws")]
             upgrades: None,
         });
@@ -461,6 +462,7 @@ impl AppInner {
             shared: Arc::new(Shared {
                 states: self.shared.states.clone(),
                 body_limit: self.shared.body_limit,
+                body_timeout: self.shared.body_timeout,
                 #[cfg(feature = "ws")]
                 upgrades,
             }),

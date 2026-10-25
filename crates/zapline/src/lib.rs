@@ -113,6 +113,7 @@
 //! Always available: routing, extractors, middleware, [`auth`] (bearer,
 //! basic, API keys, guards), [`di`], [`tasks`], [`cron`], [`sse`], [`stream`],
 //! [`health`], [`metrics`] and the [`test`](mod@test) client.
+#![forbid(unsafe_code)]
 
 // ---- core -----------------------------------------------------------------
 mod app;

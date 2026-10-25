@@ -1,0 +1,31 @@
+[package]
+name = "zapline-chaos"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hostile-traffic, chaos and soak tests against a real zapline server"
+license = "MIT OR Apache-2.0"
+
+# Not part of the zapline workspace: it pulls in client-side crates the
+# framework does not need, and it is run on demand (`./bench/chaos/run.sh`).
+[workspace]
+
+[dependencies]
+zapline = { path = "../../crates/zapline", features = ["http2", "ws", "multipart", "cookies"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+fastrand = "2"
+bytes = "1"
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+http-body-util = "0.1"
+tokio-tungstenite = "0.30"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+# The server under test must survive panicking handlers the way user apps do
+# (the CLI templates keep the default `unwind`).
+panic = "unwind"

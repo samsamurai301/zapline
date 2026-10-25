@@ -162,6 +162,7 @@ It is safe to leave in. A release build compiles it out (`.dev_errors()` does no
 | [ZL0065](#zl0065) | Form body rejected |
 | [ZL0066](#zl0066) | Validation failed |
 | [ZL0067](#zl0067) | Body too large |
+| [ZL0068](#zl0068) | Body too slow |
 | [ZL0070](#zl0070) | No mailer registered |
 | [ZL0071](#zl0071) | No cache registered |
 | [ZL0072](#zl0072) | No Redis registered |
@@ -438,6 +439,14 @@ Send values that pass the rules shown in details, or change the rules: #[validat
 
 ```text
 Raise the limit: App::new().body_limit(16 * 1024 * 1024); or stream the body with BodyStream
+```
+
+### ZL0068
+
+**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body. The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
+
+```text
+Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); or stream large uploads with BodyStream or Multipart
 ```
 
 ### ZL0070

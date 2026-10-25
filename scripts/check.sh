@@ -43,6 +43,16 @@ step "TechEmpower app"
 # against Postgres.
 (cd bench/tfb && cargo clippy -q --all-targets -- -D warnings && cargo test -q)
 
+step "chaos suite and fuzz target (build only)"
+# Their own projects. Run them with ./bench/chaos/run.sh and cargo fuzz.
+(cd bench/chaos && cargo fmt --check && cargo clippy -q --all-targets -- -D warnings)
+(cd fuzz && cargo fmt --check && cargo check -q)
+
+if command -v cargo-deny >/dev/null 2>&1; then
+  step "supply chain (cargo deny)"
+  cargo deny check
+fi
+
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps
 

@@ -272,6 +272,24 @@ fn the_script_is_valid_posix_sh() {
     }
 }
 
+/// The settings and data directories are root-only, and a sudo login can't
+/// even test for files in them: every use goes through `as_root` (a plain
+/// `[ -f "$ENV_FILE" ]` once made every deploy regenerate the settings).
+#[test]
+fn root_only_paths_are_always_reached_through_as_root() {
+    let script = script_of(&inputs(8080));
+    let body = script.split("ENV_FILE=$ETC/env").nth(1).unwrap();
+    for line in body.lines() {
+        let line = line.trim();
+        let touches = ["\"$ENV_FILE\"", "\"$ETC\"", "\"$DATA\""]
+            .iter()
+            .any(|p| line.contains(p));
+        if touches && !line.starts_with("say ") && !line.starts_with('#') {
+            assert!(line.contains("as_root"), "not through as_root: {line}");
+        }
+    }
+}
+
 #[test]
 fn dry_run_shows_every_command_and_file() {
     let (dir, project) = project(&[

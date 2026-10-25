@@ -31,6 +31,7 @@
 //! let js = zapline_codegen::javascript(&spec).unwrap();
 //! assert!(js.source.contains("@returns {Promise<string>}"));
 //! ```
+#![forbid(unsafe_code)]
 
 mod names;
 mod ops;

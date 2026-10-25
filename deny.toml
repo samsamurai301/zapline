@@ -1,0 +1,44 @@
+# cargo-deny: supply-chain checks for the dependency tree.
+#
+#     cargo install cargo-deny --locked
+#     cargo deny check
+#
+# advisories: no crate with a RustSec advisory (vulnerable, unmaintained,
+# unsound or yanked). licenses: only permissive licenses, so apps built on
+# zapline can ship under any license. sources: crates.io only.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CDLA-Permissive-2.0",
+    "0BSD",
+    "BSL-1.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+# The examples and benchmark servers are never published.
+private = { ignore = true }
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

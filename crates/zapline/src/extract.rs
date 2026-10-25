@@ -858,7 +858,10 @@ mod path_de {
             &mut self,
             seed: V,
         ) -> Result<V::Value, DeError> {
-            let (name, value) = self.value.take().expect("value requested before key");
+            let (name, value) = self
+                .value
+                .take()
+                .ok_or_else(|| DeError::new("value requested before key".to_owned()))?;
             seed.deserialize(ValueDe { name, value })
         }
     }

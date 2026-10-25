@@ -699,7 +699,9 @@ as_root mkdir -p "$DATA" "$ETC"
 as_root chown "$APP:$APP" "$DATA"
 as_root chmod 0750 "$DATA" "$ETC"
 first=
-if [ ! -f "$ENV_FILE" ]; then
+# $ETC is root-only (0750): test through as_root, or a sudo login always
+# sees "no settings yet" and regenerates them, secrets included.
+if ! as_root test -f "$ENV_FILE"; then
   first=1
   say "writing $ENV_FILE (yours to edit from now on)"
   cp "$HERE/env" "$HERE/env.new"

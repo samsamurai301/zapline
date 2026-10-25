@@ -93,6 +93,17 @@ impl Error {
     pub fn payload_too_large() -> Self {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, "payload too large").diagnosed("ZL0067", None)
     }
+    /// `408`: the request body did not arrive within
+    /// [`ServerConfig::body_read_timeout`](crate::server::ServerConfig::body_read_timeout).
+    /// The connection is closed after the response.
+    pub(crate) fn body_timeout() -> Self {
+        Self::new(StatusCode::REQUEST_TIMEOUT, "request body timed out")
+            .diagnosed("ZL0068", None)
+            .with_header(
+                http::header::CONNECTION,
+                http::HeaderValue::from_static("close"),
+            )
+    }
     pub fn unsupported_media_type(msg: impl Into<Cow<'static, str>>) -> Self {
         Self::new(StatusCode::UNSUPPORTED_MEDIA_TYPE, msg)
     }

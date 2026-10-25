@@ -1,0 +1,31 @@
+[package]
+name = "zapline-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "Coverage-guided fuzzing of zapline's request handling (cargo-fuzz)"
+license = "MIT OR Apache-2.0"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Not part of the zapline workspace: it needs nightly and libFuzzer.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+zapline = { path = "../crates/zapline", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+
+[[bin]]
+name = "request"
+path = "fuzz_targets/request.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

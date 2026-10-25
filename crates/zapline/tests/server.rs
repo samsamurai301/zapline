@@ -405,9 +405,8 @@ async fn oversized_request_heads_are_rejected() {
 }
 
 #[tokio::test]
-async fn malformed_request_heads_get_automatic_responses_without_pipeline_flush() {
-    let mut app = App::new().get("/", || async { "ok" });
-    app.server_config_mut().pipeline_flush = false;
+async fn malformed_request_heads_get_automatic_responses_by_default() {
+    let app = App::new().get("/", || async { "ok" });
     let server = TestServer::spawn(app).await;
 
     let bad_header = raw(
@@ -439,7 +438,8 @@ async fn malformed_request_heads_get_automatic_responses_without_pipeline_flush(
 /// into a test that the responses arrive.
 #[tokio::test]
 async fn hyper_drops_automatic_error_responses_with_pipeline_flush() {
-    let app = App::new().get("/", || async { "ok" });
+    let mut app = App::new().get("/", || async { "ok" });
+    app.server_config_mut().pipeline_flush = true;
     let server = TestServer::spawn(app).await;
 
     let bad_header = raw(
@@ -585,4 +585,59 @@ fn run_unix_refuses_to_replace_a_regular_file() {
         .unwrap_err();
     assert_eq!(err.kind(), io::ErrorKind::AlreadyExists, "{err}");
     assert_eq!(std::fs::read_to_string(&path).unwrap(), "data");
+}
+
+/// A client that sends its body slowly gets `408` once
+/// `body_read_timeout` passes, and the connection is closed.
+#[tokio::test]
+async fn slow_request_bodies_time_out_with_408() {
+    let mut app = App::new()
+        .post("/", |body: String| async move { body })
+        .get("/", || async { "ok" });
+    app.server_config_mut().body_read_timeout = Some(Duration::from_millis(300));
+    let server = TestServer::spawn(app).await;
+
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+        .await
+        .expect("the connection was not closed")
+        .unwrap();
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+    assert!(
+        out.to_ascii_lowercase().contains("connection: close"),
+        "{out}"
+    );
+    assert!(start.elapsed() >= Duration::from_millis(250));
+
+    // A body that arrives in time is unaffected, and so is the server.
+    let ok = raw(
+        server.addr,
+        "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi",
+    )
+    .await;
+    assert!(ok.ends_with("hi"), "{ok}");
+}
+
+/// `body_read_timeout: None` waits for the body as long as it takes.
+#[tokio::test]
+async fn body_read_timeout_can_be_disabled() {
+    let mut app = App::new().post("/", |body: String| async move { body });
+    app.server_config_mut().body_read_timeout = None;
+    let server = TestServer::spawn(app).await;
+
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nab")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    s.write_all(b"cd").await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    assert!(out.ends_with("abcd"), "{out}");
 }

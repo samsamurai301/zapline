@@ -63,6 +63,7 @@
 - [Deployment](deployment.md)
 - [Running several instances (Redis)](scaling.md)
 - [Performance](performance.md)
+- [Reliability](reliability.md)
 
 # Reference
 

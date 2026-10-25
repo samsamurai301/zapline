@@ -17,6 +17,8 @@ pub(crate) type StateEntry = (TypeId, Arc<dyn Any + Send + Sync>);
 pub(crate) struct Shared {
     pub(crate) states: Arc<[StateEntry]>,
     pub(crate) body_limit: usize,
+    /// [`ServerConfig::body_read_timeout`](crate::server::ServerConfig::body_read_timeout).
+    pub(crate) body_timeout: Option<std::time::Duration>,
     /// The serving accept loop's WebSocket accounting (`None` in-process).
     #[cfg(feature = "ws")]
     pub(crate) upgrades: Option<crate::server::Upgrades>,
@@ -197,7 +199,10 @@ impl Request {
     /// Returns an empty body if it was already taken.
     pub async fn body_bytes(&mut self) -> crate::Result<Bytes> {
         match self.body.take() {
-            Some(b) => b.collect_limited(self.shared.body_limit).await,
+            Some(b) => {
+                b.collect_within(self.shared.body_limit, self.shared.body_timeout)
+                    .await
+            }
             None => Ok(Bytes::new()),
         }
     }

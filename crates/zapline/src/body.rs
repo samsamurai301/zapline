@@ -137,6 +137,16 @@ pub enum ReqBody {
 impl ReqBody {
     /// Buffer the whole body, refusing anything larger than `limit` bytes.
     pub async fn collect_limited(self, limit: usize) -> Result<Bytes, crate::Error> {
+        self.collect_within(limit, None).await
+    }
+
+    /// [`collect_limited`](Self::collect_limited), answering `408` when a
+    /// network body takes longer than `timeout` to arrive.
+    pub(crate) async fn collect_within(
+        self,
+        limit: usize,
+        timeout: Option<std::time::Duration>,
+    ) -> Result<Bytes, crate::Error> {
         match self {
             ReqBody::Full(b) => {
                 if b.len() > limit {
@@ -150,8 +160,14 @@ impl ReqBody {
                         return Err(crate::Error::payload_too_large());
                     }
                 }
-                let limited = http_body_util::Limited::new(inc, limit);
-                match limited.collect().await {
+                let limited = http_body_util::Limited::new(inc, limit).collect();
+                let collected = match timeout {
+                    Some(t) => tokio::time::timeout(t, limited)
+                        .await
+                        .map_err(|_| crate::Error::body_timeout())?,
+                    None => limited.await,
+                };
+                match collected {
                     Ok(c) => Ok(c.to_bytes()),
                     Err(e) if e.is::<http_body_util::LengthLimitError>() => {
                         Err(crate::Error::payload_too_large())

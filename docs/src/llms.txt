@@ -74,6 +74,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Deployment](https://samsamurai301.github.io/zapline/deployment.html): lto = "fat"
 - [Running several instances (Redis)](https://samsamurai301.github.io/zapline/scaling.html): One zapline process goes a long way (see [Performance](performance.md)), but for zero-downtime deploys or more traffic you will run two or more instances behind
 - [Performance](https://samsamurai301.github.io/zapline/performance.html): zapline is designed so that the fastest configuration is also the default one.
+- [Reliability](https://samsamurai301.github.io/zapline/reliability.html): How zapline is tested beyond its unit and integration tests, what those
 
 ## Reference
 

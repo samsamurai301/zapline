@@ -6,7 +6,7 @@
 //!
 //! The binary is a thin wrapper around [`main_with`]; everything is also
 //! available as a library so it can be tested.
-
+#![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
 pub mod bench;

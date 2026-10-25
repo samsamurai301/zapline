@@ -13,6 +13,7 @@
 //! #[get("/legacy", deprecated, hidden, operation_id = "legacyThing")]
 //! #[route("/items", method = "GET", method = "PUT", tags("items", "admin"))]
 //! ```
+#![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};

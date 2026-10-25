@@ -7,7 +7,7 @@ fails once the upstream fix lands.
 
 ## hyper: automatic error responses are dropped with `pipeline_flush`
 
-**Status:** present in hyper 1.12.0. Workaround: `ServerConfig::pipeline_flush = false`.
+**Status:** present in hyper 1.12.0. Workaround: `ServerConfig::pipeline_flush = false`, the default since the reliability audit.
 Canary: `hyper_drops_automatic_error_responses_with_pipeline_flush` in
 `crates/zapline/tests/server.rs`.
 

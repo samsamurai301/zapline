@@ -44,5 +44,8 @@ fn main() -> std::io::Result<()> {
     } else {
         app
     };
+    let mut app = app;
+    // The pipelined runs batch responses (see `ServerConfig::pipeline_flush`).
+    app.server_config_mut().pipeline_flush = true;
     app.run("127.0.0.1:3001")
 }

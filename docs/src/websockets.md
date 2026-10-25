@@ -61,7 +61,7 @@ An incoming message larger than the limit closes the connection with an error. *
 |---|---|---|
 | `.max_message_size(bytes)` | 16 MiB (`DEFAULT_MAX_MESSAGE_SIZE`) | Largest incoming message, after fragments are reassembled |
 | `.max_frame_size(bytes)` | 16 MiB (`DEFAULT_MAX_FRAME_SIZE`) | Largest single incoming frame |
-| `.read_buffer_size(bytes)` | 128 KiB | Per-connection read buffer. Lower it for many mostly idle connections. |
+| `.read_buffer_size(bytes)` | 8 KiB | Per-connection read buffer; it grows for larger messages. Raise it for sockets that mostly receive large messages. |
 | `.write_buffer_size(bytes)` | 128 KiB | Outgoing data is buffered until this many bytes are queued. `0` writes eagerly. Every `send` flushes regardless. |
 | `.max_write_buffer_size(bytes)` | unlimited | Cap on the outgoing buffer when writes are failing. Kept above the write buffer size. |
 

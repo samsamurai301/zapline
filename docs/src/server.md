@@ -50,8 +50,9 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 |---|---|---|
 | `workers` | CPU count | Worker threads |
 | `runtime` | `PerCore` (Linux) | `PerCore` or `MultiThread` |
-| `header_read_timeout` | 30s | Slowloris protection |
-| `keep_alive` / `pipeline_flush` | true / true | HTTP/1.1 behavior |
+| `header_read_timeout` | 30s | Slowloris protection; also closes idle keep-alive connections |
+| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes. Streaming bodies set their own pace |
+| `keep_alive` / `pipeline_flush` | true / false | HTTP/1.1 behavior. `pipeline_flush` batches pipelined responses (see the limitation below) |
 | `max_connections` | unlimited | Per worker. Accepting pauses at the limit. WebSockets keep their slot after the upgrade. |
 | `max_upgraded` | none | Per worker. A separate limit for WebSockets; upgrades beyond it get `503`. |
 | `max_header_size`, `max_headers`, `max_buf_size` | hyper defaults | Request head limits |
@@ -150,6 +151,6 @@ Not supported yet: WebSockets over HTTP/3 (RFC 9220; they work over HTTP/1.1 and
 
 ## Known limitations
 
-- With `pipeline_flush` on (the default, needed for pipelined throughput), hyper 1.12 closes the connection on a malformed or oversized request head without sending the 400/414/431 response. Responses to earlier pipelined requests that were still buffered on that connection are lost with it. Set `pipeline_flush = false` if you need those responses. zapline can't send them itself: hyper drops its write buffer, and only it knows what was in it (see the [upstream issue draft](upstream-issues.md#hyper-automatic-error-responses-are-dropped-with-pipeline_flush)). The test `hyper_drops_automatic_error_responses_with_pipeline_flush` fails once a hyper release fixes it.
+- With `pipeline_flush` on (off by default; turn it on for heavily pipelined clients such as benchmark tools), hyper 1.12 closes the connection on a malformed or oversized request head without sending the 400/414/431 response. Responses to earlier pipelined requests that were still buffered on that connection are lost with it. Keep it off if you need those responses. zapline can't send them itself: hyper drops its write buffer, and only it knows what was in it (see the [upstream issue draft](upstream-issues.md#hyper-automatic-error-responses-are-dropped-with-pipeline_flush)). The test `hyper_drops_automatic_error_responses_with_pipeline_flush` fails once a hyper release fixes it.
 - Individual HTTP/2 streams aren't tracked by the drain: an HTTP/2 connection gets a GOAWAY and closes when its streams finish. With `App::run` the rest end when the workers stop.
-- WebSockets over HTTP/2 (RFC 8441) aren't supported.
+- There is no write timeout: a client that stops reading a response holds its connection (and the unsent part of a buffered response) until it disconnects. Bound how many such clients can pile up with `max_connections`, or put a reverse proxy in front for internet-facing apps that serve large responses.

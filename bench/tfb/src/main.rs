@@ -304,6 +304,9 @@ fn app() -> std::io::Result<App> {
         .get("/fortunes", fortunes)
         .get("/updates", updates)
         .get("/cached-queries", cached_queries);
+    // TFB plaintext pipelines 16 requests per connection: batch their
+    // responses (see `ServerConfig::pipeline_flush` for the trade-off).
+    app.server_config_mut().pipeline_flush = true;
     if shared {
         app = app.state(PoolMode::Shared).database(
             Database::url(url)
