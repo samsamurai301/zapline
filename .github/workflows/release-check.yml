@@ -1,0 +1,38 @@
+name: Release check
+
+# Before publishing (RELEASING.md, step 4): does the version bump in
+# Cargo.toml match the public API changes since the last release tag?
+# Run it by hand from the Actions tab on the branch you are releasing.
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Tag to compare with (default: the latest v* tag)"
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  semver:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-semver-checks
+      - name: compare with the last release
+        env:
+          BASELINE: ${{ inputs.baseline }}
+        run: |
+          base="${BASELINE:-$(git tag --list 'v*' --sort=-v:refname | head -n 1)}"
+          if [ -z "$base" ]; then
+            echo "No release tag yet: nothing to compare with (first release)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "Comparing the public API with $base" >> "$GITHUB_STEP_SUMMARY"
+          cargo semver-checks -p zapline -p zapline-macros -p zapline-codegen --baseline-rev "$base"
