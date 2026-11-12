@@ -51,7 +51,8 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `workers` | CPU count | Worker threads |
 | `runtime` | `PerCore` (Linux) | `PerCore` or `MultiThread` |
 | `header_read_timeout` | 30s | Slowloris protection; also closes idle keep-alive connections |
-| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes. Streaming bodies set their own pace |
+| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes |
+| `body_idle_timeout` | 30s | A streaming body (`BodyStream`, `Multipart`) that sends nothing for this long gets `408` and the connection closes; a slow but steady upload is unaffected |
 | `keep_alive` / `pipeline_flush` | true / false | HTTP/1.1 behavior. `pipeline_flush` batches pipelined responses (see the limitation below) |
 | `max_connections` | unlimited | Per worker. Accepting pauses at the limit. WebSockets keep their slot after the upgrade. |
 | `max_upgraded` | none | Per worker. A separate limit for WebSockets; upgrades beyond it get `503`. |

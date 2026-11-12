@@ -143,9 +143,9 @@ pub struct ServerConfig {
     /// Answer `408` and close the connection when a buffered request body
     /// (`Json`, `Form`, `Bytes`, `String`, ...) takes longer than this to
     /// arrive, so clients that send bodies slowly cannot hold connections
-    /// and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are
-    /// not limited: they set their own pace. `None` disables it. Default:
-    /// 30s.
+    /// and handlers open. Streaming bodies (`BodyStream`, `Multipart`) set
+    /// their own pace: [`body_idle_timeout`](Self::body_idle_timeout)
+    /// covers them instead. `None` disables it. Default: 30s.
     ///
     /// ```
     /// use std::time::Duration;
@@ -155,6 +155,21 @@ pub struct ServerConfig {
     /// app.server_config_mut().body_read_timeout = Some(Duration::from_secs(10));
     /// ```
     pub body_read_timeout: Option<Duration>,
+    /// Answer `408` and close the connection when a streaming request body
+    /// (`BodyStream`, `Multipart`) sends no data for this long. A gap
+    /// between chunks is limited, not the whole upload, so large uploads on
+    /// slow links still finish, while a client that trickles a byte every
+    /// few minutes can't hold a handler open. `None` disables it. Default:
+    /// 30s.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use zapline::prelude::*;
+    ///
+    /// let mut app = App::new();
+    /// app.server_config_mut().body_idle_timeout = Some(Duration::from_secs(60));
+    /// ```
+    pub body_idle_timeout: Option<Duration>,
     /// TCP listen backlog. Default: 4096.
     pub backlog: i32,
     /// Print one startup line (address, workers, runtime, protocols) and a
@@ -243,6 +258,7 @@ impl Default for ServerConfig {
             runtime: RuntimeMode::default(),
             header_read_timeout: Some(Duration::from_secs(30)),
             body_read_timeout: Some(Duration::from_secs(30)),
+            body_idle_timeout: Some(Duration::from_secs(30)),
             backlog: 4096,
             banner: true,
             keep_alive: true,

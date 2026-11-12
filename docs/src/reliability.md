@@ -84,9 +84,11 @@ Honest gaps, so you can decide where it fits today:
   such clients held about 800 MiB of 4 MiB responses). axum has the same
   behavior; a reverse proxy, `max_connections`, or streaming large
   responses bounds it.
-- **Streaming bodies set their own pace.** `body_read_timeout` covers
-  buffered bodies; `BodyStream` and `Multipart` handlers should bound their
-  own uploads.
+- **Streaming bodies are limited per gap, not in total.** `body_read_timeout`
+  covers buffered bodies; `body_idle_timeout` (default 30s) answers `408` when
+  a `BodyStream` or `Multipart` upload sends nothing for that long. A slow but
+  steady upload still finishes, so handlers that must cap a whole upload's
+  duration still bound it themselves.
 - **Young code, small team.** Bugs like the `zapline ship` settings one are
   what a young project still has. The chaos suite and fuzzer exist so the
   next one is found by a test, not by a user.

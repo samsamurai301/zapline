@@ -1441,7 +1441,8 @@ async fn receive_upload(mut req: Request) -> Response {
         return too_large(max_bytes).into_response();
     }
     let limit = usize::try_from(max_bytes).unwrap_or(usize::MAX);
-    let body = BodyStream::new(req.take_body(), limit);
+    let idle = req.body_idle_timeout();
+    let body = BodyStream::new(req.take_body(), limit, idle);
     let options = PutOptions::new().content_type(kind);
     match storage.put_stream(&key, body, options).await {
         Ok(_) => http::StatusCode::OK.into_response(),
