@@ -500,7 +500,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
-| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
+| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `Idempotency::new().redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`: `put`, `put_with(k, b, PutOptions)`, `get`, `get_stream`/`put_stream`, `list(prefix)`, `metadata`, `copy`, `delete`, `url(key, ttl)`, `upload_url` (browser to S3) ([File storage](storage.md)) |
@@ -6393,6 +6393,7 @@ fn app() -> App {
 |---|---|---|
 | [`SecurityHeaders`](#securityheaders) | Clickjacking, MIME sniffing, downgrade attacks, over-broad browser features | |
 | [`RateLimit`](#ratelimit) | Brute force, scraping, noisy clients | |
+| [`Idempotency`](#idempotency) | Retried `POST`s charging twice | |
 | [`Compression`](#compression) | Bandwidth cost (not an attack, but it is why you want it) | `compression` |
 | [`ConcurrencyLimit`](#concurrencylimit) | Overload: sheds load instead of collapsing | |
 | [`Timeout`](#timeout) | Handlers (or dependencies) that hang | |
@@ -6567,6 +6568,45 @@ fn app() -> App {
 ```
 
 `.rate_limit(limit, period)` is on both `App` and `Routes` and applies to the most recently registered route. Policies that share a `.scope(name)` share buckets, for example to cap login and password reset together. A limiter installed with plain `App::wrap` runs before routing and cannot see policies: it applies its own limit to everything, 404s included.
+
+## `Idempotency`
+
+A client that times out on `POST /payments` can't tell whether the payment went through. Retrying could charge twice, and giving up could lose the payment. With `Idempotency`, the client sends an `Idempotency-Key` header with a unique value, such as a UUID, and retries with the same key. The handler runs once, and every retry gets the first response back:
+
+```rust
+use zapline::middleware::Idempotency;
+use zapline::prelude::*;
+
+fn app() -> App {
+    let payments = Routes::new()
+        .post("/payments", || async { (StatusCode::CREATED, "charged") })
+        .wrap(Idempotency::new().required());     // clients must send a key
+
+    App::new().nest("/api", payments)
+}
+```
+
+Use `App::wrap(Idempotency::new())` instead to make keys optional on every route. Don't stack both on the same route.
+
+It follows the IETF `Idempotency-Key` header draft and applies only to `POST` and `PATCH`, since `PUT` and `DELETE` are idempotent already. Requests without a key pass through untouched unless the middleware is `.required()`:
+
+| Situation | Answer |
+|---|---|
+| First request with a key | Runs the handler, and the response is stored for `.ttl(..)` (default 24 hours) |
+| Retry of the same request | The stored response, with `Idempotent-Replayed: true` |
+| Retry while the first request still runs | `409`, code `idempotency_key_in_use` |
+| Same key, different method, path, query or body | `422`, code `idempotency_key_reused` |
+| No key, with `.required()` | `400`, code `idempotency_key_missing` |
+| Key longer than 255 characters or with spaces or control characters | `400`, code `idempotency_key_invalid` |
+
+Things to know:
+
+- **Only final answers are stored.** `5xx`, `408`, `409`, `425` and `429` responses are not stored, so the client's retry runs the handler again. Neither are streamed bodies or bodies over 1 MiB. A `4xx` like "card declined" *is* stored, so a retry gets the same answer. `Set-Cookie` and `Date` are never replayed.
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Apps with cookie sessions should scope by user. `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request.
+- **Crashes don't lock keys forever.** If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes). Keep that above your slowest handler.
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed.
+- In memory, at most `.max_keys(n)` keys are kept (default 10 000). When the store is full, the oldest stored responses are dropped first.
+- Put `Compression` **outside** `Idempotency` so stored bodies stay uncompressed. Put `Idempotency` inside authentication when your `.scope` reads the current user.
 
 ## `Compression`
 
@@ -9179,7 +9219,7 @@ Some modules have no feature flag because they add no dependencies:
 | Module | What it provides |
 |---|---|
 | Core | Routing, `Path`, `State`, `Extension`, `Bytes` and `String` extractors, responses, errors, the test client, startup/shutdown hooks and plugins |
-| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `SetRequestId`, `SecurityHeaders` |
+| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `Idempotency`, `SetRequestId`, `SecurityHeaders` |
 | `auth` | `BearerToken`, `BasicAuth`, `ApiKey`, `Authenticate`, `Guard`, route policies (JWT and CSRF need their own features) |
 | `di` | `Dep<T>`, `Cached<T>`, `Inject` and the `provide*` methods |
 | `tasks` | `BackgroundTasks`, `App::schedule`, `App::background` |
