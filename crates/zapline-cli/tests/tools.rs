@@ -480,12 +480,13 @@ mod dev {
 
         let manifest = fs::read_to_string(app.join("Cargo.toml")).unwrap();
         fs::write(app.join("Cargo.toml"), format!("{manifest}\n# touched\n")).unwrap();
-        let changed = dev.wait_for("Changed", SLOW);
-        assert!(
-            dev.seen[changed].contains("Cargo.toml"),
-            "{:?}",
-            dev.seen[changed]
-        );
+        // macOS delivers file events late, so the first build may first
+        // report "Changed files changed during the build": skip ahead to
+        // the change that names the manifest.
+        let mut changed = dev.wait_for("Changed", SLOW);
+        while !dev.seen[changed].contains("Cargo.toml") {
+            changed = dev.wait_for_after(changed + 1, "Changed", SLOW);
+        }
         dev.wait_for_after(changed, "fake-app v1 running", SLOW);
 
         signal(dev.child.id(), "INT");
