@@ -1,0 +1,50 @@
+name: CI alert
+
+# Keeps one open issue while CI is red on main, so a broken main can't go
+# unnoticed (it once stayed red for 18 days). A failed run opens the issue,
+# or comments on it if it is already open; the next green run closes it.
+# Opening the issue notifies the repository's watchers.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  issues: write
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    # Only runs on main itself (pushes and the weekly schedule), not on PRs
+    # from forks whose head branch happens to be called main.
+    if: github.event.workflow_run.head_repository.full_name == github.repository
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            const title = "CI is red on main";
+            const { owner, repo } = context.repo;
+            const open = (await github.paginate(github.rest.issues.listForRepo, {
+              owner, repo, state: "open", per_page: 100,
+            })).filter((i) => !i.pull_request && i.title === title);
+            const sha = run.head_sha.slice(0, 7);
+            if (run.conclusion === "failure" || run.conclusion === "timed_out") {
+              const body = `CI failed on \`main\` at ${sha} (${run.event}): ${run.html_url}`;
+              if (open.length > 0) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: open[0].number, body });
+              } else {
+                await github.rest.issues.create({ owner, repo, title, body });
+              }
+            } else if (run.conclusion === "success") {
+              for (const issue of open) {
+                await github.rest.issues.createComment({
+                  owner, repo, issue_number: issue.number,
+                  body: `Green again at ${sha}: ${run.html_url}`,
+                });
+                await github.rest.issues.update({
+                  owner, repo, issue_number: issue.number, state: "closed", state_reason: "completed",
+                });
+              }
+            }
