@@ -506,7 +506,7 @@ async fn login_page(views: Views, State(social): State<SocialLogins>) -> Result<
 }
 
 /// Sign up from the page's form: go home, or show the form again.
-#[post("/signup", tag = "pages", status = 303)]
+#[post("/signup", tag = "pages")]
 async fn signup_form(
     views: Views,
     db: Db,
@@ -534,7 +534,7 @@ async fn signup_form(
 }
 
 /// Log in from the page's form.
-#[post("/login", tag = "pages", status = 303)]
+#[post("/login", tag = "pages")]
 async fn login_form(
     views: Views,
     db: Db,
@@ -562,7 +562,7 @@ async fn login_form(
 }
 
 /// Log out and go to the log-in page.
-#[post("/logout", tag = "pages", status = 303)]
+#[post("/logout", tag = "pages")]
 async fn logout_form(session: Session, flash: Flash) -> Response {
     session.destroy();
     flash.info("You are logged out.");
@@ -614,7 +614,7 @@ pub struct NewPassword {
 }
 
 /// Set the new password from the page's form, then go home logged in.
-#[post("/reset", tag = "pages", status = 303)]
+#[post("/reset", tag = "pages")]
 async fn reset_form(
     views: Views,
     db: Db,

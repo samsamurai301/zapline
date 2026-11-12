@@ -6595,18 +6595,24 @@ It follows the IETF `Idempotency-Key` header draft and applies only to `POST` an
 | First request with a key | Runs the handler, and the response is stored for `.ttl(..)` (default 24 hours) |
 | Retry of the same request | The stored response, with `Idempotent-Replayed: true` |
 | Retry while the first request still runs | `409`, code `idempotency_key_in_use` |
-| Same key, different method, path, query or body | `422`, code `idempotency_key_reused` |
+| Same key, different method, path, query, content type or body | `422`, code `idempotency_key_reused` |
 | No key, with `.required()` | `400`, code `idempotency_key_missing` |
 | Key longer than 255 characters or with spaces or control characters | `400`, code `idempotency_key_invalid` |
 
 Things to know:
 
-- **Only final answers are stored.** `5xx`, `408`, `409`, `425` and `429` responses are not stored, so the client's retry runs the handler again. Neither are streamed bodies or bodies over 1 MiB. A `4xx` like "card declined" *is* stored, so a retry gets the same answer. `Set-Cookie` and `Date` are never replayed.
-- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Apps with cookie sessions should scope by user. `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request.
-- **Crashes don't lock keys forever.** If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes). Keep that above your slowest handler.
-- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed.
-- In memory, at most `.max_keys(n)` keys are kept (default 10 000). When the store is full, the oldest stored responses are dropped first.
-- Put `Compression` **outside** `Idempotency` so stored bodies stay uncompressed. Put `Idempotency` inside authentication when your `.scope` reads the current user.
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request.
+- **Only final answers are stored.** A `2xx`, or a `4xx` like "card declined", is stored, so a retry gets the same answer. These aren't stored, so the client's retry runs the handler again:
+  - `5xx` responses;
+  - answers that may change: `401`, `403`, `404` and `405`;
+  - answers that ask for a retry: `408`, `409`, `425` and `429`;
+  - responses that set cookies (replaying a log-in without its cookie would leave the client logged out);
+  - streamed bodies and bodies over 1 MiB.
+- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed.
+- **Uploads pass through.** `multipart/*` requests skip idempotency. Fingerprinting buffers the request body, which would undo streaming and the larger body limits of upload routes. Other bodies are buffered within the app's body limit.
+- **Slow handlers keep their key.** While a handler runs, its lock is renewed every third of `.lock_timeout(..)`. If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
+- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. When the store is full, the oldest stored responses are dropped. Use Redis where a second run costs money.
 
 ## `Compression`
 

@@ -18,6 +18,8 @@ use std::time::{Duration, Instant};
 
 use common::*;
 
+/// Generous waits for the (Unix-only) `zapline dev` tests.
+#[cfg(unix)]
 const SLOW: Duration = Duration::from_secs(90);
 
 /// A `zapline` command with its cache in `dir/cache`.

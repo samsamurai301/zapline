@@ -33,6 +33,7 @@ async fn a_retry_replays_the_stored_response() {
     let (c, runs) = app(Idempotency::new());
     let first = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "k-1")
         .body("amount=10")
         .send()
@@ -43,6 +44,7 @@ async fn a_retry_replays_the_stored_response() {
 
     let retry = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "k-1")
         .body("amount=10")
         .send()
@@ -62,11 +64,13 @@ async fn a_retry_replays_the_stored_response() {
 async fn quoted_keys_match_bare_ones() {
     let (c, runs) = app(Idempotency::new());
     c.post("/charge")
+        .bearer("client")
         .header("idempotency-key", "abc")
         .send()
         .await;
     let r = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "\"abc\"")
         .send()
         .await;
@@ -81,7 +85,12 @@ async fn requests_without_a_key_or_with_safe_methods_pass_through() {
         assert_eq!(c.post("/charge").send().await.status(), 201);
     }
     assert_eq!(runs.load(Ordering::SeqCst), 2);
-    let r = c.get("/charge").header("idempotency-key", "k").send().await;
+    let r = c
+        .get("/charge")
+        .bearer("client")
+        .header("idempotency-key", "k")
+        .send()
+        .await;
     assert_eq!(r.text(), "read");
 }
 
@@ -89,11 +98,13 @@ async fn requests_without_a_key_or_with_safe_methods_pass_through() {
 async fn patch_is_covered_too() {
     let (c, _) = app(Idempotency::new());
     c.patch("/charge")
+        .bearer("client")
         .header("idempotency-key", "p")
         .send()
         .await;
     let r = c
         .patch("/charge")
+        .bearer("client")
         .header("idempotency-key", "p")
         .send()
         .await;
@@ -105,12 +116,14 @@ async fn patch_is_covered_too() {
 async fn reusing_a_key_for_another_request_is_422() {
     let (c, runs) = app(Idempotency::new());
     c.post("/charge")
+        .bearer("client")
         .header("idempotency-key", "k-2")
         .body("amount=10")
         .send()
         .await;
     let r = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "k-2")
         .body("amount=99")
         .send()
@@ -120,6 +133,7 @@ async fn reusing_a_key_for_another_request_is_422() {
     // Another path is another request as well.
     let r = c
         .post("/charge?x=1")
+        .bearer("client")
         .header("idempotency-key", "k-2")
         .body("amount=10")
         .send()
@@ -143,10 +157,19 @@ async fn a_retry_during_the_first_request_is_409() {
         })
         .test();
 
-    let first = c.post("/slow").header("idempotency-key", "s").send();
+    let first = c
+        .post("/slow")
+        .bearer("client")
+        .header("idempotency-key", "s")
+        .send();
     let second = async {
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let r = c.post("/slow").header("idempotency-key", "s").send().await;
+        let r = c
+            .post("/slow")
+            .bearer("client")
+            .header("idempotency-key", "s")
+            .send()
+            .await;
         release.notify_one();
         r
     };
@@ -171,6 +194,7 @@ async fn required_keys_and_invalid_keys_are_400() {
     for bad in ["has space", "\"\"", &"x".repeat(256)] {
         let r = c
             .post("/charge")
+            .bearer("client")
             .header("idempotency-key", bad)
             .send()
             .await;
@@ -202,6 +226,125 @@ async fn keys_are_scoped_by_authorization_by_default() {
 }
 
 #[tokio::test]
+async fn requests_without_an_owner_skip_idempotency() {
+    // No Authorization and no `.scope`: clients can't be told apart, so
+    // sharing one key namespace would leak responses between them.
+    let (c, runs) = app(Idempotency::new().required());
+    for _ in 0..2 {
+        let r = c
+            .post("/charge")
+            .header("idempotency-key", "anon")
+            .send()
+            .await;
+        assert_eq!(r.status(), 201);
+        assert_eq!(r.header("idempotent-replayed"), None);
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_changed_content_type_is_a_different_request() {
+    let (c, runs) = app(Idempotency::new());
+    let send = |ct: &'static str| {
+        c.post("/charge")
+            .bearer("client")
+            .header("idempotency-key", "ct")
+            .header("content-type", ct)
+            .body("{}")
+            .send()
+    };
+    assert_eq!(send("application/json").await.status(), 201);
+    assert_eq!(send("text/plain").await.status(), 422);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn multipart_uploads_pass_through_unbuffered() {
+    let (c, runs) = app(Idempotency::new());
+    for _ in 0..2 {
+        let r = c
+            .post("/charge")
+            .bearer("client")
+            .header("idempotency-key", "upload")
+            .header("content-type", "multipart/form-data; boundary=x")
+            .body("--x--\r\n")
+            .send()
+            .await;
+        assert_eq!(r.header("idempotent-replayed"), None);
+    }
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn a_slow_handler_keeps_its_key_past_the_lock_timeout() {
+    slow_handler_keeps_its_key(Idempotency::new(), "slow").await;
+}
+
+#[cfg(feature = "redis")]
+#[tokio::test]
+async fn redis_renews_the_lock_of_a_slow_handler() {
+    let Ok(url) = std::env::var("ZAPLINE_TEST_REDIS_URL") else {
+        eprintln!("skipped: ZAPLINE_TEST_REDIS_URL is not set");
+        return;
+    };
+    let redis = zapline::redis::Redis::new(&url).unwrap();
+    let key = format!("{:?}", std::time::SystemTime::now()).replace(' ', "-");
+    slow_handler_keeps_its_key(Idempotency::new().redis(redis), &key).await;
+}
+
+/// The handler takes 5 lock timeouts; a retry near the end still gets 409.
+async fn slow_handler_keeps_its_key(mw: Idempotency, key: &str) {
+    let lock = Duration::from_millis(60);
+    let runs = Arc::new(AtomicUsize::new(0));
+    let r = runs.clone();
+    let c = App::new()
+        .wrap(mw.lock_timeout(lock))
+        .post("/slow", move || {
+            let r = r.clone();
+            async move {
+                r.fetch_add(1, Ordering::SeqCst);
+                tokio::time::sleep(Duration::from_millis(300)).await;
+                "done"
+            }
+        })
+        .test();
+    let send = || {
+        c.post("/slow")
+            .bearer("client")
+            .header("idempotency-key", key)
+            .send()
+    };
+    let retry = async {
+        tokio::time::sleep(Duration::from_millis(240)).await;
+        send().await
+    };
+    let (first, retry) = tokio::join!(send(), retry);
+    assert_eq!(first.text(), "done");
+    assert_eq!(retry.status(), 409, "the lock was renewed");
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert_eq!(send().await.header("idempotent-replayed"), Some("true"));
+}
+
+#[tokio::test]
+async fn one_scope_cannot_flush_another_scopes_responses() {
+    // max_keys 20: each scope may hold 2.
+    let (c, runs) = app(Idempotency::new().max_keys(20));
+    let send = |who: &'static str, key: String| {
+        c.post("/charge")
+            .bearer(who)
+            .header("idempotency-key", key.as_str())
+            .send()
+    };
+    send("victim", "pay".into()).await;
+    for i in 0..50 {
+        send("flooder", format!("junk-{i}")).await;
+    }
+    let retry = send("victim", "pay".into()).await;
+    assert_eq!(retry.header("idempotent-replayed"), Some("true"));
+    assert_eq!(runs.load(Ordering::SeqCst), 51);
+}
+
+#[tokio::test]
 async fn custom_scopes_and_opting_out() {
     let mw = Idempotency::new().scope(|req| {
         req.headers()
@@ -212,7 +355,10 @@ async fn custom_scopes_and_opting_out() {
     });
     let (c, runs) = app(mw);
     let send = |account: Option<&'static str>| {
-        let mut r = c.post("/charge").header("idempotency-key", "k");
+        let mut r = c
+            .post("/charge")
+            .bearer("client")
+            .header("idempotency-key", "k");
         if let Some(a) = account {
             r = r.header("x-account", a);
         }
@@ -267,6 +413,7 @@ async fn server_errors_release_the_key(mw: Idempotency, key: &str) {
         .test();
     let send = || {
         c.post("/flaky")
+            .bearer("client")
             .header("idempotency-key", key.as_str())
             .send()
     };
@@ -293,44 +440,86 @@ async fn client_errors_are_stored() {
         })
         .test();
     for _ in 0..2 {
-        let r = c.post("/pay").header("idempotency-key", "d").send().await;
+        let r = c
+            .post("/pay")
+            .bearer("client")
+            .header("idempotency-key", "d")
+            .send()
+            .await;
         assert_eq!(r.status(), 400);
     }
     assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
-async fn set_cookie_is_not_replayed() {
+async fn rejections_that_may_change_are_not_stored() {
+    let (c, runs) = app(Idempotency::new());
+    // 404 (here: no such route) and friends are not stored, so the key
+    // stays free and they can't fill the store.
+    for _ in 0..2 {
+        let r = c
+            .post("/nowhere")
+            .bearer("client")
+            .header("idempotency-key", "n")
+            .send()
+            .await;
+        assert_eq!(r.status(), 404);
+        assert_eq!(r.header("idempotent-replayed"), None);
+    }
+    // The same key then works for a real request.
+    let r = c
+        .post("/charge")
+        .bearer("client")
+        .header("idempotency-key", "n")
+        .send()
+        .await;
+    assert_eq!(r.status(), 201);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn responses_that_set_cookies_are_not_stored() {
+    let runs = Arc::new(AtomicUsize::new(0));
+    let r = runs.clone();
     let c = App::new()
         .wrap(Idempotency::new())
-        .post("/login", || async {
-            (
-                [
-                    (
+        .post("/login", move || {
+            r.fetch_add(1, Ordering::SeqCst);
+            async {
+                (
+                    [(
                         HeaderName::from_static("set-cookie"),
                         HeaderValue::from_static("sid=secret"),
-                    ),
-                    (
-                        HeaderName::from_static("x-kept"),
-                        HeaderValue::from_static("yes"),
-                    ),
-                ],
-                "welcome",
-            )
+                    )],
+                    "welcome",
+                )
+            }
         })
         .test();
-    let first = c.post("/login").header("idempotency-key", "c").send().await;
-    assert_eq!(first.header("set-cookie"), Some("sid=secret"));
-    let retry = c.post("/login").header("idempotency-key", "c").send().await;
-    assert_eq!(retry.text(), "welcome");
-    assert_eq!(retry.header("x-kept"), Some("yes"));
-    assert_eq!(retry.header("set-cookie"), None);
+    let send = || {
+        c.post("/login")
+            .bearer("client")
+            .header("idempotency-key", "c")
+            .send()
+    };
+    assert_eq!(send().await.header("set-cookie"), Some("sid=secret"));
+    // A retry (say the first answer was lost) logs in again and gets its
+    // cookie, instead of a replay without one.
+    let retry = send().await;
+    assert_eq!(retry.header("set-cookie"), Some("sid=secret"));
+    assert_eq!(retry.header("idempotent-replayed"), None);
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
 }
 
 #[tokio::test]
 async fn stored_responses_expire() {
     let (c, runs) = app(Idempotency::new().ttl(Duration::from_millis(100)));
-    let send = || c.post("/charge").header("idempotency-key", "t").send();
+    let send = || {
+        c.post("/charge")
+            .bearer("client")
+            .header("idempotency-key", "t")
+            .send()
+    };
     send().await;
     assert_eq!(send().await.header("idempotent-replayed"), Some("true"));
     tokio::time::sleep(Duration::from_millis(150)).await;
@@ -355,7 +544,12 @@ async fn a_panicking_handler_releases_the_key() {
             }
         })
         .test();
-    let send = || c.post("/boom").header("idempotency-key", "p").send();
+    let send = || {
+        c.post("/boom")
+            .bearer("client")
+            .header("idempotency-key", "p")
+            .send()
+    };
     assert_eq!(send().await.status(), 500);
     let r = send().await;
     assert_eq!(r.status(), 200, "not 409: the key was released");
@@ -367,19 +561,23 @@ async fn a_full_store_drops_the_oldest_response() {
     let (c, runs) = app(Idempotency::new().max_keys(2));
     for key in ["a", "b", "c"] {
         c.post("/charge")
+            .bearer("client")
             .header("idempotency-key", key)
             .send()
             .await;
     }
-    // "a" was evicted for "c"; "c" is still stored.
+    // At the cap, a scope's oldest responses make room for its new ones:
+    // "a" is gone, "c" is still stored.
     let c_retry = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "c")
         .send()
         .await;
     assert_eq!(c_retry.header("idempotent-replayed"), Some("true"));
     let a_retry = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "a")
         .send()
         .await;
@@ -408,6 +606,7 @@ async fn redis_shares_keys_between_instances() {
     let (two, runs_two) = app(Idempotency::new().redis(redis));
     let first = one
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", key.as_str())
         .body("x")
         .send()
@@ -415,6 +614,7 @@ async fn redis_shares_keys_between_instances() {
     assert_eq!(first.text(), "charge #1");
     let retry = two
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", key.as_str())
         .body("x")
         .send()
@@ -424,6 +624,7 @@ async fn redis_shares_keys_between_instances() {
     assert_eq!(retry.header("idempotent-replayed"), Some("true"));
     let reused = two
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", key.as_str())
         .body("y")
         .send()
@@ -440,6 +641,7 @@ async fn unreachable_redis_fails_closed() {
     let (c, runs) = app(Idempotency::new().redis(Redis::new("redis://127.0.0.1:1").unwrap()));
     let r = c
         .post("/charge")
+        .bearer("client")
         .header("idempotency-key", "u")
         .send()
         .await;
