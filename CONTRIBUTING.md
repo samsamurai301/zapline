@@ -62,7 +62,12 @@ response and lists the extension points every feature is built on. Read its
 cargo test -p zapline --all-features --test <name>   # one test file
 ./scripts/gen-llms.sh           # after editing docs/src: regenerates llms.txt
 cargo deny check                # supply chain: advisories, licenses, sources
+./scripts/coverage.sh           # line coverage vs .github/coverage-floor (needs cargo-llvm-cov)
 ```
+
+The coverage floor only goes up. CI fails when coverage drops under it, or
+when a pull request lowers the number. When your tests raise coverage, raise
+the floor in the same pull request.
 
 ### Reliability checks
 
