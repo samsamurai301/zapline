@@ -120,6 +120,14 @@ impl FromRequestParts for CurrentUser {
     }
 }
 
+/// Routes taking a `CurrentUser` document their `401` in OpenAPI (and so
+/// to `zapline fuzz`).
+impl zapline::openapi::ApiInput for CurrentUser {
+    fn describe_input(op: &mut zapline::openapi::OperationDoc) {
+        op.error_response(401, "Not logged in");
+    }
+}
+
 /// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
 async fn admins_only(mut req: Request, next: Next) -> Response {
     let user = match CurrentUser::from_request_parts(&mut req).await {
@@ -498,7 +506,7 @@ async fn login_page(views: Views, State(social): State<SocialLogins>) -> Result<
 }
 
 /// Sign up from the page's form: go home, or show the form again.
-#[post("/signup", tag = "pages")]
+#[post("/signup", tag = "pages", status = 303)]
 async fn signup_form(
     views: Views,
     db: Db,
@@ -526,7 +534,7 @@ async fn signup_form(
 }
 
 /// Log in from the page's form.
-#[post("/login", tag = "pages")]
+#[post("/login", tag = "pages", status = 303)]
 async fn login_form(
     views: Views,
     db: Db,
@@ -554,7 +562,7 @@ async fn login_form(
 }
 
 /// Log out and go to the log-in page.
-#[post("/logout", tag = "pages")]
+#[post("/logout", tag = "pages", status = 303)]
 async fn logout_form(session: Session, flash: Flash) -> Response {
     session.destroy();
     flash.info("You are logged out.");
@@ -606,7 +614,7 @@ pub struct NewPassword {
 }
 
 /// Set the new password from the page's form, then go home logged in.
-#[post("/reset", tag = "pages")]
+#[post("/reset", tag = "pages", status = 303)]
 async fn reset_form(
     views: Views,
     db: Db,
