@@ -32,6 +32,7 @@
 - [Cron schedules](cron.md)
 - [Caching](caching.md)
 - [Calling other services](outbound.md)
+- [AI & language models](ai.md)
 
 # Full-stack
 

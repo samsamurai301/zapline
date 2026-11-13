@@ -177,6 +177,8 @@ pub mod session;
 // ---- application structure ---------------------------------------------------
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod admin;
+#[cfg(feature = "ai")]
+pub mod ai;
 #[cfg(feature = "cache")]
 pub mod cache;
 #[cfg(feature = "config")]
