@@ -185,7 +185,7 @@ pub mod cron;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
-#[cfg(feature = "_http-client")]
+#[cfg(any(feature = "jwks", feature = "oauth", feature = "otlp", feature = "s3"))]
 mod http_client;
 #[cfg(feature = "i18n")]
 pub mod i18n;
@@ -195,6 +195,8 @@ pub mod jobs;
 pub mod mail;
 #[cfg(feature = "otlp")]
 mod otlp;
+#[cfg(feature = "http-client")]
+pub mod outbound;
 #[cfg(feature = "redis")]
 pub mod redis;
 #[cfg(feature = "storage")]
