@@ -75,7 +75,7 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth http-client i18n redis redis-tls otlp tz chrono uuid; do
+          for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth http-client ai i18n redis redis-tls otlp tz chrono uuid; do
             echo "::group::$f"
             cargo clippy -p zapline --no-default-features --features "$f" --all-targets -- -D warnings
             echo "::endgroup::"

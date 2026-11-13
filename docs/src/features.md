@@ -46,6 +46,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE ([AI & language models](ai.md)) | `http-client` | none beyond `http-client` |
 | `http-client` | `full` | `zapline::outbound`: `HttpClient` with timeouts, retries and an SSRF guard ([Calling other services](outbound.md)) | `json` | `hyper-rustls` (hyper client, rustls), `tower-service` |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
