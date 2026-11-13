@@ -145,8 +145,13 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
         "{manifest:?}"
     );
     let config = fs::read_to_string(manifest.with_file_name(".cargo").join("config.toml")).unwrap();
-    assert!(config.contains("target-dir"), "{config}");
-    assert!(config.contains("cache/zapline/target"), "{config}");
+    let config: toml::Value = toml::from_str(&config).unwrap();
+    let target = config["build"]["target-dir"].as_str().unwrap();
+    // Compared by components: on Windows it is `...\cache\zapline\target`.
+    assert!(
+        Path::new(target).ends_with("cache/zapline/target"),
+        "{target}"
+    );
 
     let meta = cargo_metadata(&manifest);
     let package = &meta["packages"][0];
