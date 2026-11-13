@@ -3,6 +3,14 @@
 zapline has one error type, `zapline::Error`, and one result alias, `zapline::Result<T>`.
 
 ```rust
+# use zapline::prelude::*;
+# #[model]
+# struct User { id: u64 }
+# #[derive(Clone)]
+# struct Db;
+# impl Db {
+#     async fn find(&self, _id: u64) -> std::io::Result<Option<User>> { Ok(None) }
+# }
 #[get("/users/{id}")]
 async fn get_user(State(db): State<Db>, Path(id): Path<u64>) -> Result<Json<User>> {
     let user = db.find(id).await?                // any std::error::Error -> 500
@@ -24,10 +32,14 @@ async fn get_user(State(db): State<Db>, Path(id): Path<u64>) -> Result<Json<User
   `code` and `details` are omitted when unset.
 
 ```rust
+# use zapline::prelude::*;
+# use serde_json::json;
+# fn demo() -> Result<()> {
 Err(Error::conflict("email already registered")
     .with_code("email_taken")                       // stable, machine-readable
     .with_details(json!({ "field": "email" }))      // structured context
     .with_header(header::RETRY_AFTER, HeaderValue::from_static("30")))
+# }
 ```
 
 ## Customizing the error format
@@ -35,6 +47,9 @@ Err(Error::conflict("email already registered")
 Every error response includes an `ErrorReport` (status, message, code, details) in its extensions. That covers extractor rejections, handler errors, 404s and 405s. `App::error_handler` re-renders all of them in one place. For example, to emit RFC 7807 `application/problem+json`:
 
 ```rust
+# use zapline::prelude::*;
+# use zapline::ErrorReport;
+# let _app =
 App::new().error_handler(|e: &ErrorReport| {
     let body = serde_json::json!({
         "type": "about:blank",
@@ -46,6 +61,7 @@ App::new().error_handler(|e: &ErrorReport| {
     (e.status, [(header::CONTENT_TYPE, HeaderValue::from_static("application/problem+json"))], body.to_string())
         .into_response()
 })
+# ;
 ```
 
 ## Domain errors
@@ -53,6 +69,8 @@ App::new().error_handler(|e: &ErrorReport| {
 Map your own error enums into `zapline::Error` once, and `?` will work everywhere:
 
 ```rust
+# use zapline::prelude::*;
+# use zapline::db::sqlx;
 enum AppError { NotFound, Db(sqlx::Error) }
 
 impl From<AppError> for zapline::Error {
@@ -90,6 +108,9 @@ startup failed: 500 Internal Server Error: resource `my_app::Settings` is not re
 Codes are never renumbered or reused, so they are safe to search for, to match on in tests and to put in a bug report. They are diagnostics for developers: the JSON your clients see keeps its own `code` (`missing_dependency`, `invalid_json`), and the `ZL` code is never added to it.
 
 ```rust
+# use zapline::prelude::*;
+# #[derive(Debug)]
+# struct Repo;
 let err = Resources::default().dep::<Repo>().unwrap_err();
 assert_eq!(err.code(), Some("missing_dependency")); // sent to clients
 assert_eq!(err.diagnostic_code(), Some("ZL0002")); // for you
@@ -102,10 +123,14 @@ The registry lives in one file, [`crates/zapline/src/codes.in`](https://github.c
 In a debug build, `App::dev_errors()` turns every 500 and every panic into a page that says what broke, for requests from your own machine:
 
 ```rust
+# use zapline::prelude::*;
+# fn demo() -> std::io::Result<()> {
+# let routes = Routes::new();
 App::new()
     .dev_errors()        // also on with .dev_console(), and whenever ZAPLINE_DEV=1 (zapline dev sets it)
     .mount(routes)
     .run("127.0.0.1:8080")
+# }
 ```
 
 - **Browsers** (`Accept: text/html`) get an HTML page with the real error and its causes, the code and its fix, the file and line of a panic, the request with its headers (credentials hidden), and a **Copy fix prompt** block: one click copies a ready-made prompt for your AI assistant with the request, the error, the cause and the suggested fix.

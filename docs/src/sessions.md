@@ -138,11 +138,17 @@ With a database ([Databases](database.md)), keep sessions there: they survive re
 ```rust
 use zapline::cookies::key_from_env;
 use zapline::db::Database;
+# use zapline::prelude::*;
+# fn demo() -> Result<()> {
+# let _app =
 
 App::new()
     .database(Database::from_env())
     .cookie_key(key_from_env("SESSION_SECRET")?)
     .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
+# ;
+# Ok(())
+# }
 ```
 
 `key_from_env(var)` derives the cookie key from a secret of 32 or more bytes. When the variable is unset, debug builds use a fixed development key (so sessions survive `zapline dev` restarts) and release builds fail. `key_from_secret(s)` does the same derivation from a string you load yourself.

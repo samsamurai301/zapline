@@ -61,7 +61,7 @@ It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, ad
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
-```rust
+```rust,ignore
 use crate::routes::auth::CurrentUser;
 
 #[get("/api/notes")]
@@ -85,8 +85,11 @@ With the `password` feature, `zapline::auth::password` hashes and checks passwor
 ```rust
 use zapline::auth::password;
 
+# async fn demo() -> zapline::Result<()> {
 let hash = password::hash("correct horse battery staple").await?;
 assert!(password::verify("correct horse battery staple", &hash).await?);
+# Ok(())
+# }
 ```
 
 Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
@@ -97,6 +100,10 @@ With the `oauth` feature, `App::oauth` adds "log in with GitHub/Google/..." usin
 
 ```rust
 use zapline::auth::oauth::{OAuth, OAuthLogin};
+# use zapline::prelude::*;
+# use zapline::session::Session;
+# async fn find_or_create_user(_: &zapline::auth::oauth::OAuthUser) -> Result<i64> { Ok(1) }
+# fn demo() -> Result<()> {
 
 #[get("/auth/github/callback")]
 async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
@@ -110,6 +117,8 @@ async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
 let app = App::new()
     .oauth(OAuth::from_env("github")?) // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
     .mount(github_done);
+# Ok(())
+# }
 ```
 
 Send people to `/auth/github` (optionally `?next=/settings`) to start. That route redirects to the provider with a random `state` and a PKCE challenge, kept in a short-lived `HttpOnly` cookie scoped to `/auth`. On the way back, `OAuthLogin` checks the state, exchanges the code (sending the PKCE verifier) and fetches the profile. It answers `400 invalid_oauth_state` for a forged or replayed callback, `401 oauth_denied` when the user cancelled at the provider, `401 oauth_failed` when the provider rejects the code, and `404` for a provider that isn't registered. `next` is kept only when it is a local path, so it can't be used as an open redirect.

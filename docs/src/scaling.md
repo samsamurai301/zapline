@@ -17,15 +17,23 @@ use zapline::cache::Cache;
 use zapline::live::Live;
 use zapline::middleware::RateLimit;
 use zapline::redis::{Redis, RedisStore};
+# use std::time::Duration;
+# use zapline::prelude::*;
+# use zapline::session::SessionLayer;
+# fn demo() -> Result<()> {
 
 let redis = Redis::from_env()?; // REDIS_URL=redis://:password@host:6379/0
 
+# let _app =
 App::new()
     .cache(Cache::redis(redis.clone()))                      // was Cache::memory()
     .live(Live::new().redis(redis.clone()))                  // updates reach every instance
     .wrap(RateLimit::per_ip(100, Duration::from_secs(60)).redis(redis.clone()))
     .wrap(SessionLayer::new(RedisStore::new(redis.clone()))) // or database_sessions
     .redis(redis)                                            // `redis: Redis` in handlers
+# ;
+# Ok(())
+# }
 ```
 
 | Piece | With Redis | If Redis is down |
@@ -38,6 +46,8 @@ App::new()
 `Redis::cmd` runs any command, for whatever else you need to share:
 
 ```rust
+# use zapline::prelude::*;
+# use zapline::redis::Redis;
 #[post("/visits")]
 async fn visit(redis: Redis) -> Result<String> {
     let n = redis.cmd(["INCR", "visits"]).await?.int().unwrap_or(0);
@@ -79,10 +89,16 @@ REDIS_URL='rediss://:s3cret@redis.internal:6380?ca_file=/run/secrets/ca.pem&cert
 Files are read when the client is made (`Redis::new` / `Redis::from_env`), so a missing or invalid one stops the app at startup rather than on the first request. When the PEM lives in a secret rather than a file, pass it in memory instead:
 
 ```rust
+# use zapline::prelude::*;
+# use zapline::redis::Redis;
+# fn demo() -> Result<()> {
 let secret = |name: &str| std::env::var(name).map_err(|_| Error::internal(format!("{name} is not set")));
 let redis = Redis::from_env()? // REDIS_URL=rediss://...
     .with_ca_pem(secret("REDIS_CA_PEM")?)?
     .with_client_cert_pem(secret("REDIS_CLIENT_CERT")?, secret("REDIS_CLIENT_KEY")?)?;
+# let _ = redis;
+# Ok(())
+# }
 ```
 
 There is deliberately no switch to skip certificate verification: for a self-signed server, trust its certificate with `ca_file`. A handshake that fails (an unknown CA, a certificate for another name, a missing client certificate) is a `503` whose message says why, for example `TLS handshake with Redis at 10.0.0.5:6380 failed: invalid peer certificate: UnknownIssuer`.

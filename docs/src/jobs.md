@@ -64,6 +64,10 @@ All three return `Ok(true)` when the job was stored, and `Ok(false)` when it was
 Three optional items on `Job` shape how a type is queued:
 
 ```rust
+# use zapline::jobs::Job;
+# use zapline::prelude::*;
+# #[model]
+# struct ReindexProduct { product_id: i64 }
 impl Job for ReindexProduct {
     const NAME: &'static str = "reindex_product";
     const QUEUE: &'static str = "search";   // default "default"
@@ -83,6 +87,22 @@ impl Job for ReindexProduct {
 - **`QUEUE`**: by default an instance's workers take jobs from every queue its registered types use. `.queues(..)` gives each queue its own workers instead, so a flood in one can't hold up another:
 
 ```rust
+# use zapline::db::Database;
+# use zapline::jobs::Job;
+# use zapline::prelude::*;
+# #[model]
+# struct SendWelcome { user_id: i64 }
+# impl Job for SendWelcome {
+#     const NAME: &'static str = "send_welcome";
+#     async fn run(self, _res: Resources) -> Result<()> { Ok(()) }
+# }
+# #[model]
+# struct ReindexProduct { product_id: i64 }
+# impl Job for ReindexProduct {
+#     const NAME: &'static str = "reindex_product";
+#     async fn run(self, _res: Resources) -> Result<()> { Ok(()) }
+# }
+# let _app =
 App::new()
     .database(Database::from_env())
     .jobs(|queue| {
@@ -91,6 +111,7 @@ App::new()
             .register::<ReindexProduct>()
             .queues([("default", 4), ("search", 1)])   // or .queues(["default", "search"]) with .workers(n) each
     })
+# ;
 ```
 
 An instance only works the queues it lists, so a dedicated search worker is the same app started with `.queues([("search", 8)])`.
@@ -109,6 +130,7 @@ An instance only works the queues it lists, so a dedicated search worker is the 
 A failed run is retried after 5 s, 20 s, 80 s, 5 min, 21 min (capped at 1 h) until `MAX_ATTEMPTS`. Then the job stays in the table with status `failed` and its last error. Finished jobs are deleted.
 
 ```rust
+# async fn demo(jobs: zapline::jobs::Jobs) -> zapline::Result<()> {
 let stats = jobs.stats().await?;      // JobStats { queued, running, failed }
 for job in jobs.failed(20).await? {   // newest first: id, name, queue, attempts, last_error, payload
     if job.name == "obsolete_job" {
@@ -116,6 +138,9 @@ for job in jobs.failed(20).await? {   // newest first: id, name, queue, attempts
     }
 }
 let n = jobs.retry_failed().await?;   // queue every failed job again
+# let _ = (stats, n);
+# Ok(())
+# }
 ```
 
 `retry_failed` leaves a failed job alone when a newer job holds its unique key. In debug builds, the [dev console](dev-console.md) shows the queue and the latest failures, with a button that retries them all and a **Discard** button on each failed job, plus per-job counts when metrics are on and every cron job with its next enqueue.
@@ -188,6 +213,16 @@ Useful alerts: `increase(jobs_dead_total[1h]) > 0`, and a failure ratio of `rate
 With `.workers(0)` nothing runs in the background, and `run_pending` runs the due jobs on the spot, so tests are deterministic:
 
 ```rust
+# use zapline::db::Database;
+# use zapline::jobs::{Job, Jobs};
+# use zapline::prelude::*;
+# #[model]
+# struct SendWelcome { user_id: i64 }
+# impl Job for SendWelcome {
+#     const NAME: &'static str = "send_welcome";
+#     async fn run(self, _res: Resources) -> Result<()> { Ok(()) }
+# }
+# async fn demo() -> Result<()> {
 let client = App::new()
     .database(Database::sqlite_memory())
     .jobs(|queue| queue.register::<SendWelcome>().workers(0))
@@ -196,6 +231,8 @@ let jobs: Jobs = client.resources().await.require()?;
 
 client.post("/signup").send().await.assert_status(201);
 assert_eq!(jobs.run_pending().await?, 1);
+# Ok(())
+# }
 ```
 
 ## Jobs or background tasks?
