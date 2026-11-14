@@ -1565,10 +1565,10 @@ Raise the limit: App::new().body_limit(16 * 1024 * 1024); or stream the body wit
 
 ### ZL0068
 
-**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body. The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
+**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body, or a streaming body (`BodyStream`, `Multipart`) sent no data for `ServerConfig::body_idle_timeout` (30s by default). The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
 
 ```text
-Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); or stream large uploads with BodyStream or Multipart
+Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); for streaming uploads, body_idle_timeout instead
 ```
 
 ### ZL0070
@@ -8475,7 +8475,8 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `workers` | CPU count | Worker threads |
 | `runtime` | `PerCore` (Linux) | `PerCore` or `MultiThread` |
 | `header_read_timeout` | 30s | Slowloris protection; also closes idle keep-alive connections |
-| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes. Streaming bodies set their own pace |
+| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes |
+| `body_idle_timeout` | 30s | A streaming body (`BodyStream`, `Multipart`) that sends nothing for this long gets `408` and the connection closes; a slow but steady upload is unaffected |
 | `keep_alive` / `pipeline_flush` | true / false | HTTP/1.1 behavior. `pipeline_flush` batches pipelined responses (see the limitation below) |
 | `max_connections` | unlimited | Per worker. Accepting pauses at the limit. WebSockets keep their slot after the upgrade. |
 | `max_upgraded` | none | Per worker. A separate limit for WebSockets; upgrades beyond it get `503`. |
@@ -9073,9 +9074,11 @@ Honest gaps, so you can decide where it fits today:
   such clients held about 800 MiB of 4 MiB responses). axum has the same
   behavior; a reverse proxy, `max_connections`, or streaming large
   responses bounds it.
-- **Streaming bodies set their own pace.** `body_read_timeout` covers
-  buffered bodies; `BodyStream` and `Multipart` handlers should bound their
-  own uploads.
+- **Streaming bodies are limited per gap, not in total.** `body_read_timeout`
+  covers buffered bodies; `body_idle_timeout` (default 30s) answers `408` when
+  a `BodyStream` or `Multipart` upload sends nothing for that long. A slow but
+  steady upload still finishes, so handlers that must cap a whole upload's
+  duration still bound it themselves.
 - **Young code, small team.** Bugs like the `zapline ship` settings one are
   what a young project still has. The chaos suite and fuzzer exist so the
   next one is found by a test, not by a user.

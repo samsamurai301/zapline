@@ -386,6 +386,7 @@ impl Prepared {
             states: self.resources.snapshot().into(),
             body_limit: self.body_limit,
             body_timeout: self.config.body_read_timeout,
+            body_idle_timeout: self.config.body_idle_timeout,
             #[cfg(feature = "ws")]
             upgrades: None,
         });
@@ -463,6 +464,7 @@ impl AppInner {
                 states: self.shared.states.clone(),
                 body_limit: self.shared.body_limit,
                 body_timeout: self.shared.body_timeout,
+                body_idle_timeout: self.shared.body_idle_timeout,
                 #[cfg(feature = "ws")]
                 upgrades,
             }),

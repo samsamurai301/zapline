@@ -19,6 +19,8 @@ pub(crate) struct Shared {
     pub(crate) body_limit: usize,
     /// [`ServerConfig::body_read_timeout`](crate::server::ServerConfig::body_read_timeout).
     pub(crate) body_timeout: Option<std::time::Duration>,
+    /// [`ServerConfig::body_idle_timeout`](crate::server::ServerConfig::body_idle_timeout).
+    pub(crate) body_idle_timeout: Option<std::time::Duration>,
     /// The serving accept loop's WebSocket accounting (`None` in-process).
     #[cfg(feature = "ws")]
     pub(crate) upgrades: Option<crate::server::Upgrades>,
@@ -178,6 +180,12 @@ impl Request {
     /// The configured maximum buffered body size for this app.
     pub fn body_limit(&self) -> usize {
         self.shared.body_limit
+    }
+
+    /// How long a streaming body may go without data (see
+    /// [`ServerConfig::body_idle_timeout`](crate::server::ServerConfig::body_idle_timeout)).
+    pub(crate) fn body_idle_timeout(&self) -> Option<std::time::Duration> {
+        self.shared.body_idle_timeout
     }
 
     /// A route parameter by name, percent-decoded.
