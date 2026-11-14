@@ -47,6 +47,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `captcha` | `full` | `zapline::captcha`: `Captcha` (Turnstile, hCaptcha, reCAPTCHA), `App::captcha` ([Captchas](hardening.md#captcha)) | `json` | `hyper-rustls` (hyper client, rustls) |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `redis-tls` | `full` | `rediss://` URLs for the Redis client: TLS with rustls, the Mozilla root store or your own CA (`?ca_file=`, `Redis::with_ca_pem`), and an SNI override (`?sni=`) ([Running several instances](scaling.md#redis-over-tls)) | `redis` | `tokio-rustls`, `webpki-roots` |

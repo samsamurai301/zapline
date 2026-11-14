@@ -6394,6 +6394,7 @@ fn app() -> App {
 | [`SecurityHeaders`](#securityheaders) | Clickjacking, MIME sniffing, downgrade attacks, over-broad browser features | |
 | [`RateLimit`](#ratelimit) | Brute force, scraping, noisy clients | |
 | [`Idempotency`](#idempotency) | Retried `POST`s charging twice | |
+| [`Captcha`](#captcha) | Bots on signup and other public forms | `captcha` |
 | [`Compression`](#compression) | Bandwidth cost (not an attack, but it is why you want it) | `compression` |
 | [`ConcurrencyLimit`](#concurrencylimit) | Overload: sheds load instead of collapsing | |
 | [`Timeout`](#timeout) | Handlers (or dependencies) that hang | |
@@ -6613,6 +6614,54 @@ Things to know:
 - **Slow handlers keep their key.** While a handler runs, its lock is renewed every third of `.lock_timeout(..)`. If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
 - **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
 - **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. When the store is full, the oldest stored responses are dropped. Use Redis where a second run costs money.
+
+## Captcha
+
+Public forms (signup, contact, password reset) attract bots. With the `captcha` feature, a form can require a Cloudflare Turnstile, hCaptcha or Google reCAPTCHA check. The page shows the provider's widget, which puts a token in a hidden form field. The handler passes that token to `Captcha::verify`:
+
+```rust
+use serde::Deserialize;
+use zapline::captcha::Captcha;
+use zapline::prelude::*;
+
+#[derive(Deserialize)]
+struct Signup {
+    email: String,
+    #[serde(rename = "cf-turnstile-response", default)]
+    captcha: String,
+}
+
+async fn signup(captcha: Captcha, conn: ConnInfo, Form(form): Form<Signup>) -> Result<String> {
+    captcha.verify(&form.captcha, conn.remote_addr.map(|a| a.ip())).await?;
+    Ok(format!("welcome, {}", form.email))
+}
+
+fn app(secret: String) -> App {
+    App::new()
+        .captcha(Captcha::turnstile(secret))      // or ::hcaptcha / ::recaptcha
+        .post("/signup", signup)
+}
+```
+
+On the page, inside the `<form>`, add the provider's widget with your site key:
+
+```html
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="{{ site_key }}"></div>
+```
+
+| Situation | Answer |
+|---|---|
+| Valid token | `verify` returns `Ok(())` |
+| Empty token (widget not completed) | `400`, code `captcha_missing`, without calling the provider |
+| Token rejected by the provider | `400`, code `captcha_failed` |
+| Provider unreachable, too slow (`.timeout(..)`, default 10 s) or answering nonsense | `503`, code `captcha_unavailable` |
+
+- **It fails closed.** An outage at the provider blocks the form rather than letting bots through. Expect a few `503`s if the provider goes down.
+- **Field names:** `Captcha::field()` gives the field each widget posts: `cf-turnstile-response`, `h-captcha-response` or `g-recaptcha-response`.
+- **Client IP:** pass it when you know it; behind a proxy, use the IP from your `TrustedProxies`. Providers use it as one more signal.
+- **Tests and self-hosting:** `.verify_url(url)` sends verifications to a compatible endpoint instead, such as a test double. Turnstile also publishes test keys that always pass or always fail.
+- **Secrets:** keep the secret key in the environment, not in code. `Captcha`'s `Debug` output hides it.
 
 ## `Compression`
 
@@ -9200,6 +9249,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `captcha` | `full` | `zapline::captcha`: `Captcha` (Turnstile, hCaptcha, reCAPTCHA), `App::captcha` ([Captchas](hardening.md#captcha)) | `json` | `hyper-rustls` (hyper client, rustls) |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `redis-tls` | `full` | `rediss://` URLs for the Redis client: TLS with rustls, the Mozilla root store or your own CA (`?ca_file=`, `Redis::with_ca_pem`), and an SNI override (`?sni=`) ([Running several instances](scaling.md#redis-over-tls)) | `redis` | `tokio-rustls`, `webpki-roots` |
