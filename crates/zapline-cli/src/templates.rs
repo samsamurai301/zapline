@@ -188,6 +188,13 @@ pub const AUTH_LOGIN_PAGE: &str = include_str!("../templates/generate/auth/login
 pub const AUTH_FORGOT_PAGE: &str = include_str!("../templates/generate/auth/forgot.html.tmpl");
 /// Sets a new password from a reset link.
 pub const AUTH_RESET_PAGE: &str = include_str!("../templates/generate/auth/reset.html.tmpl");
+/// `zapline generate auth`: the second-factor code page.
+pub const AUTH_TWO_FACTOR_PAGE: &str =
+    include_str!("../templates/generate/auth/two_factor.html.tmpl");
+/// `zapline generate auth`: the "email me a sign-in link" page.
+pub const AUTH_LINK_PAGE: &str = include_str!("../templates/generate/auth/link.html.tmpl");
+/// `zapline generate auth`: turning two-factor login on and off.
+pub const AUTH_SECURITY_PAGE: &str = include_str!("../templates/generate/auth/security.html.tmpl");
 /// A durable job (`zapline generate job`).
 pub const JOB: &str = include_str!("../templates/generate/job.rs.tmpl");
 /// The test for a generated job.

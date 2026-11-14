@@ -104,6 +104,9 @@ pub fn files(
             ("login", templates::AUTH_LOGIN_PAGE),
             ("forgot", templates::AUTH_FORGOT_PAGE),
             ("reset", templates::AUTH_RESET_PAGE),
+            ("two_factor", templates::AUTH_TWO_FACTOR_PAGE),
+            ("link", templates::AUTH_LINK_PAGE),
+            ("security", templates::AUTH_SECURITY_PAGE),
         ] {
             files.push(OutputFile {
                 path: PathBuf::from(format!("templates/auth/{name}.html")),
@@ -132,7 +135,10 @@ pub fn patch_manifest(manifest: &str) -> Result<Option<String>> {
         .and_then(|doc| doc.get("dependencies")?.get("zapline").cloned())
         .is_some();
     let mut out = if has_zapline {
-        features::add_features(manifest, &["cookies", "mail", "oauth", "password"])?
+        features::add_features(
+            manifest,
+            &["cookies", "mail", "oauth", "password", "two-factor"],
+        )?
     } else {
         manifest.to_string()
     };
@@ -274,7 +280,7 @@ mod tests {
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
         let p = patch_manifest(m).unwrap().unwrap();
         assert!(
-            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"views\"]"),
+            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"two-factor\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
@@ -284,7 +290,7 @@ mod tests {
             .unwrap();
         assert!(
             bare.contains(
-                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\"] }"
+                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"two-factor\"] }"
             ),
             "{bare}"
         );
@@ -332,13 +338,20 @@ mod tests {
                 "templates/auth/login.html",
                 "templates/auth/forgot.html",
                 "templates/auth/reset.html",
+                "templates/auth/two_factor.html",
+                "templates/auth/link.html",
+                "templates/auth/security.html",
                 "tests/auth.rs"
             ]
         );
         assert!(all[0].contents.contains("AUTOINCREMENT"));
+        assert!(all[0].contents.contains("totp_secret TEXT"));
         assert!(all[1].contents.contains("DROP TABLE users;"));
         assert!(all[2].contents.contains("signup_form"));
-        assert!(all[7].contents.contains("use my_app::app;"));
+        assert!(all[2]
+            .contents
+            .contains("const LINK_PATH: &str = \"/login/link\";"));
+        assert!(all[10].contents.contains("use my_app::app;"));
         assert!(all[0].contents.contains("CREATE TABLE password_resets"));
         // The fullstack app already has sessions: auth doesn't add more.
         assert!(!all[2].contents.contains("database_sessions"));
@@ -363,6 +376,10 @@ mod tests {
         assert!(api[1].contents.contains(".database_sessions("));
         assert!(api[1].contents.contains(".cookie_key(key)"));
         assert!(!api[1].contents.contains("@@"));
+        assert!(api[1]
+            .contents
+            .contains("const LINK_PATH: &str = \"/api/auth/link\";"));
+        assert!(!api[1].contents.contains("two_factor_page"));
     }
 
     #[test]
