@@ -120,6 +120,14 @@ impl FromRequestParts for CurrentUser {
     }
 }
 
+/// Routes taking a `CurrentUser` document their `401` in OpenAPI (and so
+/// to `zapline fuzz`).
+impl zapline::openapi::ApiInput for CurrentUser {
+    fn describe_input(op: &mut zapline::openapi::OperationDoc) {
+        op.error_response(401, "Not logged in");
+    }
+}
+
 /// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
 async fn admins_only(mut req: Request, next: Next) -> Response {
     let user = match CurrentUser::from_request_parts(&mut req).await {

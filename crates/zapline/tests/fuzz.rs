@@ -112,7 +112,8 @@ async fn finds_a_panic_on_a_boundary_value() {
     };
     assert!(msg.contains("divide by zero"), "{msg}");
     assert!(
-        msg.contains("tests/fuzz.rs"),
+        // As the compiler spells it (backslashes on Windows).
+        msg.contains(file!()),
         "the location is reported: {msg}"
     );
     assert_eq!(f.request().uri(), "/ratio/0");

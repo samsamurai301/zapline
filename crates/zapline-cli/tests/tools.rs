@@ -432,7 +432,7 @@ mod dev {
             "{:?}",
             dev.seen[failed]
         );
-        dev.assert_absent_for("Stopping", Duration::from_millis(500));
+        dev.assert_absent_after(failed, "Stopping", Duration::from_millis(500));
 
         // Fixing the error brings the new version up.
         write_fake_main(&app, "v3");
@@ -457,7 +457,7 @@ mod dev {
         fs::write(app.join("README.md"), "docs").unwrap();
         fs::create_dir_all(app.join("target/debug")).unwrap();
         fs::write(app.join("target/debug/junk"), "x").unwrap();
-        dev.assert_absent_for("Changed", Duration::from_secs(2));
+        dev.assert_absent_after(seen_before, "Changed", Duration::from_secs(2));
         assert_eq!(
             dev.seen
                 .iter()
@@ -480,12 +480,13 @@ mod dev {
 
         let manifest = fs::read_to_string(app.join("Cargo.toml")).unwrap();
         fs::write(app.join("Cargo.toml"), format!("{manifest}\n# touched\n")).unwrap();
-        let changed = dev.wait_for("Changed", SLOW);
-        assert!(
-            dev.seen[changed].contains("Cargo.toml"),
-            "{:?}",
-            dev.seen[changed]
-        );
+        // macOS delivers file events late, so the first build may first
+        // report "Changed files changed during the build": skip ahead to
+        // the change that names the manifest.
+        let mut changed = dev.wait_for("Changed", SLOW);
+        while !dev.seen[changed].contains("Cargo.toml") {
+            changed = dev.wait_for_after(changed + 1, "Changed", SLOW);
+        }
         dev.wait_for_after(changed, "fake-app v1 running", SLOW);
 
         signal(dev.child.id(), "INT");

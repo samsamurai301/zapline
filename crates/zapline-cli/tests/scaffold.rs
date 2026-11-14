@@ -322,9 +322,11 @@ fn sql_resources_with_references_compile_and_pass() {
             "{name} did not pass:\n{tests}"
         );
     }
-    assert!(tests.contains("tests/posts.rs"), "{tests}");
-    assert!(tests.contains("tests/authors.rs"), "{tests}");
-    assert!(tests.contains("tests/reviews.rs"), "{tests}");
+    // cargo prints `Running tests\posts.rs` on Windows.
+    let sep = std::path::MAIN_SEPARATOR;
+    for file in ["posts", "authors", "reviews"] {
+        assert!(tests.contains(&format!("tests{sep}{file}.rs")), "{tests}");
+    }
 }
 
 /// `zapline routes` and `zapline openapi` against a real app built on zapline

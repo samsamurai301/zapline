@@ -37,6 +37,9 @@ impl Limit {
     }
 
     /// A permit if the limit has room.
+    // `fetch_update` is deprecated in favor of `try_update` (Rust 1.99),
+    // which is newer than the 1.88 MSRV.
+    #[allow(deprecated)]
     pub(crate) fn try_acquire(self: &Arc<Self>) -> Option<Permit> {
         self.used
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| {

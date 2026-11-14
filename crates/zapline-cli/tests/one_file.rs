@@ -18,14 +18,26 @@ use std::time::{Duration, Instant};
 
 use common::*;
 
+/// Generous waits for the (Unix-only) `zapline dev` tests.
+#[cfg(unix)]
 const SLOW: Duration = Duration::from_secs(90);
+
+/// `path` as tools print it. On Windows `canonicalize` returns the verbatim
+/// form `\\?\C:\...`; cargo and rustc print `C:\...`.
+fn plain(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+}
 
 /// A `zapline` command with its cache in `dir/cache`.
 fn zapline_in(dir: &Path) -> Command {
     let mut cmd = zapline();
     cmd.current_dir(dir)
         .env("XDG_CACHE_HOME", dir.join("cache"))
-        .env_remove("CARGO_BUILD_TARGET");
+        .env_remove("CARGO_BUILD_TARGET")
+        // CI sets CARGO_TERM_COLOR=always; plain output keeps the
+        // "Compiling app" assertions matchable.
+        .env("CARGO_TERM_COLOR", "never");
     cmd
 }
 
@@ -140,8 +152,13 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
         "{manifest:?}"
     );
     let config = fs::read_to_string(manifest.with_file_name(".cargo").join("config.toml")).unwrap();
-    assert!(config.contains("target-dir"), "{config}");
-    assert!(config.contains("cache/zapline/target"), "{config}");
+    let config: toml::Value = toml::from_str(&config).unwrap();
+    let target = config["build"]["target-dir"].as_str().unwrap();
+    // Compared by components: on Windows it is `...\cache\zapline\target`.
+    assert!(
+        Path::new(target).ends_with("cache/zapline/target"),
+        "{target}"
+    );
 
     let meta = cargo_metadata(&manifest);
     let package = &meta["packages"][0];
@@ -150,8 +167,8 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
     assert_eq!(targets.len(), 1, "{targets:?}");
     assert_eq!(targets[0]["kind"][0], "bin");
     assert_eq!(
-        Path::new(targets[0]["src_path"].as_str().unwrap()),
-        dir.join("hello.rs")
+        plain(Path::new(targets[0]["src_path"].as_str().unwrap())),
+        plain(&dir.join("hello.rs"))
     );
     let deps: Vec<&str> = package["dependencies"]
         .as_array()
@@ -164,8 +181,8 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
     }
     // Its own workspace: never absorbed by a parent workspace.
     assert_eq!(
-        Path::new(meta["workspace_root"].as_str().unwrap()),
-        manifest.parent().unwrap()
+        plain(Path::new(meta["workspace_root"].as_str().unwrap())),
+        plain(manifest.parent().unwrap())
     );
 }
 
@@ -251,7 +268,7 @@ fn run_builds_once_then_starts_without_cargo() {
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(
-        err.contains(&format!("{}:", dir.join("broken.rs").display())),
+        err.contains(&format!("{}:", plain(&dir.join("broken.rs")).display())),
         "{err}"
     );
     assert!(err.contains("could not compile `broken.rs`"), "{err}");

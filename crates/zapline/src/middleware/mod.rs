@@ -103,6 +103,7 @@ pub use builtin::{Cors, DefaultHeaders, Logger, Timeout};
 pub mod catch_panic;
 #[cfg(feature = "compression")]
 pub mod compression;
+pub mod idempotency;
 pub mod limit;
 pub mod normalize_path;
 pub mod rate_limit;
@@ -114,6 +115,7 @@ pub mod security_headers;
 pub use catch_panic::CatchPanic;
 #[cfg(feature = "compression")]
 pub use compression::{Compression, CompressionLevel};
+pub use idempotency::Idempotency;
 pub use limit::ConcurrencyLimit;
 pub use normalize_path::NormalizePath;
 pub use rate_limit::{

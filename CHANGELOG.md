@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Added
+- `middleware::Idempotency`: `Idempotency-Key` support (IETF draft) for `POST` and `PATCH`. The first request with a key runs, and retries get its stored response with `Idempotent-Replayed: true`. A retry while the first still runs gets `409`, reusing a key for a different request gets `422`, and `.required()` answers `400` to requests without a key. Keys are scoped by the `Authorization` header or by `.scope(..)`, and requests with neither skip idempotency, as do multipart uploads and bodies declared larger than the app's body limit. Responses are kept in memory, capped per client, or with `.redis(..)` shared between instances; Redis mode fails closed with `503` when Redis is down. Locks are renewed while a handler runs. Not stored: server errors, `401`/`403`/`404`/`405`, and streamed bodies; `Set-Cookie` headers are never replayed. A client whose share of the memory store is all running requests gets `429`. Keys are released when a handler panics or is cancelled.
+- OpenAPI: handlers taking `session::Flash` document a `303` redirect next to their usual success response, and `zapline g auth`'s `CurrentUser` documents its `401`, so generated apps pass `zapline fuzz`.
+
 ### Reliability
 - `ServerConfig::body_read_timeout` (default 30s): a buffered request body (`Json`, `Form`, `String`, `Bytes`, ...) that takes longer to arrive gets `408` (`ZL0068`) and the connection is closed, so clients that send bodies slowly can't hold connections and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are not limited.
 - `ServerConfig::pipeline_flush` now defaults to `false`: malformed or oversized request heads get their `400`/`414`/`431` again instead of a closed connection, and pipelined responses are never lost (the hyper 1.12 bug only bites with it on). The TechEmpower app and the benchmark servers turn it on explicitly.

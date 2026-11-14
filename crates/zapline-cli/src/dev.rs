@@ -1533,11 +1533,23 @@ mod tests {
             // A candidate told to listen behind the proxy, still starting
             // up when the wait for its handshake ends.
             let handshake_file = dir.path().join("handshake.json");
-            let child = Command::new(&exe)
-                .env(ENV_DEV_PROXY, &handshake_file)
-                .stdout(Stdio::null())
-                .spawn()
-                .unwrap();
+            // Another test forking while `app.sh` was open for writing can
+            // briefly hold it open in its child: Linux then refuses to run
+            // it ("Text file busy") until that child execs.
+            let mut tries = 0;
+            let child = loop {
+                match Command::new(&exe)
+                    .env(ENV_DEV_PROXY, &handshake_file)
+                    .stdout(Stdio::null())
+                    .spawn()
+                {
+                    Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && tries < 50 => {
+                        tries += 1;
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                    other => break other.unwrap(),
+                }
+            };
             dev.candidate = Some(Candidate {
                 child,
                 exe: exe.clone(),
