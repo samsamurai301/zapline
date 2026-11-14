@@ -327,6 +327,8 @@ fn validate(table: &toml::Table, lines: &[BlockLine<'_>], fence: usize) -> Resul
 /// ```
 /// use std::path::PathBuf;
 /// use zapline_cli::script::cache_dir_from;
+/// # // Unix paths: on Windows they have no drive and don't count as absolute.
+/// # if cfg!(windows) { return; }
 ///
 /// let env = |k: &str| (k == "HOME").then(|| "/home/ada".into());
 /// assert_eq!(cache_dir_from(env).unwrap(), PathBuf::from("/home/ada/.cache/zapline"));
