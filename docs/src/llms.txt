@@ -42,6 +42,7 @@ Conventions an assistant should follow: handlers are `async fn` with extractor a
 - [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic or [cron](cron.md) jobs with `App::schedule`, and run long-lived workers with `App::background`. 
 - [Cron schedules](https://samsamurai301.github.io/zapline/cron.html): Cron expressions say *when* something runs. zapline uses them in two places:
 - [Caching](https://samsamurai301.github.io/zapline/caching.html): `zapline::cache` (feature `cache`, included in `full`) has three tools. Pick by what you want to skip:
+- [Calling other services](https://samsamurai301.github.io/zapline/outbound.html): Use `HttpClient` from `zapline::outbound` (feature `http-client`) when a handler calls another HTTP API. It comes with production defaults, so a slow or broken 
 
 ## Full-stack
 
