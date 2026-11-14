@@ -128,6 +128,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check -p zapline -p zapline-macros -p zapline-codegen -p zapline-cli --all-features
 
+  # Line coverage of the tests, with a floor that only goes up.
+  coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - name: the floor never goes down
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --depth=1 origin "$GITHUB_BASE_REF"
+          base=$(git show FETCH_HEAD:.github/coverage-floor 2>/dev/null | tr -d '[:space:]' || echo 0)
+          head=$(tr -d '[:space:]' < .github/coverage-floor)
+          echo "floor: base $base%, this PR $head%"
+          awk -v b="${base:-0}" -v h="$head" 'BEGIN { exit !(h + 0 >= b + 0) }' \
+            || { echo "::error::.github/coverage-floor went down ($base -> $head); add tests instead"; exit 1; }
+      - run: ./scripts/coverage.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: target/lcov.info
+
   docs:
     runs-on: ubuntu-latest
     steps:
