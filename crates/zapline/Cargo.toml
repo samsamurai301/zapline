@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views",
-    "password", "mail", "storage", "cache", "oauth", "http-client", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid",
+    "password", "mail", "storage", "cache", "oauth", "http-client", "webhooks", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -60,6 +60,8 @@ s3 = ["storage", "_http-client"]
 oauth = ["json", "_http-client", "dep:sha2", "dep:getrandom"]
 # `zapline::outbound`: an HTTP(S) client with timeouts, retries and an SSRF guard.
 http-client = ["json", "_http-client", "dep:tower-service"]
+# `zapline::webhooks`: verify (Standard Webhooks, GitHub, Stripe) and send signed webhooks.
+webhooks = ["http-client", "dep:hmac", "dep:sha2", "dep:getrandom"]
 # Internal: the HTTPS client behind `s3`, `oauth`, `jwks` and `otlp`.
 _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 
