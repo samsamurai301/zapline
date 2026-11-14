@@ -7,7 +7,9 @@ not in public issues. Include a minimal reproduction and the affected version.
 You should get a reply within 72 hours. Fixes are released as patch versions
 and announced in the changelog and a GitHub security advisory.
 
-Supported versions: the latest `0.x` release.
+Supported versions: the latest `0.x` release, and the previous minor release
+while it is less than three months old (see the guide's
+[Stability & versioning](https://samsamurai301.github.io/zapline/stability.html)).
 
 ## Checking dependencies
 
