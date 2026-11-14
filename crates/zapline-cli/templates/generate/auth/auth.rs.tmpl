@@ -10,6 +10,11 @@
 //! Reset links are emailed through `SMTP_URL` and point at `APP_URL`. While
 //! developing, without `SMTP_URL`, they appear at <http://localhost:8080/_dev/mail>.
 //!
+//! Users can turn on two-factor login (an authenticator app, plus one-time
+//! recovery codes) and sign in with a link emailed to them. Every way of
+//! signing in (password, link, reset, GitHub/Google) asks for the second
+//! factor when it is on.
+//!
 //! "Continue with GitHub / Google" turns on when `GITHUB_CLIENT_ID` and
 //! `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) are set. The callback URL
 //! to register there is `{APP_URL}/auth/github/callback`.
@@ -22,8 +27,11 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use zapline::auth::magic_link::MagicLinks;
 use zapline::auth::oauth::{OAuth, OAuthLogin};
 use zapline::auth::password;
+use zapline::auth::recovery_codes;
+use zapline::auth::totp::Totp;
 // @@own_sessions
 use zapline::cookies::key_from_env;
 // own_sessions@@
@@ -55,6 +63,18 @@ pub struct SocialLogins(pub Vec<(&'static str, &'static str)>);
 
 /// How long a password-reset link works.
 const RESET_TTL: Duration = Duration::from_secs(60 * 60);
+/// How long an emailed sign-in link works.
+const LINK_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// Session keys for a sign-in waiting for its second factor: who, and since
+/// when (it expires after `PENDING_TTL`).
+const PENDING_USER: &str = "pending_user_id";
+const PENDING_AT: &str = "pending_since";
+const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
+/// Session key for a TOTP secret being set up, until a code confirms it.
+const SETUP_SECRET: &str = "totp_setup_secret";
+/// How many recovery codes a user gets.
+const RECOVERY_CODES: usize = 10;
 
 /// A registered user.
 #[model]
@@ -86,6 +106,27 @@ pub struct ResetPassword {
     pub token: String,
     #[validate(length(min = 8, max = 128))]
     pub password: String,
+}
+
+/// A code from an authenticator app, or a recovery code.
+#[model]
+pub struct TwoFactorCode {
+    #[validate(length(min = 6, max = 32))]
+    pub code: String,
+}
+
+/// What an authenticator app needs: the `otpauth://` URI (show it as a QR
+/// code) and the secret (for typing in by hand).
+#[model]
+pub struct TwoFactorSetup {
+    pub secret: String,
+    pub otpauth_uri: String,
+}
+
+/// One-time recovery codes, shown once when two-factor login is turned on.
+#[model]
+pub struct RecoveryCodes {
+    pub recovery_codes: Vec<String>,
 }
 
 /// The logged-in user, as a handler argument. Rejects with
@@ -189,19 +230,25 @@ pub fn mount(app: App) -> App {
         .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
         // own_sessions@@
         .mailer(mailer)
-        // Sign-up, log-in and password resets, rate-limited per client.
+        // Sign-up, log-in, second factors, sign-in links and password
+        // resets, rate-limited per client: each guesses a secret or sends mail.
         .nest(
             "/",
             Routes::new()
                 .mount((signup, login, forgot, reset))
+                .mount((two_factor, send_link, open_link))
                 // @@html
                 .mount((signup_form, login_form, forgot_form, reset_form))
+                .mount((two_factor_form, link_form, link_open))
                 // html@@
                 .wrap(throttle()),
         )
         .mount((logout, me))
+        .mount((two_factor_setup, two_factor_enable, two_factor_disable))
         // @@html
         .mount((signup_page, login_page, logout_form, forgot_page, reset_page))
+        .mount((two_factor_page, link_page, security_page))
+        .mount((security_setup, security_enable, security_disable))
         // html@@
         .mount((github_callback, google_callback))
         .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]));
@@ -254,9 +301,7 @@ async fn authenticate(db: &Db, session: &Session, creds: &Credentials) -> Result
     if !password::verify(creds.password.as_str(), hash).await? {
         return Err(invalid_credentials());
     }
-    let user = User { id, email };
-    start_session(db, session, &user).await?;
-    Ok(user)
+    sign_in(db, session, User { id, email }).await
 }
 
 /// Logs in the account linked to this GitHub/Google identity. The first
@@ -321,19 +366,253 @@ async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<
             user
         }
     };
+    sign_in(db, session, user).await
+}
+
+/// Signs `user` in, or, when they have two-factor login on, starts the
+/// second step: the session remembers who is half-way for `PENDING_TTL`,
+/// and the code goes to `POST /api/auth/2fa` (or the `/login/2fa` page).
+/// Every way of signing in comes through here.
+async fn sign_in(db: &Db, session: &Session, user: User) -> Result<User> {
+    let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = $1")
+        .bind(user.id)
+        .fetch_one(&**db)
+        .await?;
+    if secret.is_some() {
+        session.regenerate();
+        session.remove(USER_ID);
+        session.remove(SESSION_VERSION);
+        session.insert(PENDING_USER, user.id)?;
+        session.insert(PENDING_AT, unix_now())?;
+        return Err(two_factor_required());
+    }
     start_session(db, session, &user).await?;
     Ok(user)
 }
 
 async fn start_session(db: &Db, session: &Session, user: &User) -> Result<()> {
-    let version: i64 = sqlx::query_scalar("SELECT session_version FROM users WHERE id = $1")
-        .bind(user.id)
-        .fetch_one(&**db)
-        .await?;
+    // Counting the sign-in also uses up any emailed sign-in link.
+    let version: i64 = sqlx::query_scalar(
+        "UPDATE users SET login_count = login_count + 1 WHERE id = $1 RETURNING session_version",
+    )
+    .bind(user.id)
+    .fetch_one(&**db)
+    .await?;
     // A fresh session id on login prevents session fixation.
     session.regenerate();
+    session.remove(PENDING_USER);
+    session.remove(PENDING_AT);
     session.insert(USER_ID, user.id)?;
     session.insert(SESSION_VERSION, version)
+}
+
+fn two_factor_required() -> Error {
+    Error::new(StatusCode::UNAUTHORIZED, "enter the code from your authenticator app")
+        .with_code("two_factor_required")
+}
+
+fn code_invalid() -> Error {
+    Error::new(StatusCode::UNAUTHORIZED, "that code isn't right").with_code("code_invalid")
+}
+
+// ---- two-factor login ------------------------------------------------------------
+
+/// A user's two-factor columns.
+#[derive(sqlx::FromRow)]
+struct TwoFactorState {
+    email: String,
+    totp_secret: Option<String>,
+    totp_last_step: Option<i64>,
+    recovery_codes: String,
+}
+
+async fn two_factor_state(db: &Db, id: i64) -> Result<Option<TwoFactorState>> {
+    Ok(sqlx::query_as::<_, TwoFactorState>(
+        "SELECT email, totp_secret, totp_last_step, recovery_codes FROM users WHERE id = $1",
+    )
+    .bind(id)
+    .fetch_optional(&**db)
+    .await?)
+}
+
+/// Uses up `code` for user `id`: a TOTP code newer than the last accepted
+/// one, or an unused recovery code. The update is conditional on the row
+/// still holding what was read, so two requests can't use one code. Returns
+/// whether the code was accepted.
+async fn use_code(db: &Db, id: i64, state: &TwoFactorState, code: &str) -> Result<bool> {
+    let Some(secret) = &state.totp_secret else {
+        return Ok(false);
+    };
+    let totp = Totp::from_base32(secret)?;
+    let last = state.totp_last_step.map(|s| s as u64);
+    if let Some(step) = totp.verify(code, last) {
+        let used = sqlx::query(
+            "UPDATE users SET totp_last_step = $1 \
+             WHERE id = $2 AND (totp_last_step IS NULL OR totp_last_step < $1)",
+        )
+        .bind(step as i64)
+        .bind(id)
+        .execute(&**db)
+        .await?;
+        return Ok(used.rows_affected() == 1);
+    }
+    let mut hashes: Vec<String> = state.recovery_codes.lines().map(str::to_owned).collect();
+    if let Some(i) = recovery_codes::find(code, &hashes) {
+        hashes.remove(i);
+        let used = sqlx::query("UPDATE users SET recovery_codes = $1 WHERE id = $2 AND recovery_codes = $3")
+            .bind(hashes.join("\n"))
+            .bind(id)
+            .bind(&state.recovery_codes)
+            .execute(&**db)
+            .await?;
+        return Ok(used.rows_affected() == 1);
+    }
+    Ok(false)
+}
+
+/// The second step of signing in: checks the code for the pending sign-in
+/// and completes it.
+async fn complete_two_factor(db: &Db, session: &Session, code: &str) -> Result<User> {
+    let (Some(id), Some(since)) = (session.get::<i64>(PENDING_USER), session.get::<i64>(PENDING_AT)) else {
+        return Err(login_required());
+    };
+    if unix_now() - since > PENDING_TTL.as_secs() as i64 {
+        session.remove(PENDING_USER);
+        session.remove(PENDING_AT);
+        return Err(login_required());
+    }
+    let Some(state) = two_factor_state(db, id).await? else {
+        return Err(login_required());
+    };
+    if !use_code(db, id, &state, code).await? {
+        return Err(code_invalid());
+    }
+    let user = User { id, email: state.email };
+    start_session(db, session, &user).await?;
+    Ok(user)
+}
+
+/// The name authenticator apps show for this app (`APP_NAME`).
+fn issuer() -> String {
+    std::env::var("APP_NAME").unwrap_or_else(|_| "@@package@@".into())
+}
+
+/// Starts turning two-factor login on: a new secret, kept in the session
+/// until a code from the user's app confirms it.
+fn begin_two_factor(session: &Session, user: &User) -> Result<TwoFactorSetup> {
+    let totp = Totp::generate();
+    session.insert(SETUP_SECRET, totp.secret_base32())?;
+    Ok(TwoFactorSetup {
+        secret: totp.secret_base32(),
+        otpauth_uri: totp.otpauth_uri(&issuer(), &user.email),
+    })
+}
+
+/// Turns two-factor login on once `code` proves the app is set up, and
+/// returns the recovery codes (shown once; only their hashes are stored).
+/// Other sessions of the account end.
+async fn enable_two_factor(db: &Db, session: &Session, user: &User, code: &str) -> Result<Vec<String>> {
+    let Some(secret) = session.get::<String>(SETUP_SECRET) else {
+        return Err(Error::bad_request("start the setup first").with_code("setup_missing"));
+    };
+    let Some(step) = Totp::from_base32(&secret)?.verify(code, None) else {
+        return Err(code_invalid());
+    };
+    let codes = recovery_codes::generate(RECOVERY_CODES);
+    let hashes: Vec<String> = codes.iter().map(|c| recovery_codes::hash(c)).collect();
+    sqlx::query(
+        "UPDATE users SET totp_secret = $1, totp_last_step = $2, recovery_codes = $3, \
+         session_version = session_version + 1 WHERE id = $4",
+    )
+    .bind(&secret)
+    .bind(step as i64)
+    .bind(hashes.join("\n"))
+    .bind(user.id)
+    .execute(&**db)
+    .await?;
+    session.remove(SETUP_SECRET);
+    start_session(db, session, user).await?;
+    Ok(codes)
+}
+
+/// Turns two-factor login off, with a current code (or a recovery code) so
+/// a stolen session alone can't. Other sessions of the account end.
+async fn disable_two_factor(db: &Db, session: &Session, user: &User, code: &str) -> Result<()> {
+    let Some(state) = two_factor_state(db, user.id).await? else {
+        return Err(login_required());
+    };
+    if state.totp_secret.is_none() {
+        return Ok(());
+    }
+    if !use_code(db, user.id, &state, code).await? {
+        return Err(code_invalid());
+    }
+    sqlx::query(
+        "UPDATE users SET totp_secret = NULL, totp_last_step = NULL, recovery_codes = '', \
+         session_version = session_version + 1 WHERE id = $1",
+    )
+    .bind(user.id)
+    .execute(&**db)
+    .await?;
+    start_session(db, session, user).await
+}
+
+/// Whether `user` has two-factor login on.
+async fn has_two_factor(db: &Db, user: &User) -> Result<bool> {
+    Ok(two_factor_state(db, user.id).await?.is_some_and(|s| s.totp_secret.is_some()))
+}
+
+// ---- sign-in links ---------------------------------------------------------------
+
+/// Emails a sign-in link if `email` has an account; does nothing otherwise,
+/// so callers answer the same either way. The link is bound to the
+/// account's sign-in count: it works once, and not after another sign-in.
+async fn send_sign_in_link(
+    db: &Db,
+    links: &MagicLinks,
+    mail: &Mailer,
+    tasks: &BackgroundTasks,
+    email: &str,
+) -> Result<()> {
+    let email = email.trim().to_lowercase();
+    let row: Option<(i64, i64)> = sqlx::query_as("SELECT id, login_count FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_optional(&**db)
+        .await?;
+    let Some((id, count)) = row else {
+        return Ok(());
+    };
+    let token = links.issue(&id.to_string(), "sign-in", &count.to_string(), LINK_TTL);
+    let link = format!("{}{LINK_PATH}/{token}", app_url());
+    let message = Email::to(email).subject("Your sign-in link").text(format!(
+        "Sign in with this link (it works for 15 minutes, once):\n{link}\n\n\
+         If you didn't ask for it, ignore this email.\n"
+    ));
+    let mail = mail.clone();
+    tasks.spawn(async move { mail.send(message).await });
+    Ok(())
+}
+
+/// Signs in with an emailed link. The link came by email, so it also proves
+/// the address.
+async fn sign_in_with_link(db: &Db, session: &Session, links: &MagicLinks, token: &str) -> Result<User> {
+    let id: i64 = MagicLinks::user_of(token)
+        .and_then(|id| id.parse().ok())
+        .ok_or_else(|| Error::bad_request("this link is invalid or was already used").with_code("link_invalid"))?;
+    let row: Option<(String, i64)> = sqlx::query_as("SELECT email, login_count FROM users WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&**db)
+        .await?;
+    let count = row.as_ref().map(|(_, count)| count.to_string());
+    links.verify(token, "sign-in", |_| count)?;
+    let Some((email, _)) = row else {
+        return Err(login_required());
+    };
+    sqlx::query("UPDATE users SET email_verified = TRUE WHERE id = $1")
+        .bind(id)
+        .execute(&**db)
+        .await?;
+    sign_in(db, session, User { id, email }).await
 }
 
 fn invalid_credentials() -> Error {
@@ -401,9 +680,17 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
         .bind(user_id)
         .execute(&**db)
         .await?;
-    start_session(db, session, &user).await?;
-    Ok(user)
+    // A reset doesn't skip the second factor: a stolen inbox isn't enough.
+    sign_in(db, session, user).await
 }
+
+/// Where emailed sign-in links point.
+// @@html
+const LINK_PATH: &str = "/login/link";
+// html@@
+// @@api
+const LINK_PATH: &str = "/api/auth/link";
+// api@@
 
 /// The public address of the app, for links in emails (`APP_URL`).
 fn app_url() -> String {
@@ -446,15 +733,90 @@ async fn logout(session: Session) -> StatusCode {
 /// Back from GitHub: log in and go on.
 #[get("/auth/github/callback", tag = "pages")]
 async fn github_callback(db: Db, session: Session, oauth: OAuthLogin) -> Result<Redirect> {
-    social_login(&db, &session, &oauth).await?;
-    Ok(Redirect::to(oauth.next.as_deref().unwrap_or("/")))
+    social_callback(&db, &session, &oauth).await
 }
 
 /// Back from Google: log in and go on.
 #[get("/auth/google/callback", tag = "pages")]
 async fn google_callback(db: Db, session: Session, oauth: OAuthLogin) -> Result<Redirect> {
-    social_login(&db, &session, &oauth).await?;
-    Ok(Redirect::to(oauth.next.as_deref().unwrap_or("/")))
+    social_callback(&db, &session, &oauth).await
+}
+
+async fn social_callback(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<Redirect> {
+    match social_login(db, session, oauth).await {
+        Ok(_) => Ok(Redirect::to(oauth.next.as_deref().unwrap_or("/"))),
+        // @@html
+        Err(e) if e.code() == Some("two_factor_required") => Ok(Redirect::to("/login/2fa")),
+        // html@@
+        Err(e) => Err(e),
+    }
+}
+
+/// Finish signing in with a code from the authenticator app, or a recovery
+/// code, after `login` answered `401 two_factor_required`.
+#[post("/api/auth/2fa", tag = "auth")]
+async fn two_factor(
+    db: Db,
+    session: Session,
+    Valid(Json(form)): Valid<Json<TwoFactorCode>>,
+) -> Result<Json<User>> {
+    Ok(Json(complete_two_factor(&db, &session, &form.code).await?))
+}
+
+/// Start turning two-factor login on: a secret for the authenticator app.
+#[post("/api/auth/2fa/setup", tag = "auth")]
+async fn two_factor_setup(session: Session, CurrentUser(user): CurrentUser) -> Result<Json<TwoFactorSetup>> {
+    Ok(Json(begin_two_factor(&session, &user)?))
+}
+
+/// Confirm the setup with a code from the app: two-factor login is on, and
+/// these recovery codes are shown once.
+#[post("/api/auth/2fa/enable", tag = "auth")]
+async fn two_factor_enable(
+    db: Db,
+    session: Session,
+    CurrentUser(user): CurrentUser,
+    Valid(Json(form)): Valid<Json<TwoFactorCode>>,
+) -> Result<Json<RecoveryCodes>> {
+    let recovery_codes = enable_two_factor(&db, &session, &user, &form.code).await?;
+    Ok(Json(RecoveryCodes { recovery_codes }))
+}
+
+/// Turn two-factor login off, with a current code or a recovery code.
+#[post("/api/auth/2fa/disable", tag = "auth", status = 204)]
+async fn two_factor_disable(
+    db: Db,
+    session: Session,
+    CurrentUser(user): CurrentUser,
+    Valid(Json(form)): Valid<Json<TwoFactorCode>>,
+) -> Result<StatusCode> {
+    disable_two_factor(&db, &session, &user, &form.code).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Email a sign-in link. Answers 202 whether or not the account exists.
+#[post("/api/auth/link", tag = "auth", status = 202)]
+async fn send_link(
+    db: Db,
+    links: MagicLinks,
+    mail: Mailer,
+    tasks: BackgroundTasks,
+    Valid(Json(form)): Valid<Json<ForgotPassword>>,
+) -> Result<StatusCode> {
+    send_sign_in_link(&db, &links, &mail, &tasks, &form.email).await?;
+    Ok(StatusCode::ACCEPTED)
+}
+
+/// Sign in with the token from an emailed link (`401 two_factor_required`
+/// when the account has two-factor login on).
+#[get("/api/auth/link/{token}", tag = "auth")]
+async fn open_link(
+    db: Db,
+    session: Session,
+    links: MagicLinks,
+    Path(token): Path<String>,
+) -> Result<Json<User>> {
+    Ok(Json(sign_in_with_link(&db, &session, &links, &token).await?))
 }
 
 /// The logged-in user.
@@ -553,6 +915,7 @@ async fn login_form(
             flash.success("You are logged in.");
             Ok(flash.redirect("/"))
         }
+        Err(e) if e.code() == Some("two_factor_required") => Ok(flash.redirect("/login/2fa")),
         // "wrong email or password", above the fields.
         Err(e) if e.status().is_client_error() => {
             views.render_invalid("auth/login.html", ctx, Invalid::new(FormErrors::from_error(&e), &creds))
@@ -634,8 +997,182 @@ async fn reset_form(
             flash.success("Your password is changed and you are logged in.");
             Ok(flash.redirect("/"))
         }
+        Err(e) if e.code() == Some("two_factor_required") => {
+            flash.success("Your password is changed.");
+            Ok(flash.redirect("/login/2fa"))
+        }
         Err(e) if e.status().is_client_error() => {
             views.render_invalid("auth/reset.html", ctx, Invalid { errors: FormErrors::from_error(&e), ..Invalid::default() })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+// ---- two-factor and sign-in link pages ------------------------------------------
+
+/// The second step of logging in: the code page (back to the log-in page
+/// when nothing is waiting for a code).
+#[get("/login/2fa", tag = "pages")]
+async fn two_factor_page(views: Views, session: Session, flash: Flash) -> Result<Response> {
+    if session.get::<i64>(PENDING_USER).is_none() {
+        return Ok(flash.redirect("/login"));
+    }
+    Ok(views.render("auth/two_factor.html", context! {})?.into_response())
+}
+
+/// Check the code and finish logging in.
+#[post("/login/2fa", tag = "pages")]
+async fn two_factor_form(
+    views: Views,
+    db: Db,
+    session: Session,
+    flash: Flash,
+    ValidForm(form): ValidForm<TwoFactorCode>,
+) -> Result<Response> {
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("auth/two_factor.html", context! {}, invalid),
+    };
+    match complete_two_factor(&db, &session, &form.code).await {
+        Ok(_) => {
+            flash.success("You are logged in.");
+            Ok(flash.redirect("/"))
+        }
+        // The pending log-in expired: start again.
+        Err(e) if e.code() == Some("login_required") => {
+            flash.error("That took too long. Log in again.");
+            Ok(flash.redirect("/login"))
+        }
+        Err(e) if e.status().is_client_error() => {
+            let errors = FormErrors::one("code", "isn't right");
+            views.render_invalid("auth/two_factor.html", context! {}, Invalid { errors, ..Invalid::default() })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// The "email me a sign-in link" page.
+#[get("/login/link", tag = "pages")]
+async fn link_page(views: Views) -> Result<Html<String>> {
+    views.render("auth/link.html", context! {})
+}
+
+/// Send the sign-in link and say so, whether or not the account exists.
+#[post("/login/link", tag = "pages")]
+async fn link_form(
+    views: Views,
+    db: Db,
+    links: MagicLinks,
+    mail: Mailer,
+    tasks: BackgroundTasks,
+    hx: HxRequest,
+    ValidForm(form): ValidForm<ForgotPassword>,
+) -> Result<Response> {
+    let form = match form {
+        Ok(form) => form,
+        Err(invalid) => return views.render_invalid("auth/link.html", context! {}, invalid),
+    };
+    send_sign_in_link(&db, &links, &mail, &tasks, &form.email).await?;
+    let ctx = context! { sent => true, email => form.email };
+    Ok(views.page_or_block(&hx, "auth/link.html", "form", ctx)?.into_response())
+}
+
+/// The link in the email: log in and go home (or on to the code page).
+#[get("/login/link/{token}", tag = "pages")]
+async fn link_open(
+    views: Views,
+    db: Db,
+    session: Session,
+    flash: Flash,
+    links: MagicLinks,
+    Path(token): Path<String>,
+) -> Result<Response> {
+    match sign_in_with_link(&db, &session, &links, &token).await {
+        Ok(_) => {
+            flash.success("You are logged in.");
+            Ok(flash.redirect("/"))
+        }
+        Err(e) if e.code() == Some("two_factor_required") => Ok(flash.redirect("/login/2fa")),
+        // Expired or used: offer a new link.
+        Err(e) if e.status().is_client_error() => {
+            let ctx = context! { link_error => e.message().to_string() };
+            Ok((StatusCode::BAD_REQUEST, views.render("auth/link.html", ctx)?).into_response())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Account security: turn two-factor login on or off.
+#[get("/account/security", tag = "pages")]
+async fn security_page(views: Views, db: Db, flash: Flash, user: Option<CurrentUser>) -> Result<Response> {
+    let Some(CurrentUser(user)) = user else {
+        flash.info("Log in to see your account's security settings.");
+        return Ok(flash.redirect("/login"));
+    };
+    let enabled = has_two_factor(&db, &user).await?;
+    Ok(views.render("auth/security.html", context! { enabled })?.into_response())
+}
+
+/// Start the setup: show the secret to scan or type into the app.
+#[post("/account/security/setup", tag = "pages")]
+async fn security_setup(views: Views, session: Session, CurrentUser(user): CurrentUser) -> Result<Html<String>> {
+    let setup = begin_two_factor(&session, &user)?;
+    views.render("auth/security.html", context! { setup => setup })
+}
+
+/// Confirm the setup with a code; show the recovery codes once.
+#[post("/account/security/enable", tag = "pages")]
+async fn security_enable(
+    views: Views,
+    db: Db,
+    session: Session,
+    CurrentUser(user): CurrentUser,
+    ValidForm(form): ValidForm<TwoFactorCode>,
+) -> Result<Response> {
+    let code = match form {
+        Ok(form) => form.code,
+        Err(_) => String::new(),
+    };
+    match enable_two_factor(&db, &session, &user, &code).await {
+        Ok(codes) => Ok(views
+            .render("auth/security.html", context! { enabled => true, recovery_codes => codes })?
+            .into_response()),
+        Err(e) if e.code() == Some("code_invalid") => {
+            // Show the same secret again with the error, so the user can retry.
+            let secret = session.get::<String>(SETUP_SECRET).unwrap_or_default();
+            let setup = Totp::from_base32(&secret).ok().map(|totp| TwoFactorSetup {
+                secret: totp.secret_base32(),
+                otpauth_uri: totp.otpauth_uri(&issuer(), &user.email),
+            });
+            let errors = FormErrors::one("code", "isn't right");
+            views.render_invalid("auth/security.html", context! { setup => setup }, Invalid { errors, ..Invalid::default() })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Turn two-factor login off with a current code.
+#[post("/account/security/disable", tag = "pages")]
+async fn security_disable(
+    views: Views,
+    db: Db,
+    session: Session,
+    flash: Flash,
+    CurrentUser(user): CurrentUser,
+    ValidForm(form): ValidForm<TwoFactorCode>,
+) -> Result<Response> {
+    let code = match form {
+        Ok(form) => form.code,
+        Err(_) => String::new(),
+    };
+    match disable_two_factor(&db, &session, &user, &code).await {
+        Ok(()) => {
+            flash.info("Two-factor login is off.");
+            Ok(flash.redirect("/account/security"))
+        }
+        Err(e) if e.code() == Some("code_invalid") => {
+            let errors = FormErrors::one("code", "isn't right");
+            views.render_invalid("auth/security.html", context! { enabled => true }, Invalid { errors, ..Invalid::default() })
         }
         Err(e) => Err(e),
     }

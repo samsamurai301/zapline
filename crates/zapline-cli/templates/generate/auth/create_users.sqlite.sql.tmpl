@@ -3,11 +3,21 @@ CREATE TABLE users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     email TEXT NOT NULL UNIQUE,
     password_hash TEXT NOT NULL,
-    -- Bumped when the password changes, which ends every other session.
-    -- Set once the owner proves the address: a used reset link, or a
-    -- GitHub/Google login with that verified email. Admin access needs it.
+    -- Set once the owner proves the address: a used reset or sign-in link,
+    -- or a GitHub/Google login with that verified email. Admin access needs it.
     email_verified INTEGER NOT NULL DEFAULT 0,
+    -- Bumped when the password or two-factor login changes, which ends every
+    -- other session.
     session_version INTEGER NOT NULL DEFAULT 0,
+    -- Two-factor login: the TOTP secret (base32) once it is turned on, the
+    -- time step of the last accepted code (each code works once), and the
+    -- SHA-256 hashes of unused recovery codes, one per line.
+    totp_secret TEXT,
+    totp_last_step BIGINT,
+    recovery_codes TEXT NOT NULL DEFAULT '',
+    -- Counts sign-ins. Emailed sign-in links are bound to it, so each one
+    -- works once.
+    login_count INTEGER NOT NULL DEFAULT 0,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
