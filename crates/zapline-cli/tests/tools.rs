@@ -432,7 +432,7 @@ mod dev {
             "{:?}",
             dev.seen[failed]
         );
-        dev.assert_absent_for("Stopping", Duration::from_millis(500));
+        dev.assert_absent_after(failed, "Stopping", Duration::from_millis(500));
 
         // Fixing the error brings the new version up.
         write_fake_main(&app, "v3");
@@ -457,7 +457,7 @@ mod dev {
         fs::write(app.join("README.md"), "docs").unwrap();
         fs::create_dir_all(app.join("target/debug")).unwrap();
         fs::write(app.join("target/debug/junk"), "x").unwrap();
-        dev.assert_absent_for("Changed", Duration::from_secs(2));
+        dev.assert_absent_after(seen_before, "Changed", Duration::from_secs(2));
         assert_eq!(
             dev.seen
                 .iter()
