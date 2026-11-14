@@ -4162,6 +4162,71 @@ events.addEventListener("done", () => events.close());
 - **Refusals:** Claude's safety classifiers can decline a request. For the models that support it (Claude Opus 5.5, Opus 5, Sonnet 5.5, Fable 5.1 and 5.2), `Llm` opts into Anthropic's server-side fallback by default: a declined request is retried on a fallback model in the same call, and `reply.model` says which model answered. Turn it off with `.refusal_fallbacks(false)` to get `StopReason::Refusal` back instead.
 - **Secrets:** the API key never appears in `Debug` output or logs.
 
+## Tools
+
+Give the model functions it can call: look up an order, check stock, fetch the weather. A tool is a Rust function. Its argument type, a `#[model]` struct, becomes the JSON schema the model sees, and doc comments on its fields become their descriptions:
+
+```rust
+use zapline::ai::{Llm, ToolContext, Tools};
+use zapline::prelude::*;
+
+#[model]
+struct OrderId {
+    /// The order number, like "A-1042".
+    id: String,
+}
+
+fn tools() -> Tools {
+    Tools::new().tool("order_status", "Where an order is.", |order: OrderId, cx: ToolContext| async move {
+        // `cx.state::<T>()` reaches the app's state (a database pool, say),
+        // as handlers do.
+        let _ = cx;
+        Ok(format!("Order {} shipped yesterday.", order.id))
+    })
+}
+
+async fn support(llm: Llm, cx: ToolContext, question: String) -> Result<String> {
+    let reply = llm.chat().user(question).run(&tools(), &cx).await?;
+    Ok(reply.text)
+}
+```
+
+- **The loop:** `chat.run(&tools, &cx)` sends the request with the tools, runs every tool the model calls (calls in one turn run concurrently), sends the results back, and repeats until the model answers. `reply.tool_calls` records each call. `reply.usage` adds up every turn. It works with Claude and with OpenAI-compatible APIs.
+- **Limits:** at most 10 turns and 50 tool calls. A model that keeps going gets `502` (code `llm_tool_limit`).
+- **Failures go back to the model** as a failed tool call, so it can recover or tell the user. That covers bad arguments, unknown tools and errors your tool returns. A server error (`5xx`) is reported only as "the tool failed", so internal details stay on your server.
+- **Tool results are data, not instructions.** Text a tool returns (from users, from the web) reaches the model. Give tools no more power than any user of the app should have, and check permissions inside the tool, not in the prompt.
+
+## MCP: tools for other AI apps
+
+The same `Tools` can be served over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude Desktop, Claude Code and other MCP clients can call them:
+
+```rust
+use zapline::ai::{ToolContext, Tools};
+use zapline::prelude::*;
+
+#[model]
+struct Add {
+    a: i64,
+    b: i64,
+}
+
+fn app() -> App {
+    let tools = Tools::new().tool("add", "Add two numbers.", |x: Add, _cx: ToolContext| async move {
+        Ok(x.a + x.b)
+    });
+    App::new().mcp("/mcp", tools)
+}
+```
+
+- **Transport:** MCP's Streamable HTTP, answering with JSON. `POST /mcp` handles `initialize`, `ping`, `tools/list` and `tools/call`. Notifications get `202`, and `GET` gets `405`, because the server sends no event stream.
+- **Cross-origin requests are refused** (`403`), as the MCP spec requires, so a web page can't reach your MCP server through the visitor's browser (DNS rebinding).
+- **To require a login,** mount it in a group with your authentication: `.nest("/", Routes::new().mcp("/mcp", tools).wrap(auth))`. Tools get the app's state through `ToolContext`, as in `run`.
+- **Connect a client:**
+
+  ```sh
+  claude mcp add --transport http my-app http://localhost:8080/mcp
+  ```
+
 
 ---
 
@@ -9354,7 +9419,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
-| `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE ([AI & language models](ai.md)) | `http-client` | none beyond `http-client` |
+| `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE, typed `Tools` and `App::mcp` ([AI & language models](ai.md)) | `http-client`, `openapi` | none beyond `http-client` |
 | `http-client` | `full` | `zapline::outbound`: `HttpClient` with timeouts, retries and an SSRF guard ([Calling other services](outbound.md)) | `json` | `hyper-rustls` (hyper client, rustls), `tower-service` |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |

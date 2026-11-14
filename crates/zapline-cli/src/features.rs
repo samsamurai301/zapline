@@ -325,9 +325,9 @@ pub const FEATURES: &[Feature] = &[
         name: "ai",
         description: "Claude and OpenAI-compatible LLMs, streamed to the browser",
         paths: &["ai"],
-        items: &["Llm", "Chat", "Reply", "TokenStream", "Effort"],
+        items: &["Llm", "Chat", "Reply", "TokenStream", "Effort", "Tools", "ToolContext"],
         methods: &[],
-        implies: &["http-client"],
+        implies: &["http-client", "openapi"],
         usage: "App::new().state(Llm::from_env()?), then llm.chat().user(q).send().await?",
     },
     Feature {
