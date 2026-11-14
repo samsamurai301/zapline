@@ -61,7 +61,7 @@ oauth = ["json", "_http-client", "dep:sha2", "dep:getrandom"]
 # `zapline::outbound`: an HTTP(S) client with timeouts, retries and an SSRF guard.
 http-client = ["json", "_http-client", "dep:tower-service"]
 # `zapline::ai`: Claude and OpenAI-compatible LLMs, with streaming to SSE.
-ai = ["http-client"]
+ai = ["http-client", "openapi"]
 # Internal: the HTTPS client behind `s3`, `oauth`, `jwks` and `otlp`.
 _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 
