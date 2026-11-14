@@ -45,6 +45,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |

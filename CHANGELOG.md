@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Added
+- Two-factor login (feature `two-factor`): `auth::totp::Totp` generates secrets and `otpauth://` URIs, and checks RFC 6238 codes with one step of clock drift, refusing reused codes when given the last accepted step. `auth::recovery_codes` generates unambiguous one-time codes, stores SHA-256 hashes, and matches them loosely.
+- `auth::magic_link::MagicLinks` (feature `cookies`): signed, expiring tokens for sign-in links, email confirmation and invitations, bound to a value that changes when they're used, so they're single-use without a table. As a handler argument it uses the app's cookie key.
 - `middleware::Idempotency`: `Idempotency-Key` support (IETF draft) for `POST` and `PATCH`. The first request with a key runs, and retries get its stored response with `Idempotent-Replayed: true`. A retry while the first still runs gets `409`, reusing a key for a different request gets `422`, and `.required()` answers `400` to requests without a key. Keys are scoped by the `Authorization` header or by `.scope(..)`, and requests with neither skip idempotency, as do multipart uploads. Responses are kept in memory, capped per client, or with `.redis(..)` shared between instances; Redis mode fails closed with `503` when Redis is down. Locks are renewed while a handler runs. Not stored: server errors, `401`/`403`/`404`/`405`, responses that set cookies, and streamed bodies. Keys are released when a handler panics or is cancelled.
 - OpenAPI: handlers taking `session::Flash` document a `303` redirect next to their usual success response, and `zapline g auth`'s `CurrentUser` documents its `401`, so generated apps pass `zapline fuzz`.
 
