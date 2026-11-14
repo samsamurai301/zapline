@@ -478,37 +478,92 @@ async fn rejections_that_may_change_are_not_stored() {
 }
 
 #[tokio::test]
-async fn responses_that_set_cookies_are_not_stored() {
+async fn cookies_reach_the_first_response_only() {
     let runs = Arc::new(AtomicUsize::new(0));
     let r = runs.clone();
     let c = App::new()
         .wrap(Idempotency::new())
-        .post("/login", move || {
+        .post("/charge", move || {
             r.fetch_add(1, Ordering::SeqCst);
             async {
                 (
                     [(
                         HeaderName::from_static("set-cookie"),
-                        HeaderValue::from_static("sid=secret"),
+                        HeaderValue::from_static("sid=rolled"),
                     )],
-                    "welcome",
+                    "charged",
                 )
             }
         })
         .test();
     let send = || {
-        c.post("/login")
+        c.post("/charge")
             .bearer("client")
             .header("idempotency-key", "c")
             .send()
     };
-    assert_eq!(send().await.header("set-cookie"), Some("sid=secret"));
-    // A retry (say the first answer was lost) logs in again and gets its
-    // cookie, instead of a replay without one.
+    assert_eq!(send().await.header("set-cookie"), Some("sid=rolled"));
+    // Apps that refresh a session cookie on every response still get
+    // replays, and a replay never hands out a session.
     let retry = send().await;
-    assert_eq!(retry.header("set-cookie"), Some("sid=secret"));
-    assert_eq!(retry.header("idempotent-replayed"), None);
-    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(retry.header("idempotent-replayed"), Some("true"));
+    assert_eq!(retry.text(), "charged");
+    assert_eq!(retry.header("set-cookie"), None);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn a_client_with_only_running_requests_gets_429_not_others() {
+    // max_keys 10: each scope may hold 1.
+    let c = App::new()
+        .wrap(Idempotency::new().max_keys(10))
+        .post("/slow", || async {
+            tokio::time::sleep(Duration::from_millis(300)).await;
+            "done"
+        })
+        .test();
+    let send = |who: &'static str, key: &'static str| {
+        c.post("/slow")
+            .bearer(who)
+            .header("idempotency-key", key)
+            .send()
+    };
+    let later = |who, key| async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        send(who, key).await
+    };
+    let (first, same_client, other) =
+        tokio::join!(send("a", "1"), later("a", "2"), later("b", "1"));
+    assert_eq!(first.text(), "done");
+    assert_eq!(same_client.status(), 429);
+    assert!(same_client
+        .text()
+        .contains(r#""code":"idempotency_keys_exhausted""#));
+    assert_eq!(other.text(), "done", "other clients are unaffected");
+}
+
+#[tokio::test]
+async fn bodies_over_the_app_limit_are_left_to_their_route() {
+    let c = App::new()
+        .body_limit(8)
+        .wrap(Idempotency::new())
+        .post("/upload", |body: BodyStream| async move {
+            let mut body = body.with_limit(1024);
+            let mut n = 0;
+            while let Some(chunk) = body.chunk().await? {
+                n += chunk.len();
+            }
+            Ok::<_, Error>(format!("{n} bytes"))
+        })
+        .test();
+    let r = c
+        .post("/upload")
+        .bearer("client")
+        .header("idempotency-key", "big")
+        .body("x".repeat(100))
+        .send()
+        .await;
+    assert_eq!(r.text(), "100 bytes", "not 413");
 }
 
 #[tokio::test]

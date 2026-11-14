@@ -16,7 +16,9 @@
 //!
 //! Keys belong to a client: by default its `Authorization` header, or
 //! whatever [`scope`](Idempotency::scope) returns. Requests with neither
-//! skip idempotency, and so do `multipart/*` uploads (they stream).
+//! skip idempotency, and so do `multipart/*` uploads and bodies whose
+//! `Content-Length` is over the app's body limit (they stream, under their
+//! route's own limit).
 //!
 //! ```
 //! use zapline::middleware::Idempotency;
@@ -27,7 +29,7 @@
 //!     .post("/payments", || async { (StatusCode::CREATED, "charged") });
 //! ```
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::hash::{BuildHasher, Hash, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -63,10 +65,12 @@ type ScopeFn = dyn Fn(&Request) -> Option<String> + Send + Sync;
 /// [`max_keys`](Self::max_keys)); use [`redis`](Self::redis) when several
 /// instances serve the app. Clones share state.
 ///
-/// What is stored: status, headers (except `Date`) and body, for complete
-/// responses up to 1 MiB. Not stored, so a retry runs the handler again:
-/// server errors (`5xx`); `401`, `403`, `404`, `405`, `408`, `409`, `425`
-/// and `429`; responses that set cookies; streamed and larger bodies.
+/// What is stored: status, headers (except `Date` and `Set-Cookie`) and
+/// body, for complete responses up to 1 MiB. Cookies reach the first
+/// response only: a replay never hands a session to whoever sends the key
+/// again. Not stored, so a retry runs the handler again: server errors
+/// (`5xx`); `401`, `403`, `404`, `405`, `408`, `409`, `425` and `429`;
+/// streamed and larger bodies.
 /// Wrap [`Compression`] *outside* this middleware so stored bodies stay
 /// uncompressed.
 ///
@@ -184,7 +188,9 @@ impl Idempotency {
     /// Most keys kept in memory (default 10 000), and a tenth of that per
     /// scope, so one client can't push out the others' responses. When
     /// full, expired keys are dropped first, then the oldest stored
-    /// responses (the client's own first). Memory mode is best effort:
+    /// responses (the client's own first). A client whose share is all
+    /// requests still running gets `429` (code `idempotency_keys_exhausted`)
+    /// for new keys. Memory mode is best effort:
     /// use [`redis`](Self::redis) where a second run would cost money.
     ///
     /// ```
@@ -252,7 +258,7 @@ impl Middleware for Idempotency {
         };
         // Multipart uploads stream (often past the app's body limit, under
         // their route's own): buffering them to fingerprint would break that.
-        if is_multipart(&req) {
+        if is_multipart(&req) || over_body_limit(&req) {
             return next.run(req);
         }
         // Without a scope there's no owner to keep keys apart, so clients
@@ -295,6 +301,11 @@ impl Middleware for Idempotency {
                     .with_code("idempotency_key_reused")
                     .into_response();
                 }
+                Begin::Exhausted => {
+                    return Error::too_many_requests()
+                        .with_code("idempotency_keys_exhausted")
+                        .into_response();
+                }
                 Begin::Unavailable => {
                     return Error::service_unavailable("idempotency keys are unavailable")
                         .with_code("idempotency_unavailable")
@@ -311,18 +322,21 @@ impl Middleware for Idempotency {
                 token,
             };
             // Renew the lock while the handler runs, so a handler slower
-            // than `lock_timeout` doesn't let a retry run alongside it.
-            let run = next.run(req);
-            tokio::pin!(run);
-            let every = (lock_timeout / 3).max(Duration::from_millis(5));
-            let res = loop {
-                tokio::select! {
-                    res = &mut run => break res,
-                    () = tokio::time::sleep(every) => {
-                        backend.renew(&guard.id, token, lock_timeout).await;
+            // than `lock_timeout` doesn't let a retry run alongside it. In
+            // its own task: a slow renewal (Redis) never holds up the
+            // response once the handler is done.
+            let renewer = {
+                let (backend, id) = (backend.clone(), guard.id.clone());
+                let every = (lock_timeout / 3).max(Duration::from_millis(5));
+                AbortOnDrop(tokio::spawn(async move {
+                    loop {
+                        tokio::time::sleep(every).await;
+                        backend.renew(&id, token, lock_timeout).await;
                     }
-                }
+                }))
             };
+            let res = next.run(req).await;
+            drop(renewer);
             let (res, stored) = capture(res, fp);
             match stored {
                 Some(stored) => {
@@ -341,6 +355,15 @@ impl Middleware for Idempotency {
             guard.backend = None;
             res
         })
+    }
+}
+
+/// Stops the renewal task when the request ends, however it ends.
+struct AbortOnDrop(tokio::task::JoinHandle<()>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
     }
 }
 
@@ -387,6 +410,15 @@ fn is_multipart(req: &Request) -> bool {
                 .get(..10)
                 .is_some_and(|p| p.eq_ignore_ascii_case("multipart/"))
         })
+}
+
+/// A body known (from its `Content-Length`) to be larger than the app's
+/// body limit: buffering it would answer `413` where its route may stream
+/// it under a larger limit.
+fn over_body_limit(req: &Request) -> bool {
+    req.body
+        .as_ref()
+        .is_some_and(|b| b.size_hint().lower() > req.body_limit() as u64)
 }
 
 /// What makes two requests "the same": method, path, query, content type
@@ -500,9 +532,7 @@ fn capture(res: Response, fp: u64) -> (Response, Option<Stored>) {
             401 | 403 | 404 | 405 | 408 | 409 | 425 | 429
         )
         && !status.is_informational();
-    // A response that sets cookies (a log-in) can't be replayed without
-    // them, and replaying them could hand a session to someone else.
-    if !storable_status || res.headers().contains_key(SET_COOKIE) {
+    if !storable_status {
         return (res, None);
     }
     let (parts, body) = res.into_parts();
@@ -514,7 +544,9 @@ fn capture(res: Response, fp: u64) -> (Response, Option<Stored>) {
     let headers = parts
         .headers
         .iter()
-        .filter(|(name, _)| **name != DATE)
+        // Cookies go to the first response only: replaying them could hand
+        // a session to someone else.
+        .filter(|(name, _)| **name != DATE && **name != SET_COOKIE)
         .map(|(n, v)| (n.clone(), v.clone()))
         .collect();
     let stored = Stored {
@@ -532,6 +564,8 @@ enum Begin {
     Replay(Arc<Stored>),
     InFlight,
     Mismatch,
+    /// This scope's share of the store is all requests still running.
+    Exhausted,
     Unavailable,
 }
 
@@ -620,47 +654,99 @@ struct Entry {
     scope: u64,
 }
 
-/// Keys in memory, plus how many each scope holds.
+/// Keys in memory, with the stored responses ordered by expiry (overall
+/// and per scope), so making room never scans the whole store.
 #[derive(Default)]
 struct Keys {
     map: HashMap<String, Entry>,
-    per_scope: HashMap<u64, usize>,
+    scopes: HashMap<u64, ScopeKeys>,
+    done: BTreeSet<(Instant, String)>,
+    /// When expired locks (from cancelled renewals) were last looked for.
+    swept: Option<Instant>,
+}
+
+#[derive(Default)]
+struct ScopeKeys {
+    count: usize,
+    done: BTreeSet<(Instant, String)>,
 }
 
 impl Keys {
+    fn count(&self, scope: u64) -> usize {
+        self.scopes.get(&scope).map_or(0, |s| s.count)
+    }
+
+    /// Add a running request's key (replacing nothing: callers remove first).
     fn insert(&mut self, id: String, entry: Entry) {
-        *self.per_scope.entry(entry.scope).or_default() += 1;
-        if let Some(old) = self.map.insert(id, entry) {
-            self.forget(old.scope);
+        self.scopes.entry(entry.scope).or_default().count += 1;
+        if let Some(old) = self.map.insert(id.clone(), entry) {
+            self.forget(&id, &old);
         }
     }
 
     fn remove(&mut self, id: &str) {
         if let Some(old) = self.map.remove(id) {
-            self.forget(old.scope);
+            self.forget(id, &old);
         }
     }
 
-    fn forget(&mut self, scope: u64) {
-        if let Some(n) = self.per_scope.get_mut(&scope) {
-            *n -= 1;
-            if *n == 0 {
-                self.per_scope.remove(&scope);
+    fn forget(&mut self, id: &str, old: &Entry) {
+        let is_done = matches!(old.slot, Slot::Done(_));
+        if is_done {
+            self.done.remove(&(old.until, id.to_owned()));
+        }
+        if let Some(s) = self.scopes.get_mut(&old.scope) {
+            if is_done {
+                s.done.remove(&(old.until, id.to_owned()));
+            }
+            s.count -= 1;
+            if s.count == 0 {
+                self.scopes.remove(&old.scope);
             }
         }
     }
 
-    /// The stored response that expires first, among `scope`'s or all.
-    fn oldest_done(&self, scope: Option<u64>) -> Option<String> {
-        self.map
-            .iter()
-            .filter(|(_, e)| matches!(e.slot, Slot::Done(_)))
-            .filter(|(_, e)| scope.is_none_or(|s| e.scope == s))
-            .min_by_key(|(_, e)| e.until)
-            .map(|(k, _)| k.clone())
+    /// Store a response under a running key.
+    fn mark_done(&mut self, id: &str, stored: Stored, until: Instant) {
+        let Some(e) = self.map.get_mut(id) else {
+            return;
+        };
+        e.slot = Slot::Done(Arc::new(stored));
+        e.until = until;
+        let scope = e.scope;
+        self.done.insert((until, id.to_owned()));
+        self.scopes
+            .entry(scope)
+            .or_default()
+            .done
+            .insert((until, id.to_owned()));
     }
 
+    /// The stored response that expires first, among `scope`'s or all.
+    fn oldest_done(&self, scope: Option<u64>) -> Option<String> {
+        let set = match scope {
+            Some(s) => &self.scopes.get(&s)?.done,
+            None => &self.done,
+        };
+        set.first().map(|(_, id)| id.clone())
+    }
+
+    /// Drop expired responses (cheap: they're ordered), and at most once a
+    /// second, expired locks too.
     fn sweep(&mut self, now: Instant) {
+        while let Some((until, id)) = self.done.first().cloned() {
+            if until > now {
+                break;
+            }
+            self.remove(&id);
+        }
+        if self
+            .swept
+            .is_some_and(|t| now.saturating_duration_since(t) < Duration::from_secs(1))
+        {
+            return;
+        }
+        self.swept = Some(now);
         let expired: Vec<String> = self
             .map
             .iter()
@@ -710,7 +796,7 @@ impl MemStore {
             None => {}
         }
         let full = |k: &Keys| k.map.len() >= self.max_keys;
-        let scope_full = |k: &Keys| k.per_scope.get(&scope).copied().unwrap_or(0) >= self.per_scope;
+        let scope_full = |k: &Keys| k.count(scope) >= self.per_scope;
         if full(&keys) || scope_full(&keys) {
             keys.sweep(now);
         }
@@ -719,7 +805,8 @@ impl MemStore {
         if scope_full(&keys) {
             match keys.oldest_done(Some(scope)) {
                 Some(k) => keys.remove(&k),
-                None => return Begin::Unavailable,
+                // All this client's own requests, still running.
+                None => return Begin::Exhausted,
             }
         }
         if full(&keys) {
@@ -750,14 +837,14 @@ impl MemStore {
 
     fn finish(&self, id: &str, token: u128, stored: Stored, ttl: Duration) -> bool {
         let mut keys = self.lock();
-        match keys.map.get_mut(id) {
-            Some(e) if matches!(e.slot, Slot::Running { token: t, .. } if t == token) => {
-                e.slot = Slot::Done(Arc::new(stored));
-                e.until = Instant::now() + ttl;
-                true
-            }
-            _ => false,
+        let ours = matches!(
+            keys.map.get(id),
+            Some(Entry { slot: Slot::Running { token: t, .. }, .. }) if *t == token
+        );
+        if ours {
+            keys.mark_done(id, stored, Instant::now() + ttl);
         }
+        ours
     }
 
     fn release(&self, id: &str, token: u128) {
