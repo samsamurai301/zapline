@@ -5393,6 +5393,77 @@ Send people to `/auth/github` (optionally `?next=/settings`) to start. That rout
 
 `.scopes([...])` replaces the scopes, `.redirect_url(url)` overrides the callback URL (by default `APP_URL` + `/auth/{name}/callback`, or the request's host when `APP_URL` is unset), and `.endpoints(..)` points a built-in provider at a test double. Only trust `user.email` for account linking when `user.email_verified` is true.
 
+## Two-factor login (TOTP) and recovery codes
+
+With the `two-factor` feature, users can add an authenticator app (Google Authenticator, 1Password, Authy, ...) as a second step after their password. `zapline::auth::totp::Totp` makes and checks the six-digit codes (RFC 6238), and `zapline::auth::recovery_codes` covers users who lose their phone.
+
+**Turning it on for a user:**
+1. Make a secret with `Totp::generate()`, and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
+2. Ask for one code and check it, to be sure their app is set up.
+3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)`. Show the codes themselves once.
+
+**Signing in**, after the password:
+
+```rust
+use zapline::auth::recovery_codes;
+use zapline::auth::totp::Totp;
+
+/// What a `users` row holds for two-factor login.
+struct TwoFactor {
+    secret: String,
+    last_step: Option<u64>,
+    recovery_hashes: Vec<String>,
+}
+
+fn second_step(user: &mut TwoFactor, code: &str) -> zapline::Result<bool> {
+    let totp = Totp::from_base32(&user.secret)?;
+    if let Some(step) = totp.verify(code, user.last_step) {
+        user.last_step = Some(step); // save it: the same code is refused next time
+        return Ok(true);
+    }
+    if let Some(i) = recovery_codes::find(code, &user.recovery_hashes) {
+        user.recovery_hashes.remove(i); // each recovery code works once
+        return Ok(true);
+    }
+    Ok(false)
+}
+```
+
+- **Clock drift:** a code is accepted for its own 30-second step and one step either side, so a phone clock that's a little off still works.
+- **Replay protection:** pass the user's last accepted step to `verify`, and save the step it returns. A code that was already used, or one from before it, is refused, so an intercepted code can't be used again.
+- **Recovery codes:** they look like `x7k2m-q9pd4`, avoid look-alike characters (0/o, 1/l/i), and match regardless of case, spaces and dashes. Store only `recovery_codes::hash(code)`.
+- **Rate-limit the step:** six digits can be guessed with enough tries. Limit attempts per account, as `zapline g auth` does for the password.
+
+## Magic links
+
+Sign-in links sent by email, email confirmation and invitations need a token that names a user, expires, and works only once. `MagicLinks` (with the `cookies` feature, signed with the app's cookie key) issues and checks them:
+
+```rust
+use std::time::Duration;
+use zapline::auth::magic_link::MagicLinks;
+use zapline::prelude::*;
+
+async fn send_link(links: MagicLinks) -> String {
+    // Bound to the user's last sign-in: once they sign in, it changes and
+    // this link stops working.
+    let token = links.issue("42", "sign-in", "last-login=1731400000", Duration::from_secs(900));
+    format!("https://shop.example/magic/{token}") // email this
+}
+
+async fn open_link(links: MagicLinks, Path(token): Path<String>) -> Result<String> {
+    let user_id = links.verify(&token, "sign-in", |id| {
+        // Look the user up and return their current binding value.
+        (id == "42").then(|| "last-login=1731400000".to_owned())
+    })?;
+    // ...start the session, update last-login...
+    Ok(format!("signed in as {user_id}"))
+}
+```
+
+- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, that's the last sign-in time; for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **What's in a token:** the user and purpose are signed, so a sign-in link can't be used to confirm an email, and a token can't be edited to name another user. The signature is checked in constant time.
+- **Errors:** an expired link gets `400`, code `link_expired`, so the page can offer to send a new one. Anything else (tampered, wrong purpose, used, unknown user) gets `400`, code `link_invalid`.
+
 ## Credential extractors
 
 Three extractors read credentials without any setup. Missing or malformed credentials are rejected with `401`, a `WWW-Authenticate` challenge and a stable error code: `missing_credentials` or `invalid_credentials`.
@@ -9198,6 +9269,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |

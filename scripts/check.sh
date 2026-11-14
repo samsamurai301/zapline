@@ -27,7 +27,7 @@ step "feature matrix"
 # Each feature alone, tests included: test files guard themselves with
 # `#![cfg(feature = ...)]` for the features they use.
 cargo clippy -q -p zapline --no-default-features --all-targets -- -D warnings
-for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
+for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password two-factor mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
   echo "  - $f"
   cargo clippy -q -p zapline --no-default-features --features "$f" --all-targets -- -D warnings
 done

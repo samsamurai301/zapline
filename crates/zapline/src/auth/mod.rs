@@ -55,10 +55,16 @@ mod guard;
 mod jwks;
 #[cfg(feature = "jwt")]
 pub mod jwt;
+#[cfg(feature = "cookies")]
+pub mod magic_link;
 #[cfg(feature = "oauth")]
 pub mod oauth;
 #[cfg(feature = "password")]
 pub mod password;
+#[cfg(feature = "two-factor")]
+pub mod recovery_codes;
+#[cfg(feature = "two-factor")]
+pub mod totp;
 
 pub use api_key::{ApiKey, ApiKeyConfig};
 pub use authenticate::{Authenticate, Authenticator, CurrentUser};
