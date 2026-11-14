@@ -137,6 +137,8 @@ jobs:
       - run: cargo doc -p zapline --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: the guide's code compiles
+        run: cargo test -p zapline-guide-check --doc
       - name: llms.txt is current
         run: ./scripts/gen-llms.sh --check
       - name: build the guide

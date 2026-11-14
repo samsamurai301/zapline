@@ -4,6 +4,18 @@
 
 ```rust
 use zapline::prelude::*;
+# #[model]
+# struct NewUser { name: String, email: String }
+# #[model]
+# struct User { id: u64, name: String, email: String }
+# #[post("/users")]
+# async fn create_user(Json(u): Json<NewUser>) -> (StatusCode, Json<User>) {
+#     (StatusCode::CREATED, Json(User { id: 1, name: u.name, email: u.email }))
+# }
+# #[get("/users/{id}")]
+# async fn get_user(Path(id): Path<u64>) -> Result<Json<User>> {
+#     Err(Error::not_found().with_code(format!("user_{id}_not_found")))
+# }
 
 fn app() -> App {
     App::new().mount((create_user, get_user))
@@ -40,11 +52,14 @@ async fn creates_and_fetches_a_user() {
 
 ```rust
 use zapline::test::MultipartForm;
+# async fn demo(client: zapline::test::TestClient, png_bytes: Vec<u8>) {
 
 let form = MultipartForm::new()
     .text("title", "Holiday")
     .file("photo", "beach.png", "image/png", png_bytes);
 let res = client.post("/upload").multipart(form).send().await;
+# let _ = res;
+# }
 ```
 
 ## Response helpers
@@ -54,11 +69,14 @@ let res = client.post("/upload").multipart(form).send().await;
 `assert_status(..)` and `assert_header(name, value)` return the response, so they chain, and their panic messages include the response body:
 
 ```rust
+# use zapline::prelude::*;
+# async fn demo(client: zapline::test::TestClient, new_user: serde_json::Value) {
 client.post("/users").json(&new_user).send().await
     .assert_status(StatusCode::CREATED)
     .assert_header("content-type", "application/json");
 // panics with: expected status 201, got 422 Unprocessable Entity
 //              response body: {"error":"invalid request body: missing field `email`",...}
+# }
 ```
 
 ## Cookies and sessions
@@ -66,11 +84,15 @@ client.post("/users").json(&new_user).send().await
 `app.test()` is stateless: each request carries only the headers you set. `.with_cookies()` gives the client a cookie store, shared by its clones, that works like a browser's: it keeps every `Set-Cookie` it is allowed to and sends the matching cookies back in one `Cookie` header. That makes login flows one line per step:
 
 ```rust
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo(credentials: serde_json::Value) {
 let browser = app().test().with_cookies();
 browser.post("/login").json(&credentials).send().await.assert_status(200);
 browser.get("/me").send().await.assert_status(200);
 browser.post("/logout").send().await;
 assert_eq!(browser.cookie("zapline.sid"), None);
+# }
 ```
 
 Calling `.with_cookies()` again starts a separate store, e.g. for a second user. The store applies the rules browsers do (RFC 6265 and 6265bis):
@@ -94,6 +116,9 @@ Relative URIs go to `http://localhost` unless you pick the site with `.base_url(
 `.from_origin(url)` sends a request as if a page on `url` started it with a link or a form, and `.fetch_from(url)` as a `fetch` with credentials. They add the `Origin` and `Sec-Fetch-Site`/`Sec-Fetch-Mode` headers a browser would, and the store applies `SameSite`. Sites are compared like browsers do, by scheme and registrable domain, using a short built-in list of multi-label public suffixes (`co.uk`, `github.io`, ...) instead of the full Public Suffix List. So you can test CSRF defenses against what a browser would really send:
 
 ```rust
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo(credentials: serde_json::Value) {
 let browser = app().test().with_cookies().base_url("https://app.example.com");
 browser.post("/login").json(&credentials).send().await.assert_status(200);
 
@@ -102,6 +127,7 @@ browser.post("/login").json(&credentials).send().await.assert_status(200);
 browser.post("/transfer").from_origin("https://evil.example").send().await.assert_status(403);
 // A sibling subdomain is the same site, and the cookie goes along.
 browser.post("/transfer").from_origin("https://blog.example.com").send().await;
+# }
 ```
 
 To look inside the store:
@@ -115,6 +141,7 @@ To look inside the store:
 | `clear_cookies()` | Empties the store |
 
 ```rust
+# fn demo(browser: zapline::test::TestClient) {
 // JavaScript can read the CSRF token but never the session id.
 let js = browser.document_cookie("https://app.example.com/");
 assert!(js.contains("__Host-zapline.csrf=") && !js.contains("zapline.sid"));
@@ -122,6 +149,7 @@ assert!(js.contains("__Host-zapline.csrf=") && !js.contains("zapline.sid"));
 // evil.example.com can plant a cookie for all of example.com, but not a __Host- one.
 assert!(browser.set_cookie("https://evil.example.com/", "csrf=x; Domain=example.com"));
 assert!(!browser.set_cookie("https://evil.example.com/", "__Host-csrf=x; Domain=example.com; Path=/; Secure"));
+# }
 ```
 
 Not modelled: redirects are not followed, there is no per-domain cookie limit or eviction, and the Chrome "Lax+POST" two-minute exception for cookies without a `SameSite` attribute is not applied.
@@ -182,6 +210,9 @@ Paste the `reproduce:` line into a regular test to keep the bug fixed. The fuzze
 ```rust
 use std::time::Duration;
 use zapline::test::FuzzConfig;
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo() {
 
 let report = app()
     .test()
@@ -202,6 +233,7 @@ for failure in report.failures() {
     println!("{} -> {}", failure.request(), failure.kind());
 }
 report.assert_clean();
+# }
 ```
 
 Runs are deterministic: the requests depend only on the seed and the document, and each operation has its own stream of cases, so adding a route does not change what the others get. When the test does not set them, the `ZAPLINE_FUZZ_SEED` and `ZAPLINE_FUZZ_CASES` environment variables choose the seed and the budget, which is how `zapline fuzz --seed 7 --cases 1000` explores further without editing the test.
@@ -215,6 +247,13 @@ Projects created with `zapline new` include this test as `tests/fuzz.rs`; `zapli
 Startup hooks run on the first request. Use `client.start().await` to run them up front, `client.resources().await` to inspect state, and `client.shutdown().await` to run shutdown hooks. To swap real dependencies for fakes, register replacements before calling `.test()`. Registering the same type again replaces the earlier value:
 
 ```rust
+# use std::sync::Arc;
+# use zapline::prelude::*;
+# trait UserRepo: Send + Sync {}
+# #[derive(Default)]
+# struct FakeRepo;
+# impl UserRepo for FakeRepo {}
+# fn app() -> App { App::new() }
 let client = app().provide_dyn::<dyn UserRepo>(Arc::new(FakeRepo::default())).test();
 ```
 
@@ -223,10 +262,16 @@ let client = app().provide_dyn::<dyn UserRepo>(Arc::new(FakeRepo::default())).te
 When a feature needs a real connection (WebSockets, TLS, HTTP/2), serve on an ephemeral port:
 
 ```rust
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo() -> std::io::Result<()> {
 let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
 let addr = listener.local_addr()?;
 tokio::spawn(app().serve(listener));
 // connect to `addr` with any client
+# let _ = addr;
+# Ok(())
+# }
 ```
 
 ## Snapshot tests from real traffic
@@ -283,19 +328,27 @@ Ids also carry forward. When the recording's `POST /users` answered `{"id": 7}` 
 `Authorization`, `Cookie`, `Proxy-Authorization`, `X-Api-Key`, `X-Auth-Token` and CSRF token headers are never recorded: the snapshot says `"[redacted]"` and the replay does not send them (CSRF headers carry the replay's own token, see below). Each snapshot file replays with a fresh cookie jar, like a new browser, so a recorded login sets the session cookie that the following requests use. For bearer tokens and API keys, give the replay a test credential:
 
 ```rust
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo() {
 app().test()
     .replay_snapshots("tests/snapshots")
     .header("authorization", "Bearer test-token")
     .await;
+# }
 ```
 
 Secret-looking fields of the query, a JSON body (at any depth) or a urlencoded form are recorded as `"[redacted]"` too, in requests and responses: names containing `password`, `secret`, `token`, `csrf`, `xsrf` or `api_key`, or ending in `_hash`. So a login form, a reset link's `?token=` and a JWT in a login response never land in a snapshot file. A redacted response value matches whatever the replay answers. To replay a recorded login, give the replay the value to send in place of each redacted field:
 
 ```rust
+# use zapline::prelude::*;
+# fn app() -> App { App::new() }
+# async fn demo() {
 app().test()
     .replay_snapshots("tests/snapshots")
     .secret("password", "test-password")
     .await;
+# }
 ```
 
 CSRF tokens need nothing: a CSRF-protected app ([`Csrf`](sessions.md#csrf)) mints a new token for each replay's browser, so the replay sends the token from its CSRF cookie (a cookie whose name contains `csrf` or `xsrf`, such as `zapline.csrf`) in each recorded CSRF form field, JSON key and header (`x-csrf-token`, as htmx sends it), the way the page's form or script would.

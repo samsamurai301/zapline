@@ -61,6 +61,7 @@ response and lists the extension points every feature is built on. Read its
 ./scripts/check.sh              # what CI runs: + feature matrix, examples, docs
 cargo test -p zapline --all-features --test <name>   # one test file
 ./scripts/gen-llms.sh           # after editing docs/src: regenerates llms.txt
+cargo test -p zapline-guide-check --doc   # every rust block in docs/src compiles
 cargo deny check                # supply chain: advisories, licenses, sources
 ```
 

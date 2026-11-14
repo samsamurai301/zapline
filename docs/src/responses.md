@@ -20,6 +20,11 @@ A handler can return anything that implements `IntoResponse`:
 ```rust
 use zapline::prelude::*;
 use zapline::header;
+# #[model]
+# struct NewUser { name: String }
+# #[model]
+# struct User { id: u64, name: String }
+# async fn save(u: NewUser) -> Result<User> { Ok(User { id: 1, name: u.name }) }
 
 // `status = 201` documents the status the handler picks at run time.
 #[post("/users", status = 201)]
@@ -41,6 +46,7 @@ Streaming responses such as Server-Sent Events, file downloads and NDJSON are co
 ## Custom response types
 
 ```rust
+# use zapline::prelude::*;
 struct Csv(String);
 
 impl IntoResponse for Csv {

@@ -47,6 +47,10 @@ Name keys like `posts:42` so a write can drop a whole family with `delete_prefix
 
 ```rust
 use zapline::cache::ResponseCache;
+# use std::time::Duration;
+# use zapline::prelude::*;
+# #[get("/")] async fn index() -> &'static str { "" }
+# #[get("/{slug}")] async fn post() -> &'static str { "" }
 
 let app = App::new().nest(
     "/blog",
@@ -64,6 +68,7 @@ The query string, `Accept` and `HX-Request` are part of the key, so htmx fragmen
 ## `ETag`: conditional requests
 
 ```rust
+# use zapline::prelude::*;
 let app = App::new().wrap(zapline::cache::ETag);
 ```
 

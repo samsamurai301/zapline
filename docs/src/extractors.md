@@ -3,6 +3,13 @@
 Handler arguments are *extractors*: types that know how to build themselves from the request. A handler can take up to 12 arguments. Every argument except the last must be a **parts** extractor, meaning it doesn't read the body. The last argument may consume the body.
 
 ```rust
+# use zapline::prelude::*;
+# #[derive(Clone)]
+# struct Db;
+# #[model]
+# struct AddOptions { notify: bool }
+# #[model]
+# struct NewMember { email: String }
 #[post("/orgs/{org}/members")]
 async fn add_member(
     State(db): State<Db>,                 // app state
@@ -10,7 +17,9 @@ async fn add_member(
     Query(opts): Query<AddOptions>,       // query string
     user: CurrentUser<Claims>,            // auth (see the Security chapter)
     Json(body): Json<NewMember>,          // body: must be last
-) -> Result<StatusCode> { /* ... */ }
+) -> Result<StatusCode> {
+    todo!()
+}
 ```
 
 If an extractor fails, its error response is returned and the handler isn't called. For example, a bad path parameter gives a 400 and a wrong content type gives a 415. Rejections carry a stable `code`, and `details` that locate the problem:
@@ -55,6 +64,7 @@ Feature modules add more: `Valid<T>`, `Dep<T>`, `BackgroundTasks`, `BearerToken`
 ## Path parameters in detail
 
 ```rust
+# use zapline::prelude::*;
 #[get("/users/{id}")]                      async fn a(Path(id): Path<u64>) {}
 #[get("/repos/{owner}/{name}")]            async fn b(Path((owner, name)): Path<(String, String)>) {}
 

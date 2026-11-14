@@ -41,6 +41,11 @@ Static segments take priority over parameters, so `/users/me` and `/users/{id}` 
 `Routes` is a group of routes. It can carry its own middleware and metadata, and you can nest it under a prefix:
 
 ```rust
+# use zapline::prelude::*;
+# async fn stats() -> &'static str { "" }
+# async fn ban_user(Path(_id): Path<u64>) -> StatusCode { StatusCode::NO_CONTENT }
+# async fn require_admin(req: Request, next: Next) -> Response { next.run(req).await }
+# fn api_v1() -> Routes { Routes::new() }
 let admin = Routes::new()
     .get("/stats", stats)
     .delete("/users/{id}", ban_user)
@@ -65,6 +70,8 @@ Groups can be built in other modules or crates and merged with `.merge(routes)` 
 Every route carries a typed metadata map. Plugins use it: OpenAPI stores summaries and tags there, auth stores required roles, and rate limiting stores per-route policies. You can attach your own:
 
 ```rust
+# use zapline::prelude::*;
+# async fn pay() -> StatusCode { StatusCode::CREATED }
 #[derive(Clone)]
 struct Audit(&'static str);
 

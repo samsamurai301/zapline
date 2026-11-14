@@ -29,17 +29,27 @@ fn main() -> std::io::Result<()> {
 ## Custom shutdown and embedding
 
 ```rust
+# use zapline::prelude::*;
+# async fn demo() -> std::io::Result<()> {
+# let app = App::new();
 // Stop when a channel fires instead of on signals:
 let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 app.run_with_shutdown("0.0.0.0:8080", async { let _ = rx.await; })?;
+# drop(tx);
+# let app = App::new();
 
 // Inside your own Tokio runtime:
 let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
 app.serve(listener).await?;                         // also stops on SIGINT/SIGTERM
+# let app = App::new();
+# let listener = tokio::net::TcpListener::bind("0.0.0.0:8080").await?;
 app.serve_with_shutdown(listener, std::future::pending()).await?;  // no signal handling
+# let app = App::new();
 
 // Unix domain socket (e.g. behind nginx):
 app.run_unix("/run/my-app.sock")?;
+# Ok(())
+# }
 ```
 
 ## `ServerConfig`
