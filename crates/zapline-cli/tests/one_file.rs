@@ -22,6 +22,13 @@ use common::*;
 #[cfg(unix)]
 const SLOW: Duration = Duration::from_secs(90);
 
+/// `path` as tools print it. On Windows `canonicalize` returns the verbatim
+/// form `\\?\C:\...`; cargo and rustc print `C:\...`.
+fn plain(path: &Path) -> PathBuf {
+    let s = path.to_string_lossy();
+    PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s))
+}
+
 /// A `zapline` command with its cache in `dir/cache`.
 fn zapline_in(dir: &Path) -> Command {
     let mut cmd = zapline();
@@ -160,8 +167,8 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
     assert_eq!(targets.len(), 1, "{targets:?}");
     assert_eq!(targets[0]["kind"][0], "bin");
     assert_eq!(
-        Path::new(targets[0]["src_path"].as_str().unwrap()),
-        dir.join("hello.rs")
+        plain(Path::new(targets[0]["src_path"].as_str().unwrap())),
+        plain(&dir.join("hello.rs"))
     );
     let deps: Vec<&str> = package["dependencies"]
         .as_array()
@@ -174,8 +181,8 @@ fn new_writes_a_starter_whose_hidden_project_is_valid() {
     }
     // Its own workspace: never absorbed by a parent workspace.
     assert_eq!(
-        Path::new(meta["workspace_root"].as_str().unwrap()),
-        manifest.parent().unwrap()
+        plain(Path::new(meta["workspace_root"].as_str().unwrap())),
+        plain(manifest.parent().unwrap())
     );
 }
 
@@ -261,7 +268,7 @@ fn run_builds_once_then_starts_without_cargo() {
     assert!(!out.status.success());
     let err = stderr(&out);
     assert!(
-        err.contains(&format!("{}:", dir.join("broken.rs").display())),
+        err.contains(&format!("{}:", plain(&dir.join("broken.rs")).display())),
         "{err}"
     );
     assert!(err.contains("could not compile `broken.rs`"), "{err}");
