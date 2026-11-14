@@ -64,6 +64,11 @@ cargo test -p zapline --all-features --test <name>   # one test file
 cargo deny check                # supply chain: advisories, licenses, sources
 ```
 
+CI also runs every Monday on `main`, so a new stable Rust that breaks the
+build is caught without a push. While CI is red on `main`, an open issue
+titled "CI is red on main" says where (`.github/workflows/ci-alert.yml`); the
+next green run closes it. Fix it before merging anything else.
+
 ### Reliability checks
 
 When you touch the server, body handling, extractors or middleware, also run:
