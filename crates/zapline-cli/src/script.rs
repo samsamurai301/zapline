@@ -1241,10 +1241,13 @@ mod tests {
         );
         // A path source means no version is added.
         assert!(deps["zapline"].get("version").is_none());
-        // Absolute stays put (on Windows `/opt/abs` means the script's drive).
+        // Absolute stays put; on Windows `/opt/abs` is the script drive's
+        // root, which is exactly what joining it does.
+        #[allow(clippy::join_absolute_paths)]
+        let abs = dir.join("/opt/abs");
         assert_eq!(
             deps["abs"]["path"].as_str(),
-            Some(dir.join("/opt/abs").to_string_lossy().as_ref())
+            Some(abs.to_string_lossy().as_ref())
         );
         assert_eq!(
             m["target"]["cfg(unix)"]["dependencies"]["unixy"]["path"].as_str(),
