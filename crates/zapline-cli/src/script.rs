@@ -1094,9 +1094,13 @@ mod tests {
                     .map(|(_, v)| OsString::from(*v))
             }
         };
+        // An absolute path on this platform ("/x" is not one on Windows).
+        let x = if cfg!(windows) { r"C:\x" } else { "/x" };
+        let pairs: &'static [(&str, &str)] =
+            Box::leak(vec![("XDG_CACHE_HOME", x), ("HOME", "/h")].into_boxed_slice());
         assert_eq!(
-            cache_dir_from(env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")])).unwrap(),
-            PathBuf::from("/x/zapline")
+            cache_dir_from(env(pairs)).unwrap(),
+            PathBuf::from(x).join("zapline")
         );
         // Empty and relative XDG values are ignored.
         for xdg in ["", "relative/dir"] {
@@ -1237,7 +1241,11 @@ mod tests {
         );
         // A path source means no version is added.
         assert!(deps["zapline"].get("version").is_none());
-        assert_eq!(deps["abs"]["path"].as_str(), Some("/opt/abs"));
+        // Absolute stays put (on Windows `/opt/abs` means the script's drive).
+        assert_eq!(
+            deps["abs"]["path"].as_str(),
+            Some(dir.join("/opt/abs").to_string_lossy().as_ref())
+        );
         assert_eq!(
             m["target"]["cfg(unix)"]["dependencies"]["unixy"]["path"].as_str(),
             Some(dir.join("vendor/unixy").to_string_lossy().as_ref())
