@@ -41,6 +41,7 @@
 - [Email](mail.md)
 - [Admin panel](admin.md)
 - [Translations (i18n)](i18n.md)
+- [Plugins (WebAssembly)](plugins.md)
 
 # Security
 

@@ -1,0 +1,23 @@
+[package]
+name = "zapline-wasm"
+description = "Run untrusted WebAssembly components (plugins) from a zapline app: sandboxed, metered and logged"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+# wasmtime sets the floor, above the framework's MSRV: this crate is kept
+# out of the MSRV check so zapline itself stays on 1.88.
+rust-version = "1.97"
+documentation = "https://docs.rs/zapline-wasm"
+readme = "README.md"
+keywords = ["wasm", "plugins", "sandbox", "component-model", "zapline"]
+categories = ["wasm", "web-programming"]
+
+[dependencies]
+wasmtime = { version = "51", default-features = false, features = ["component-model", "cranelift", "runtime", "std"] }
+
+[dev-dependencies]
+wat = "1"
+wit-component = "0.263"
+wit-parser = "0.263"

@@ -4,6 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Plugins
+- New crate `zapline-wasm`: run untrusted WebAssembly components from an app. `WasmHost` holds a component-model engine metered by fuel; every `call` gets a fresh store with `Limits` (fuel, memory per linear memory, instances, memories, tables) and nothing linked but what the app links (no WASI). Traps, fuel and memory exhaustion and missing imports are `Err`s, never panics; `PluginLog` keeps a plugin's last lines. `bindgen!` uses the re-exported `zapline_wasm::wasmtime`. A separate crate because wasmtime needs Rust 1.97. Guide: "Plugins (WebAssembly)".
+
 ### Reliability
 - `ServerConfig::body_read_timeout` (default 30s): a buffered request body (`Json`, `Form`, `String`, `Bytes`, ...) that takes longer to arrive gets `408` (`ZL0068`) and the connection is closed, so clients that send bodies slowly can't hold connections and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are not limited.
 - `ServerConfig::pipeline_flush` now defaults to `false`: malformed or oversized request heads get their `400`/`414`/`431` again instead of a closed connection, and pipelined responses are never lost (the hyper 1.12 bug only bites with it on). The TechEmpower app and the benchmark servers turn it on explicitly.

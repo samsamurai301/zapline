@@ -12,6 +12,7 @@ with `zapline new` get their own `AGENTS.md`.
 | `crates/zapline` | The framework (core + feature modules behind Cargo features) |
 | `crates/zapline-macros` | `#[get]`/`#[post]`/... route macros |
 | `crates/zapline-codegen` | Typed TypeScript/JavaScript clients from an OpenAPI document (used by `OpenApi::client_js` and `zapline client`) |
+| `crates/zapline-wasm` | Sandboxed WebAssembly components (plugins): fuel, memory caps, no WASI. Rust 1.97, outside the MSRV check |
 | `crates/zapline-cli` | `zapline` / `cargo zapline`: new, generate, dev, routes, openapi, doctor, bench. Templates in `templates/*.tmpl` |
 | `examples/examples` | Runnable examples; `cheatsheet.rs` is the canonical-usage file included in the guide |
 | `examples/ecosystem` | sqlx / SeaORM / Diesel / Leptos example apps: their own workspace and lockfile, checked by `./scripts/check.sh ecosystem` |
