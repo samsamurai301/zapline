@@ -135,7 +135,9 @@ fn recent_errors_list_codes_locations_and_fixes() {
         text.contains("ZL0002 500 GET /repo?from=errors: no provider registered for `mcp_live::Repo`\n  fix: .provide(value) // value: mcp_live::Repo"),
         "{text}"
     );
-    assert!(text.contains("ZL0080 500 GET /boom: panicked: nothing in the list\n  at: crates/zapline-cli/tests/mcp_live.rs:"), "{text}");
+    // Windows reports the panic location with backslashes.
+    let slashed = text.replace('\\', "/");
+    assert!(slashed.contains("ZL0080 500 GET /boom: panicked: nothing in the list\n  at: crates/zapline-cli/tests/mcp_live.rs:"), "{text}");
     // The fix is already there: no second copy appended.
     assert_eq!(text.matches("ZL0002 No provider").count(), 0, "{text}");
 }

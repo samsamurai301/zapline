@@ -124,7 +124,8 @@ async fn panics_show_where_they_happened() {
     assert_eq!(body["code"], "ZL0080");
     assert_eq!(body["error_code"], "panic");
     assert_eq!(body["detail"], "panicked: no items to show");
-    let at = body["location"].as_str().unwrap();
+    // Windows reports the path with backslashes.
+    let at = body["location"].as_str().unwrap().replace('\\', "/");
     assert!(
         at.starts_with("crates/zapline/tests/dev_errors.rs:"),
         "{at}"
@@ -137,7 +138,8 @@ async fn panics_show_where_they_happened() {
         .await;
     html.assert_status(500)
         .assert_contains("ZL0080 · Handler panicked")
-        .assert_contains("Panicked at <code id=location>crates/zapline/tests/dev_errors.rs:");
+        .assert_contains("Panicked at <code id=location>crates")
+        .assert_contains("dev_errors.rs:");
 }
 
 #[tokio::test]
