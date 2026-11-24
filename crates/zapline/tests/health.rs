@@ -132,7 +132,12 @@ async fn question_mark_errors_include_their_source() {
     assert_eq!(s, 503);
     let err = body["checks"]["file"]["error"].as_str().unwrap();
     assert!(err.starts_with("internal server error: "), "{err}");
-    assert!(err.to_lowercase().contains("no such file"), "{err}");
+    // The OS's own words: "No such file" on Unix, "cannot find the path" on Windows.
+    let err = err.to_lowercase();
+    assert!(
+        err.contains("no such file") || err.contains("cannot find the path"),
+        "{err}"
+    );
 }
 
 #[tokio::test]
