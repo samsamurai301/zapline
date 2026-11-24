@@ -50,7 +50,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -86,6 +86,9 @@ pub const ENV_DEV_PROXY_KEY: &str = "ZAPLINE_DEV_PROXY_KEY";
 const TICK: Duration = Duration::from_millis(50);
 /// Quiet period for asset changes: short, there is nothing to compile.
 const ASSET_QUIET: Duration = Duration::from_millis(80);
+/// How long after the watch starts an event can be macOS replaying a write
+/// from before it (FSEvents reports recent history).
+const REPLAY_WINDOW: Duration = Duration::from_secs(3);
 /// How long a new version may take to report its address.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a new version may take to answer HTTP once listening.
@@ -520,9 +523,20 @@ struct Dev<'a> {
     speaks: Option<PathBuf>,
     /// Typed clients regenerated after each build.
     clients: crate::client::Live,
+    /// When watching started, to drop events replayed from before it.
+    started: (Instant, SystemTime),
 }
 
 impl Dev<'_> {
+    /// An event for a file last written before watching started, arriving
+    /// soon after: macOS replaying history, not an edit.
+    fn replayed(&self, path: &Path, now: Instant) -> bool {
+        now.duration_since(self.started.0) < REPLAY_WINDOW
+            && std::fs::metadata(path)
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| t < self.started.1)
+    }
+
     fn stopping(&self) -> bool {
         self.shutdown.load(Ordering::SeqCst)
     }
@@ -1022,6 +1036,9 @@ impl Dev<'_> {
                     if is_change(&event.kind) {
                         let now = Instant::now();
                         for path in event.paths {
+                            if self.replayed(&path, now) {
+                                continue;
+                            }
                             let change = match self.script {
                                 Some(script) if path == script.path => Change::Rebuild,
                                 Some(_) => Change::Ignore,
@@ -1199,6 +1216,7 @@ impl<'a> Dev<'a> {
             spawned: 0,
             speaks: None,
             clients: crate::client::Live::new(opts.clients.clone()),
+            started: (Instant::now(), SystemTime::now()),
         }
     }
 

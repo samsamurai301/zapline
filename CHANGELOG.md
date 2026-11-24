@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- `zapline dev` on macOS no longer rebuilds right after starting: FSEvents replays writes from just before the watch began, and those are now ignored.
 - `zapline g auth`: the generated `CurrentUser` documents its `401` and the page form posts document their `303` redirect (`PageOrRedirect`), so generated apps pass `zapline fuzz` again. The generator now also turns on zapline's `openapi` feature.
 
 ### Reliability
