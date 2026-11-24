@@ -1673,8 +1673,12 @@ mod tests {
         assert_eq!(upcoming.len(), 3);
         assert_eq!(upcoming[2], UNIX_EPOCH + Duration::from_secs(3));
         // Far in the future there is no next run rather than a panic.
-        let year_300000 = UNIX_EPOCH + Duration::from_secs(300_000 * 366 * 86_400);
-        let _ = cron.next_after(year_300000);
+        // (Windows' SystemTime ends in year 30828, so it cannot even hold it.)
+        if let Some(year_300000) =
+            UNIX_EPOCH.checked_add(Duration::from_secs(300_000 * 366 * 86_400))
+        {
+            let _ = cron.next_after(year_300000);
+        }
     }
 
     #[cfg(feature = "tz")]
