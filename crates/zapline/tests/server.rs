@@ -194,7 +194,9 @@ fn run_with_shutdown_per_core_drains_all_workers_and_runs_hooks() {
             "GET /thread HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(thread.contains("zapline-worker-"), "{thread}");
+        // Where SO_REUSEPORT does not balance (macOS), per-core falls back
+        // to one shared runtime, whose threads are all "zapline-worker".
+        assert!(thread.contains("zapline-worker"), "{thread}");
 
         let in_flight = tokio::spawn(raw(addr, SLOW));
         tokio::time::sleep(Duration::from_millis(100)).await;

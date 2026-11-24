@@ -25,6 +25,8 @@ fn zapline_in(dir: &Path) -> Command {
     let mut cmd = zapline();
     cmd.current_dir(dir)
         .env("XDG_CACHE_HOME", dir.join("cache"))
+        // CI sets CARGO_TERM_COLOR=always: plain text keeps cargo's output matchable.
+        .env("CARGO_TERM_COLOR", "never")
         .env_remove("CARGO_BUILD_TARGET");
     cmd
 }

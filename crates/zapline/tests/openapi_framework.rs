@@ -654,6 +654,23 @@ fn cookies_sessions_and_csrf() {
     assert!(op(&spec, "/private", "get")["responses"]["200"]["content"]["text/html"].is_object());
 }
 
+#[cfg(feature = "cookies")]
+#[test]
+fn a_flash_route_declares_its_redirect() {
+    use zapline::session::Flash;
+
+    #[post("/logout")]
+    async fn logout(flash: Flash) -> Response {
+        flash.info("Bye.").redirect("/login")
+    }
+
+    let spec = spec_for(App::new().mount(logout), OpenApi::new("t", "1"));
+    let r = &op(&spec, "/logout", "post")["responses"];
+    // 303 for a browser; for htmx an empty 200 with HX-Redirect.
+    assert!(r["303"]["headers"]["Location"].is_object(), "{r}");
+    assert!(r["200"].is_object(), "{r}");
+}
+
 #[cfg(feature = "jwt")]
 #[test]
 fn jwt_extractor_requires_bearer() {
