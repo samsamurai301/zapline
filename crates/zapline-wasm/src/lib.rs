@@ -2,8 +2,8 @@
 //!
 //! A [`WasmHost`] holds one wasmtime engine set up for the component model
 //! and fuel metering. [`WasmHost::call`] runs a closure against a fresh
-//! [`Store`] that has the host's [`Limits`]: a fuel budget, a memory cap and
-//! a cap on instances and tables. Nothing is linked in unless you link it:
+//! [`Store`] that has the host's [`Limits`]: a fuel budget, a memory cap, a
+//! table size cap and a cap on instances and tables. Nothing is linked in unless you link it:
 //! no WASI, so a plugin has no network, files, clock or randomness, and the
 //! same input gives the same answer.
 //!
@@ -49,6 +49,11 @@ pub struct Limits {
     pub memories: usize,
     /// Tables in one store. Default 16.
     pub tables: usize,
+    /// Elements each table may grow to. Default 10,000.
+    pub table_elements: usize,
+    /// Largest component [`WasmHost::component`] compiles, in bytes.
+    /// Default 64 MiB.
+    pub component_bytes: usize,
 }
 
 impl Default for Limits {
@@ -59,6 +64,8 @@ impl Default for Limits {
             instances: 16,
             memories: 4,
             tables: 16,
+            table_elements: 10_000,
+            component_bytes: 64 << 20,
         }
     }
 }
@@ -83,6 +90,28 @@ impl Limits {
     #[must_use]
     pub fn memory_bytes(mut self, bytes: usize) -> Self {
         self.memory_bytes = bytes;
+        self
+    }
+
+    /// Sets [`Limits::table_elements`].
+    ///
+    /// ```
+    /// assert_eq!(zapline_wasm::Limits::default().table_elements(100).table_elements, 100);
+    /// ```
+    #[must_use]
+    pub fn table_elements(mut self, elements: usize) -> Self {
+        self.table_elements = elements;
+        self
+    }
+
+    /// Sets [`Limits::component_bytes`].
+    ///
+    /// ```
+    /// assert_eq!(zapline_wasm::Limits::default().component_bytes(1 << 20).component_bytes, 1 << 20);
+    /// ```
+    #[must_use]
+    pub fn component_bytes(mut self, bytes: usize) -> Self {
+        self.component_bytes = bytes;
         self
     }
 }
@@ -178,13 +207,21 @@ impl WasmHost {
     ///
     /// # Errors
     ///
-    /// When `wasm` is not a valid component (a core module is not one).
+    /// When `wasm` is larger than [`Limits::component_bytes`], or is not a
+    /// valid component (a core module is not one).
     ///
     /// ```
     /// let host = zapline_wasm::WasmHost::new(Default::default()).unwrap();
     /// assert!(host.component(&[0, 97, 115, 109, 1, 0, 0, 0]).is_err());
     /// ```
     pub fn component(&self, wasm: &[u8]) -> Result<Component, CallError> {
+        if wasm.len() > self.limits.component_bytes {
+            return Err(CallError::new(format!(
+                "component is {} bytes, more than the {} allowed",
+                wasm.len(),
+                self.limits.component_bytes
+            )));
+        }
         Component::new(&self.engine, wasm)
             .map_err(|e| CallError::new(format!("not a component: {e}")))
     }
@@ -217,6 +254,7 @@ impl WasmHost {
                     .instances(l.instances)
                     .memories(l.memories)
                     .tables(l.tables)
+                    .table_elements(l.table_elements)
                     .build(),
             },
         );
@@ -227,8 +265,10 @@ impl WasmHost {
     }
 
     /// Runs `call` against a fresh store holding `data`. A trap, running
-    /// out of fuel or memory, or any other error comes back as a
-    /// [`CallError`] with the whole cause chain.
+    /// out of fuel, or any other error comes back as a [`CallError`] with
+    /// the whole cause chain. Growing a memory or table past its cap is not
+    /// an error: `memory.grow` and `table.grow` return -1, and the plugin
+    /// decides what to do (most trap, which is then an error).
     ///
     /// # Errors
     ///

@@ -5289,8 +5289,10 @@ zapline's minimum (1.88).
 - **A fresh instance per call.** Nothing carries over between calls.
 - **Fuel:** about one unit per instruction; 50 million a call by default.
   An endless loop ends with an error, not a stuck thread.
-- **Memory:** each linear memory stops at 32 MiB by default;
-  `memory.grow` past it returns -1.
+- **Memory and tables:** each linear memory stops at 32 MiB and each table
+  at 10,000 elements by default; `memory.grow` or `table.grow` past the cap
+  returns -1 (not an error: most plugins then trap, which is one).
+- **Size:** `component` refuses anything over 64 MiB before compiling it.
 - **Only what you link.** No WASI: no network, files, clock or randomness.
   The same input always gives the same answer.
 
@@ -5348,7 +5350,7 @@ if let Err(e) = &answer {
 
 Compile the component and build the `*Pre` once, at startup; a call then
 only instantiates. Change the limits with `Limits::default().fuel(..)` and
-`.memory_bytes(..)`.
+`.memory_bytes(..)`, `.table_elements(..)` and `.component_bytes(..)`.
 
 ## Building a plugin
 
