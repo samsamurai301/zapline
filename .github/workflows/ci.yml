@@ -58,6 +58,8 @@ jobs:
         run: cargo test -p zapline-codegen
       - name: test zapline-cli
         run: cargo test -p zapline-cli
+      - name: test zapline-wasm
+        run: cargo test -p zapline-wasm
       - name: build examples
         run: cargo build -p zapline-examples --examples
 

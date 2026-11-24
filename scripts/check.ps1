@@ -24,13 +24,22 @@ function Run([string]$Exe, [string[]]$Arguments) {
 Step "rustfmt"
 Run cargo @("fmt", "--all", "--check")
 
+# zapline-wasm needs Rust 1.97 (wasmtime); the rest of zapline needs 1.88.
+$rustMinor = [int]((rustc --version) -split '\.')[1]
+$wasm = if ($rustMinor -ge 97) { @() } else { @("--exclude", "zapline-wasm") }
+
 Step "clippy (all features)"
-Run cargo @("clippy", "--workspace", "--exclude", "bench-servers", "--all-features", "--all-targets", "--", "-D", "warnings")
+Run cargo (@("clippy", "--workspace", "--exclude", "bench-servers") + $wasm + @("--all-features", "--all-targets", "--", "-D", "warnings"))
 
 Step "tests (all features)"
 Run cargo @("test", "-p", "zapline", "--all-features")
 Run cargo @("test", "-p", "zapline-codegen")
 Run cargo @("test", "-p", "zapline-cli")
+if ($rustMinor -ge 97) {
+    Run cargo @("test", "-p", "zapline-wasm")
+} else {
+    Write-Host "  (skipping zapline-wasm: it needs Rust 1.97, this is 1.$rustMinor)"
+}
 
 if ($Mode -eq "quick") { exit 0 }
 
