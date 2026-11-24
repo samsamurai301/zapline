@@ -120,7 +120,9 @@ pub fn files(
     Ok(files)
 }
 
-/// Adds the zapline features auth needs and compiles Argon2 optimized in
+/// Adds the zapline features auth needs (`openapi` too: the generated
+/// `CurrentUser` documents its `401`, even where default features are off)
+/// and compiles Argon2 optimized in
 /// debug builds (unoptimized, one hash takes most of a second). Returns the
 /// new manifest, or `None` if it already had everything.
 pub fn patch_manifest(manifest: &str) -> Result<Option<String>> {
@@ -132,7 +134,10 @@ pub fn patch_manifest(manifest: &str) -> Result<Option<String>> {
         .and_then(|doc| doc.get("dependencies")?.get("zapline").cloned())
         .is_some();
     let mut out = if has_zapline {
-        features::add_features(manifest, &["cookies", "mail", "oauth", "password"])?
+        features::add_features(
+            manifest,
+            &["cookies", "mail", "oauth", "openapi", "password"],
+        )?
     } else {
         manifest.to_string()
     };
@@ -274,7 +279,7 @@ mod tests {
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
         let p = patch_manifest(m).unwrap().unwrap();
         assert!(
-            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"views\"]"),
+            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"openapi\", \"password\", \"sqlite\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
@@ -284,7 +289,7 @@ mod tests {
             .unwrap();
         assert!(
             bare.contains(
-                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\"] }"
+                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"openapi\", \"password\"] }"
             ),
             "{bare}"
         );

@@ -128,6 +128,23 @@ impl zapline::openapi::ApiInput for CurrentUser {
     }
 }
 
+/// What a page's form post answers: the page again, or `flash.redirect(..)`
+/// (`303 See Other`, or an empty `200` with `HX-Redirect` for htmx). The API
+/// docs (and `zapline fuzz`) list both.
+pub struct PageOrRedirect(pub Response);
+
+impl IntoResponse for PageOrRedirect {
+    fn into_response(self) -> Response {
+        self.0
+    }
+}
+
+impl zapline::openapi::ApiOutput for PageOrRedirect {
+    fn describe_output(op: &mut zapline::openapi::OperationDoc) {
+        op.success_raw("text/html").redirect();
+    }
+}
+
 /// Lets only the accounts listed in `ADMIN_EMAILS` into the admin panel.
 async fn admins_only(mut req: Request, next: Next) -> Response {
     let user = match CurrentUser::from_request_parts(&mut req).await {
@@ -514,13 +531,13 @@ async fn signup_form(
     flash: Flash,
     State(social): State<SocialLogins>,
     ValidForm(form): ValidForm<Credentials>,
-) -> Result<Response> {
+) -> Result<PageOrRedirect> {
     let ctx = context! { providers => social.0 };
     let creds = match form {
         Ok(creds) => creds,
-        Err(invalid) => return views.render_invalid("auth/signup.html", ctx, invalid),
+        Err(invalid) => return views.render_invalid("auth/signup.html", ctx, invalid).map(PageOrRedirect),
     };
-    match register(&db, &session, &creds).await {
+    let reply = match register(&db, &session, &creds).await {
         Ok(user) => {
             flash.success(format!("Welcome, {}!", user.email));
             Ok(flash.redirect("/"))
@@ -530,7 +547,8 @@ async fn signup_form(
             views.render_invalid("auth/signup.html", ctx, Invalid::new(errors, &creds))
         }
         Err(e) => Err(e),
-    }
+    };
+    reply.map(PageOrRedirect)
 }
 
 /// Log in from the page's form.
@@ -542,13 +560,13 @@ async fn login_form(
     flash: Flash,
     State(social): State<SocialLogins>,
     ValidForm(form): ValidForm<Credentials>,
-) -> Result<Response> {
+) -> Result<PageOrRedirect> {
     let ctx = context! { providers => social.0 };
     let creds = match form {
         Ok(creds) => creds,
-        Err(invalid) => return views.render_invalid("auth/login.html", ctx, invalid),
+        Err(invalid) => return views.render_invalid("auth/login.html", ctx, invalid).map(PageOrRedirect),
     };
-    match authenticate(&db, &session, &creds).await {
+    let reply = match authenticate(&db, &session, &creds).await {
         Ok(_) => {
             flash.success("You are logged in.");
             Ok(flash.redirect("/"))
@@ -558,15 +576,16 @@ async fn login_form(
             views.render_invalid("auth/login.html", ctx, Invalid::new(FormErrors::from_error(&e), &creds))
         }
         Err(e) => Err(e),
-    }
+    };
+    reply.map(PageOrRedirect)
 }
 
 /// Log out and go to the log-in page.
 #[post("/logout", tag = "pages")]
-async fn logout_form(session: Session, flash: Flash) -> Response {
+async fn logout_form(session: Session, flash: Flash) -> PageOrRedirect {
     session.destroy();
     flash.info("You are logged out.");
-    flash.redirect("/login")
+    PageOrRedirect(flash.redirect("/login"))
 }
 
 /// The "forgot your password?" page.
@@ -622,14 +641,14 @@ async fn reset_form(
     flash: Flash,
     Query(link): Query<ResetLink>,
     ValidForm(form): ValidForm<NewPassword>,
-) -> Result<Response> {
+) -> Result<PageOrRedirect> {
     let ctx = context! { token => &link.token };
     let form = match form {
         Ok(form) => form,
-        Err(invalid) => return views.render_invalid("auth/reset.html", ctx, invalid),
+        Err(invalid) => return views.render_invalid("auth/reset.html", ctx, invalid).map(PageOrRedirect),
     };
     let new_password = ResetPassword { token: link.token.clone(), password: form.password };
-    match reset_password(&db, &session, &new_password).await {
+    let reply = match reset_password(&db, &session, &new_password).await {
         Ok(_) => {
             flash.success("Your password is changed and you are logged in.");
             Ok(flash.redirect("/"))
@@ -638,6 +657,7 @@ async fn reset_form(
             views.render_invalid("auth/reset.html", ctx, Invalid { errors: FormErrors::from_error(&e), ..Invalid::default() })
         }
         Err(e) => Err(e),
-    }
+    };
+    reply.map(PageOrRedirect)
 }
 // html@@

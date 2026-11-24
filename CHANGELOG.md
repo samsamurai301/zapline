@@ -5,7 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
-- A route taking `Flash` documents its `303 See Other` (and the empty `200` htmx gets), and the `CurrentUser` that `zapline g auth` generates documents its `401`, so generated apps pass `zapline fuzz` again.
+- `zapline g auth`: the generated `CurrentUser` documents its `401` and the page form posts document their `303` redirect (`PageOrRedirect`), so generated apps pass `zapline fuzz` again. The generator now also turns on zapline's `openapi` feature.
 
 ### Reliability
 - `ServerConfig::body_read_timeout` (default 30s): a buffered request body (`Json`, `Form`, `String`, `Bytes`, ...) that takes longer to arrive gets `408` (`ZL0068`) and the connection is closed, so clients that send bodies slowly can't hold connections and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are not limited.

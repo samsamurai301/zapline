@@ -137,16 +137,6 @@ undocumented_input!(
     [] auth::CsrfToken,
 );
 
-/// A route that takes [`Flash`](crate::session::Flash) ends with
-/// `flash.redirect(..)`: `303 See Other`, or for htmx an empty `200` with
-/// `HX-Redirect`.
-#[cfg(feature = "cookies")]
-impl ApiInput for crate::session::Flash {
-    fn describe_input(op: &mut OperationDoc) {
-        op.redirect().success_empty();
-    }
-}
-
 /// A cached extractor documents like the extractor itself.
 impl<T: ApiInput> ApiInput for crate::di::Cached<T> {
     fn describe_input(op: &mut OperationDoc) {
