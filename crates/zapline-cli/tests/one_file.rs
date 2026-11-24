@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use common::*;
 
+#[cfg(unix)]
 const SLOW: Duration = Duration::from_secs(90);
 
 /// A `zapline` command with its cache in `dir/cache`.
