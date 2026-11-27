@@ -206,6 +206,8 @@ pub mod redis;
 #[cfg(feature = "storage")]
 pub mod storage;
 pub mod tasks;
+#[cfg(feature = "webhooks")]
+pub mod webhooks;
 
 // ---- observability -----------------------------------------------------------
 pub mod health;

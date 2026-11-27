@@ -47,6 +47,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE, typed `Tools` and `App::mcp` ([AI & language models](ai.md)) | `http-client`, `openapi` | none beyond `http-client` |
+| `webhooks` | `full` | `zapline::webhooks`: verify incoming webhooks (`Webhook`, `Signed<T>`: Standard Webhooks, GitHub, Stripe) and send signed ones (`WebhookSender`) ([Webhooks](webhooks.md)) | `http-client` | `hmac`, `sha2`, `getrandom` |
 | `http-client` | `full` | `zapline::outbound`: `HttpClient` with timeouts, retries and an SSRF guard ([Calling other services](outbound.md)) | `json` | `hyper-rustls` (hyper client, rustls), `tower-service` |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
 | `captcha` | `full` | `zapline::captcha`: `Captcha` (Turnstile, hCaptcha, reCAPTCHA), `App::captcha` ([Captchas](hardening.md#captcha)) | `json` | `hyper-rustls` (hyper client, rustls) |

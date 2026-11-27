@@ -33,6 +33,7 @@
 - [Caching](caching.md)
 - [Calling other services](outbound.md)
 - [AI & language models](ai.md)
+- [Webhooks](webhooks.md)
 
 # Full-stack
 
