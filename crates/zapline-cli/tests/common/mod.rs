@@ -182,8 +182,11 @@ impl Watched {
         }
     }
 
-    /// Asserts that no line containing `needle` appears within `window`.
-    pub fn assert_absent_for(&mut self, needle: &str, window: Duration) {
+    /// Asserts that no line from index `from` on contains `needle`, waiting
+    /// `window` for more output first. Earlier lines (startup, which on
+    /// macOS may report files written just before the watch began) don't
+    /// count.
+    pub fn assert_absent_after(&mut self, from: usize, needle: &str, window: Duration) {
         let deadline = Instant::now() + window;
         while Instant::now() < deadline {
             if let Ok(line) = self.lines.recv_timeout(Duration::from_millis(100)) {
@@ -191,7 +194,9 @@ impl Watched {
             }
         }
         assert!(
-            !self.seen.iter().any(|l| l.contains(needle)),
+            !self.seen[from.min(self.seen.len())..]
+                .iter()
+                .any(|l| l.contains(needle)),
             "unexpected {needle:?} in output:\n{}",
             self.seen.join("\n")
         );

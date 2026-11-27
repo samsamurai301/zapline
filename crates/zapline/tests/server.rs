@@ -194,7 +194,20 @@ fn run_with_shutdown_per_core_drains_all_workers_and_runs_hooks() {
             "GET /thread HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
         )
         .await;
-        assert!(thread.contains("zapline-worker-"), "{thread}");
+        // Per-core workers are numbered threads where SO_REUSEPORT balances
+        // (Linux, FreeBSD); elsewhere PerCore falls back to one shared
+        // runtime, whose threads are all "zapline-worker".
+        let per_core = cfg!(any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "freebsd"
+        ));
+        let expected = if per_core {
+            "zapline-worker-"
+        } else {
+            "\r\n\r\nzapline-worker"
+        };
+        assert!(thread.contains(expected), "{thread}");
 
         let in_flight = tokio::spawn(raw(addr, SLOW));
         tokio::time::sleep(Duration::from_millis(100)).await;

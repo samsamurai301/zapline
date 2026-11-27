@@ -21,6 +21,7 @@ fn app() -> App {
 |---|---|---|
 | [`SecurityHeaders`](#securityheaders) | Clickjacking, MIME sniffing, downgrade attacks, over-broad browser features | |
 | [`RateLimit`](#ratelimit) | Brute force, scraping, noisy clients | |
+| [`Idempotency`](#idempotency) | Retried `POST`s charging twice | |
 | [`Compression`](#compression) | Bandwidth cost (not an attack, but it is why you want it) | `compression` |
 | [`ConcurrencyLimit`](#concurrencylimit) | Overload: sheds load instead of collapsing | |
 | [`Timeout`](#timeout) | Handlers (or dependencies) that hang | |
@@ -195,6 +196,52 @@ fn app() -> App {
 ```
 
 `.rate_limit(limit, period)` is on both `App` and `Routes` and applies to the most recently registered route. Policies that share a `.scope(name)` share buckets, for example to cap login and password reset together. A limiter installed with plain `App::wrap` runs before routing and cannot see policies: it applies its own limit to everything, 404s included.
+
+## `Idempotency`
+
+A client that times out on `POST /payments` can't tell whether the payment went through. Retrying could charge twice, and giving up could lose the payment. With `Idempotency`, the client sends an `Idempotency-Key` header with a unique value, such as a UUID, and retries with the same key. The handler runs once, and every retry gets the first response back:
+
+```rust
+use zapline::middleware::Idempotency;
+use zapline::prelude::*;
+
+fn app() -> App {
+    let payments = Routes::new()
+        .post("/payments", || async { (StatusCode::CREATED, "charged") })
+        .wrap(Idempotency::new().required());     // clients must send a key
+
+    App::new().nest("/api", payments)
+}
+```
+
+Use `App::wrap(Idempotency::new())` instead to make keys optional on every route. Don't stack both on the same route.
+
+It follows the IETF `Idempotency-Key` header draft and applies only to `POST` and `PATCH`, since `PUT` and `DELETE` are idempotent already. Requests without a key pass through untouched unless the middleware is `.required()`:
+
+| Situation | Answer |
+|---|---|
+| First request with a key | Runs the handler, and the response is stored for `.ttl(..)` (default 24 hours) |
+| Retry of the same request | The stored response, with `Idempotent-Replayed: true` |
+| Retry while the first request still runs | `409`, code `idempotency_key_in_use` |
+| Same key, different method, path, query, content type or body | `422`, code `idempotency_key_reused` |
+| No key, with `.required()` | `400`, code `idempotency_key_missing` |
+| Key longer than 255 characters or with spaces or control characters | `400`, code `idempotency_key_invalid` |
+
+Things to know:
+
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request.
+- **Only final answers are stored.** A `2xx`, or a `4xx` like "card declined", is stored, so a retry gets the same answer. These aren't stored, so the client's retry runs the handler again:
+  - `5xx` responses;
+  - answers that may change: `401`, `403`, `404` and `405`;
+  - answers that ask for a retry: `408`, `409`, `425` and `429`;
+  - streamed bodies and bodies over 1 MiB.
+
+  `Set-Cookie` headers reach the first response only and are never replayed, so a replay can't hand a session to whoever sends the key again. Apps that refresh a session cookie on every response still get idempotency.
+- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed.
+- **Uploads pass through.** `multipart/*` requests skip idempotency. Fingerprinting buffers the request body, which would undo streaming and the larger body limits of upload routes. So do bodies whose `Content-Length` is over the app's body limit, which a `BodyStream` route may read under its own larger limit. Other bodies are buffered within the app's body limit.
+- **Slow handlers keep their key.** While a handler runs, its lock is renewed every third of `.lock_timeout(..)`. If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
+- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. When the store is full, the oldest stored responses are dropped. A client whose whole share is requests still running gets `429` (code `idempotency_keys_exhausted`) for new keys, and other clients are unaffected. Use Redis where a second run costs money.
 
 ## `Compression`
 

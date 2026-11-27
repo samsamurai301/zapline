@@ -72,7 +72,7 @@ Some modules have no feature flag because they add no dependencies:
 | Module | What it provides |
 |---|---|
 | Core | Routing, `Path`, `State`, `Extension`, `Bytes` and `String` extractors, responses, errors, the test client, startup/shutdown hooks and plugins |
-| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `SetRequestId`, `SecurityHeaders` |
+| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `Idempotency`, `SetRequestId`, `SecurityHeaders` |
 | `auth` | `BearerToken`, `BasicAuth`, `ApiKey`, `Authenticate`, `Guard`, route policies (JWT and CSRF need their own features) |
 | `di` | `Dep<T>`, `Cached<T>`, `Inject` and the `provide*` methods |
 | `tasks` | `BackgroundTasks`, `App::schedule`, `App::background` |

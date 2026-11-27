@@ -327,6 +327,8 @@ fn validate(table: &toml::Table, lines: &[BlockLine<'_>], fence: usize) -> Resul
 /// ```
 /// use std::path::PathBuf;
 /// use zapline_cli::script::cache_dir_from;
+/// # // Unix paths: on Windows they have no drive and don't count as absolute.
+/// # if cfg!(windows) { return; }
 ///
 /// let env = |k: &str| (k == "HOME").then(|| "/home/ada".into());
 /// assert_eq!(cache_dir_from(env).unwrap(), PathBuf::from("/home/ada/.cache/zapline"));
@@ -1094,9 +1096,13 @@ mod tests {
                     .map(|(_, v)| OsString::from(*v))
             }
         };
+        // An absolute path on this platform (`/x` has no drive on Windows).
+        let xdg: &'static str = if cfg!(windows) { "C:\\x" } else { "/x" };
+        let pairs: &'static [(&str, &str)] =
+            Box::leak(vec![("XDG_CACHE_HOME", xdg), ("HOME", "/h")].into_boxed_slice());
         assert_eq!(
-            cache_dir_from(env(&[("XDG_CACHE_HOME", "/x"), ("HOME", "/h")])).unwrap(),
-            PathBuf::from("/x/zapline")
+            cache_dir_from(env(pairs)).unwrap(),
+            PathBuf::from(xdg).join("zapline")
         );
         // Empty and relative XDG values are ignored.
         for xdg in ["", "relative/dir"] {
@@ -1237,7 +1243,15 @@ mod tests {
         );
         // A path source means no version is added.
         assert!(deps["zapline"].get("version").is_none());
-        assert_eq!(deps["abs"]["path"].as_str(), Some("/opt/abs"));
+        // Kept as an absolute path: `/opt/abs` on Unix. On Windows it has no
+        // drive, so it lands on the script's drive (`C:/opt/abs`); joining it
+        // onto the script's directory is exactly that rule.
+        #[allow(clippy::join_absolute_paths)]
+        let abs = dir.join("/opt/abs");
+        assert_eq!(
+            deps["abs"]["path"].as_str(),
+            Some(abs.to_string_lossy().as_ref())
+        );
         assert_eq!(
             m["target"]["cfg(unix)"]["dependencies"]["unixy"]["path"].as_str(),
             Some(dir.join("vendor/unixy").to_string_lossy().as_ref())

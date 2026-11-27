@@ -601,6 +601,32 @@ fn websocket_handshake_documents_101() {
 
 #[cfg(feature = "cookies")]
 #[test]
+fn flash_routes_declare_their_redirect_and_their_success() {
+    use zapline::session::Flash;
+
+    // A form post: `flash.redirect(..)` answers 303, or 200 with
+    // `HX-Redirect` to htmx; a page re-render answers 200 too.
+    #[post("/signup")]
+    async fn signup(flash: Flash) -> Response {
+        flash.redirect("/")
+    }
+    #[post("/page")]
+    async fn page(_flash: Flash) -> Html<&'static str> {
+        Html("<p>form</p>")
+    }
+
+    let spec = spec_for(App::new().mount((signup, page)), OpenApi::new("t", "1"));
+    for path in ["/signup", "/page"] {
+        let responses = &op(&spec, path, "post")["responses"];
+        assert!(responses.get("303").is_some(), "{path}: {responses}");
+        assert!(responses.get("200").is_some(), "{path}: {responses}");
+    }
+    let page_200 = &op(&spec, "/page", "post")["responses"]["200"];
+    assert!(page_200["content"]["text/html"].is_object(), "{page_200}");
+}
+
+#[cfg(feature = "cookies")]
+#[test]
 fn cookies_sessions_and_csrf() {
     use zapline::auth::CsrfToken;
     use zapline::cookies::{CookieJar, PrivateCookieJar, SignedCookieJar};

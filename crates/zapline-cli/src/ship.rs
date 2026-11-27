@@ -1249,6 +1249,7 @@ fn create_staging(stem: &Path) -> Result<PathBuf> {
         let mut name = stem.as_os_str().to_owned();
         name.push(format!(".{:016x}", h.finish()));
         let path = PathBuf::from(name);
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut builder = fs::DirBuilder::new();
         #[cfg(unix)]
         {

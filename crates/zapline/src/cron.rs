@@ -1672,9 +1672,14 @@ mod tests {
         let upcoming: Vec<_> = every_second.upcoming(UNIX_EPOCH).take(3).collect();
         assert_eq!(upcoming.len(), 3);
         assert_eq!(upcoming[2], UNIX_EPOCH + Duration::from_secs(3));
-        // Far in the future there is no next run rather than a panic.
-        let year_300000 = UNIX_EPOCH + Duration::from_secs(300_000 * 366 * 86_400);
-        let _ = cron.next_after(year_300000);
+        // Far in the future there is no next run rather than a panic. Windows'
+        // SystemTime ends around year 30828, so it gets about year 30 000
+        // (28 000 366-day years after 1970) instead of year 300 000.
+        let far = [300_000u64, 28_000]
+            .into_iter()
+            .find_map(|years| UNIX_EPOCH.checked_add(Duration::from_secs(years * 366 * 86_400)))
+            .expect("year 30 000 fits every platform's SystemTime");
+        let _ = cron.next_after(far);
     }
 
     #[cfg(feature = "tz")]

@@ -350,7 +350,8 @@ fn new_respects_path_and_zapline_path() {
     let manifest = read_toml(&parent.join("svc/Cargo.toml"));
     let dep = &manifest["dependencies"]["zapline"];
     let path = dep["path"].as_str().unwrap();
-    assert!(path.ends_with("crates/zapline"), "{path}");
+    // Compared by components: on Windows the path ends `crates\zapline`.
+    assert!(Path::new(path).ends_with("crates/zapline"), "{path}");
     assert!(Path::new(path).is_absolute());
     assert!(!tmp.path().join("svc").exists());
 }
