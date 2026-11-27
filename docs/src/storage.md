@@ -66,6 +66,7 @@ Local links are signed with a random key per process, so they stop working at re
 use zapline::storage::{unique_key, PutOptions, Storage};
 use zapline::stream::BodyStream;
 use zapline::Body;
+# use zapline::prelude::*;
 
 #[put("/videos/{name}")]
 async fn upload(storage: Storage, Path(name): Path<String>, body: BodyStream) -> Result<String> {
@@ -89,6 +90,15 @@ Locally the stream goes to a temporary file that replaces the old one only when 
 
 ```rust
 use zapline::storage::{unique_key, Storage, UploadUrl};
+# use std::time::Duration;
+# use zapline::extract::FromRequestParts;
+# use zapline::prelude::*;
+# #[derive(Clone)]
+# struct User { id: i64 }
+# struct CurrentUser(User);
+# impl FromRequestParts for CurrentUser {
+#     async fn from_request_parts(_req: &mut Request) -> Result<Self> { Err(Error::unauthorized()) }
+# }
 
 #[post("/avatar/upload-url")]
 async fn avatar_upload_url(storage: Storage, user: CurrentUser) -> Result<Json<UploadUrl>> {

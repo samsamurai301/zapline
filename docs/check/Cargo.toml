@@ -1,0 +1,25 @@
+[package]
+name = "zapline-guide-check"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Compiles the guide's code blocks (docs/src/*.md) as doctests."
+
+[dependencies]
+zapline = { path = "../../crates/zapline", features = ["full", "sqlite", "postgres", "http3"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1"
+validator = { version = "0.21", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+futures-util = "0.3"
+# For `#[derive(sqlx::FromRow)]` in the database chapter (its expansion names `::sqlx`).
+sqlx = { version = "0.8", default-features = false, features = ["derive"] }
+# The one-file chapter's example app depends on uuid directly.
+uuid = { version = "1", features = ["v4"] }
+# The upstream-issues chapter's hyper reproduction.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+# The WebSockets chapter's real-socket test.
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["connect", "handshake"] }

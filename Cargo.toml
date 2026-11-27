@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-codegen", "crates/zapline-cli", "examples", "bench/servers"]
+members = ["crates/zapline", "crates/zapline-macros", "crates/zapline-codegen", "crates/zapline-cli", "examples", "bench/servers", "docs/check"]
 # Their own workspaces, with their own lockfiles: they never slow down this one.
 exclude = ["examples/saas", "examples/ecosystem"]
 

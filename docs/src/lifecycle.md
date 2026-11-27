@@ -5,6 +5,7 @@
 Register any `Clone + Send + Sync + 'static` value and extract it with `State<T>`:
 
 ```rust
+# use zapline::prelude::*;
 #[derive(Clone)]
 struct AppConfig { greeting: String }
 
@@ -20,6 +21,16 @@ State is keyed by type, so you can register as many types as you want. `State<T>
 Resources that need async setup, such as database pools, caches, clients or warmed data, belong in a startup hook. Hooks run in registration order before the server accepts connections. Anything a hook inserts into `Resources` becomes available as `State<T>`:
 
 ```rust
+# use zapline::prelude::*;
+# #[derive(Clone)]
+# struct Settings { database_url: String }
+# #[derive(Clone)]
+# struct Db;
+# impl Db {
+#     async fn connect(_url: &str) -> std::io::Result<Db> { Ok(Db) }
+#     async fn close(&self) {}
+# }
+# let _app =
 App::new()
     .on_startup(|res: Resources| async move {
         let url = res.require::<Settings>()?.database_url;
@@ -29,6 +40,7 @@ App::new()
     .on_shutdown(|res: Resources| async move {
         if let Some(db) = res.get::<Db>() { db.close().await; }
     })
+# ;
 ```
 
 - If a startup hook fails, `App::run` returns the error and never binds the port.
@@ -41,6 +53,8 @@ App::new()
 A plugin is a reusable bundle of routes, middleware, state and hooks. Any function `FnOnce(App) -> App` is a plugin:
 
 ```rust
+# use zapline::prelude::*;
+# fn admin_routes() -> Routes { Routes::new() }
 pub fn admin_console(app: App) -> App {
     app.nest("/admin", admin_routes())
        .on_startup(|res| async move { /* ... */ Ok(()) })
@@ -56,6 +70,8 @@ For configurable plugins, implement the `Plugin` trait on a struct. The built-in
 `App::on_build(|routes: &[&'static RouteInfo]| -> Routes)` runs once the route table is final. A plugin can inspect every route and its metadata, then add more routes. This is how `/openapi.json` is generated once at startup instead of on each request:
 
 ```rust
+# use zapline::prelude::*;
+# let _app =
 App::new().on_build(|routes| {
     let listing: Vec<String> = routes.iter().map(|r| r.path().to_owned()).collect();
     Routes::new().get("/_routes", move || {
@@ -63,6 +79,7 @@ App::new().on_build(|routes| {
         async move { body }
     })
 })
+# ;
 ```
 
 ### Builder-time storage

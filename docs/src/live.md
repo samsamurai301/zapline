@@ -5,6 +5,9 @@
 ```rust
 use zapline::live::Live;
 use zapline::prelude::*;
+# use zapline::view::{context, Views};
+# #[model]
+# struct Message { text: String }
 
 #[get("/live/chat")]
 async fn listen(live: Live) -> Response {

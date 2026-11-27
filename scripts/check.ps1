@@ -56,6 +56,9 @@ $env:RUSTDOCFLAGS = "-D warnings"
 Run cargo @("doc", "-p", "zapline", "--all-features", "--no-deps")
 Remove-Item Env:\RUSTDOCFLAGS
 
+Step "the guide's code compiles"
+Run cargo @("test", "-p", "zapline-guide-check", "--doc")
+
 if ($Mode -eq "ecosystem") {
     Step "ecosystem examples (sqlx, SeaORM, Diesel, Leptos)"
     # Their own workspace and lockfile, so their dependencies stay out of the main build.

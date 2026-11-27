@@ -10,6 +10,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - `ServerConfig::body_idle_timeout` (default 30s): a streaming upload (`BodyStream`, `Multipart`, storage uploads) that sends no data for that long gets `408` and the connection is closed. It limits gaps between chunks, not the whole upload, so large uploads on slow links still finish. Requests that don't stream pay nothing.
 - `zapline::captcha` (feature `captcha`): `Captcha::turnstile`, `::hcaptcha` and `::recaptcha` verify a form's widget token with `captcha.verify(token, ip)`. Missing or rejected tokens get `400`; an unreachable provider gets `503` (it fails closed). Register it with `App::captcha` and take it as a handler argument.
 - Guide: a *Stability & versioning* chapter (what counts as public API, 0.x and 1.0 rules, deprecation, MSRV and security-fix policy). `RELEASING.md` and a manual *Release check* workflow run `cargo-semver-checks` against the last release tag.
+- The guide is compile-checked: `docs/check` (`cargo test -p zapline-guide-check --doc`, run by CI and `check.sh`) compiles every `rust` block in `docs/src` (208 blocks; 29 marked `ignore` with a reason), and picks up new chapters automatically. Making them compile fixed a wrong `context!` call in the translations chapter (`unread: 3` → `unread => 3`).
 - OpenAPI: handlers taking `session::Flash` document a `303` redirect next to their usual success response, and `zapline g auth`'s `CurrentUser` documents its `401`, so generated apps pass `zapline fuzz`.
 
 ### Reliability

@@ -56,6 +56,9 @@ fi
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps
 
+step "the guide's code compiles"
+cargo test -p zapline-guide-check --doc
+
 if [[ "${1:-}" == "ecosystem" ]]; then
   step "ecosystem examples (sqlx, SeaORM, Diesel, Leptos)"
   # Their own workspace and lockfile, so their dependencies stay out of the

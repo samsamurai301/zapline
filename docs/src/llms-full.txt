@@ -974,7 +974,9 @@ async fn add_member(
     Query(opts): Query<AddOptions>,       // query string
     user: CurrentUser<Claims>,            // auth (see the Security chapter)
     Json(body): Json<NewMember>,          // body: must be last
-) -> Result<StatusCode> { /* ... */ }
+) -> Result<StatusCode> {
+    todo!()
+}
 ```
 
 If an extractor fails, its error response is returned and the handler isn't called. For example, a bad path parameter gives a 400 and a wrong content type gives a 415. Rejections carry a stable `code`, and `details` that locate the problem:
@@ -1705,7 +1707,7 @@ Middleware can short-circuit by returning a response without calling `next.run`.
 
 ## Where middleware runs
 
-```
+```text
 request ─▶ global (App::wrap) ─▶ routing ─▶ route (App::wrap_route) ─▶ group (Routes::wrap) ─▶ handler
 ```
 
@@ -5250,7 +5252,7 @@ With the `views` feature, pass the `Locale` into the context and call it:
 ```rust
 #[get("/")]
 async fn index(views: Views, t: Locale) -> Result<Html<String>> {
-    views.render("index.html", context! { t, unread: 3 })
+    views.render("index.html", context! { t, unread => 3 })
 }
 ```
 
@@ -5332,7 +5334,7 @@ It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, ad
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
-```rust
+```rust,ignore
 use crate::routes::auth::CurrentUser;
 
 #[get("/api/notes")]

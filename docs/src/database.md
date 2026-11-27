@@ -69,6 +69,9 @@ Resources made by `zapline g resource` turn the two 409s into errors that name t
 
 ```rust
 use zapline::db::{sqlx, Db, ListParams, Listing, Paged};
+# use zapline::prelude::*;
+# #[derive(serde::Serialize, sqlx::FromRow)]
+# struct Post { id: i64, title: String, published: bool, author_id: i64 }
 
 #[get("/api/posts")]
 async fn list(db: Db, params: ListParams) -> Result<Json<Paged<Post>>> {
