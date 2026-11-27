@@ -63,7 +63,7 @@ captcha = ["json", "_http-client"]
 # `zapline::outbound`: an HTTP(S) client with timeouts, retries and an SSRF guard.
 http-client = ["json", "_http-client", "dep:tower-service"]
 # `zapline::ai`: Claude and OpenAI-compatible LLMs, with streaming to SSE.
-ai = ["http-client"]
+ai = ["http-client", "openapi"]
 # Internal: the HTTPS client behind `s3`, `oauth`, `captcha`, `jwks` and `otlp`.
 _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 

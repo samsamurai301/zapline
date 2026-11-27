@@ -51,6 +51,11 @@ use crate::response::{IntoResponse, Response};
 use crate::sse::{Event, Sse};
 use crate::{Error, Result};
 
+mod mcp;
+mod tools;
+
+pub use tools::{ToolCall, ToolContext, Tools};
+
 const ANTHROPIC_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2026-10-21";
 /// The default Claude model.
@@ -358,13 +363,22 @@ pub enum Role {
     Assistant,
 }
 
+/// A message in the conversation: text, or a provider's own message kept
+/// as it came (tool calls, tool results, and any thinking blocks, which must
+/// go back unchanged).
+#[derive(Clone, Debug)]
+enum Msg {
+    Text(Role, String),
+    Raw(Value),
+}
+
 /// One request: a system prompt and the conversation so far.
 #[derive(Clone, Debug)]
 #[must_use = "a chat does nothing until it is sent"]
 pub struct Chat {
     llm: Llm,
     system: Option<String>,
-    messages: Vec<(Role, String)>,
+    messages: Vec<Msg>,
     max_tokens: Option<u32>,
     effort: Option<Effort>,
 }
@@ -378,13 +392,13 @@ impl Chat {
 
     /// A user message.
     pub fn user(mut self, text: impl Into<String>) -> Self {
-        self.messages.push((Role::User, text.into()));
+        self.messages.push(Msg::Text(Role::User, text.into()));
         self
     }
 
     /// An earlier answer from the model (for multi-turn conversations).
     pub fn assistant(mut self, text: impl Into<String>) -> Self {
-        self.messages.push((Role::Assistant, text.into()));
+        self.messages.push(Msg::Text(Role::Assistant, text.into()));
         self
     }
 
@@ -395,7 +409,7 @@ impl Chat {
         S: Into<String>,
     {
         self.messages
-            .extend(messages.into_iter().map(|(r, t)| (r, t.into())));
+            .extend(messages.into_iter().map(|(r, t)| Msg::Text(r, t.into())));
         self
     }
 
@@ -411,7 +425,7 @@ impl Chat {
         self
     }
 
-    fn body(&self, stream: bool) -> Value {
+    fn body(&self, stream: bool, tools: Option<&Tools>) -> Value {
         let inner = &self.llm.inner;
         let max_tokens = self
             .max_tokens
@@ -420,13 +434,13 @@ impl Chat {
             Role::User => "user",
             Role::Assistant => "assistant",
         };
+        let message = |m: &Msg| match m {
+            Msg::Text(r, t) => json!({"role": role(*r), "content": t}),
+            Msg::Raw(v) => v.clone(),
+        };
         match inner.provider {
             Provider::Anthropic => {
-                let messages: Vec<Value> = self
-                    .messages
-                    .iter()
-                    .map(|(r, t)| json!({"role": role(*r), "content": t}))
-                    .collect();
+                let messages: Vec<Value> = self.messages.iter().map(message).collect();
                 let mut body = json!({
                     "model": inner.model,
                     "max_tokens": max_tokens,
@@ -444,6 +458,9 @@ impl Chat {
                 if stream {
                     body["stream"] = json!(true);
                 }
+                if let Some(tools) = tools.filter(|t| !t.is_empty()) {
+                    body["tools"] = tools.anthropic_json();
+                }
                 body
             }
             Provider::OpenAi => {
@@ -451,11 +468,7 @@ impl Chat {
                 if let Some(system) = &self.system {
                     messages.push(json!({"role": "system", "content": system}));
                 }
-                messages.extend(
-                    self.messages
-                        .iter()
-                        .map(|(r, t)| json!({"role": role(*r), "content": t})),
-                );
+                messages.extend(self.messages.iter().map(message));
                 let mut body = json!({
                     "model": inner.model,
                     "max_tokens": max_tokens,
@@ -464,6 +477,9 @@ impl Chat {
                 if stream {
                     body["stream"] = json!(true);
                     body["stream_options"] = json!({"include_usage": true});
+                }
+                if let Some(tools) = tools.filter(|t| !t.is_empty()) {
+                    body["tools"] = tools.openai_json();
                 }
                 body
             }
@@ -478,11 +494,15 @@ impl Chat {
     }
 
     async fn post(&self, stream: bool) -> Result<HttpResponse> {
+        let body = self.body(stream, None);
+        self.post_body(&body).await
+    }
+
+    async fn post_body(&self, body: &Value) -> Result<HttpResponse> {
         if self.messages.is_empty() {
             return Err(Error::internal("a chat needs at least one message"));
         }
         let inner = &self.llm.inner;
-        let body = self.body(stream);
         let mut attempt = 0u32;
         loop {
             let req = match inner.provider {
@@ -508,7 +528,7 @@ impl Chat {
                     }
                 }
             };
-            let res = req.json(&body).send().await?;
+            let res = req.json(body).send().await?;
             let status = res.status();
             if status.is_success() {
                 return Ok(res);
@@ -658,6 +678,9 @@ pub struct Reply {
     pub usage: Usage,
     /// The model that answered (with fallbacks, possibly not the one asked).
     pub model: String,
+    /// The tools [`Chat::run`] called on the way, in order (empty for
+    /// [`Chat::send`]).
+    pub tool_calls: Vec<ToolCall>,
 }
 
 impl Reply {
@@ -680,6 +703,7 @@ impl Reply {
                 output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
             },
             model: v["model"].as_str().unwrap_or("").to_owned(),
+            tool_calls: Vec::new(),
         }
     }
 
@@ -696,6 +720,7 @@ impl Reply {
                 output_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
             },
             model: v["model"].as_str().unwrap_or("").to_owned(),
+            tool_calls: Vec::new(),
         }
     }
 }
@@ -918,7 +943,7 @@ mod tests {
     #[test]
     fn anthropic_body_has_fallbacks_effort_and_no_sampling() {
         let llm = Llm::anthropic("k").effort(Effort::High);
-        let body = llm.chat().system("be brief").user("hi").body(false);
+        let body = llm.chat().system("be brief").user("hi").body(false, None);
         assert_eq!(body["model"], "claude-opus-5-5");
         assert_eq!(body["max_tokens"], 16_000);
         assert_eq!(body["system"], "be brief");
@@ -929,7 +954,7 @@ mod tests {
         assert_eq!(body["output_config"]["effort"], "high");
         assert_eq!(body["fallbacks"], "default");
         assert!(body.get("temperature").is_none());
-        let streaming = llm.chat().user("hi").body(true);
+        let streaming = llm.chat().user("hi").body(true, None);
         assert_eq!(streaming["max_tokens"], 64_000);
         assert_eq!(streaming["stream"], true);
         // Models without server-side fallback don't get the field.
@@ -937,7 +962,7 @@ mod tests {
         assert!(haiku
             .chat()
             .user("x")
-            .body(false)
+            .body(false, None)
             .get("fallbacks")
             .is_none());
     }
@@ -945,7 +970,7 @@ mod tests {
     #[test]
     fn openai_body_puts_the_system_prompt_first() {
         let llm = Llm::openai_compatible("http://x/v1", "", "m");
-        let body = llm.chat().system("s").user("u").body(true);
+        let body = llm.chat().system("s").user("u").body(true, None);
         assert_eq!(
             body["messages"][0],
             json!({"role": "system", "content": "s"})
