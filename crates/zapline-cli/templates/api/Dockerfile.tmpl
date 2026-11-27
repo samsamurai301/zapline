@@ -26,6 +26,7 @@ RUN apt-get update \
 COPY --from=builder /app/target/release/@@name@@ /usr/local/bin/app
 
 USER app
-ENV ADDR=0.0.0.0:8080
+# Hosts that pick the port (Railway, Render, ...) override PORT.
+ENV PORT=8080
 EXPOSE 8080
 ENTRYPOINT ["app"]

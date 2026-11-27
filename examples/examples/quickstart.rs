@@ -2,10 +2,9 @@
 //!
 //!     cargo run -p zapline-examples --example quickstart
 
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+#[model]
 struct NewUser {
     #[validate(length(min = 1, max = 64))]
     name: String,

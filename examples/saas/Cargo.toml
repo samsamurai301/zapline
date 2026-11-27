@@ -1,0 +1,23 @@
+[package]
+name = "saas"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+zapline = { path = "../../crates/zapline", features = ["cookies", "mail", "password", "sqlite", "views", "fs"] }
+sqlx = { version = "0.8", default-features = false, features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+# Password hashing is deliberately slow; unoptimized it takes most of a second.
+[profile.dev.package.argon2]
+opt-level = 3
+[workspace]

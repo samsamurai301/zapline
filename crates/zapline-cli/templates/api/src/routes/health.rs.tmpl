@@ -1,11 +1,9 @@
 //! Liveness endpoint for load balancers and orchestrators.
 
-use serde::Serialize;
-use zapline::openapi::JsonSchema;
 use zapline::prelude::*;
 
 /// Body of `GET /health`.
-#[derive(Serialize, JsonSchema)]
+#[model]
 pub struct HealthStatus {
     pub status: &'static str,
 }

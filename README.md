@@ -1,12 +1,19 @@
 # zapline
 
-**The productive, batteries-included Rust web framework: FastAPI ergonomics, enterprise structure, and top-of-the-chart performance.**
+[![CI](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml/badge.svg)](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/zapline.svg)](https://crates.io/crates/zapline)
+[![docs.rs](https://img.shields.io/docsrs/zapline)](https://docs.rs/zapline)
+[![guide](https://img.shields.io/badge/guide-mdBook-blue)](https://samsamurai301.github.io/zapline/)
+[![license](https://img.shields.io/badge/license-MIT%2FApache--2.0-blue)](#license)
+
+**FastAPI ergonomics at actix-web speed, built for humans and AI coding agents.**
+
+A batteries-included Rust web framework: typed handlers, OpenAPI generated from your code, validation, DI, auth, sessions, realtime, metrics, a thread-per-core server, and a CLI that scaffolds, generates and live-reloads. Small API surface, one obvious way to do each thing, and docs packaged so an AI assistant can learn the common 90% of the framework in about 2k tokens. The same API takes [about half the tokens](bench/tokens/results.md) to write in zapline as in axum or actix-web.
 
 ```rust
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+#[model] // serde + JSON Schema + validation, no extra crates
 struct NewUser {
     #[validate(length(min = 1, max = 64))]
     name: String,
@@ -38,6 +45,7 @@ That's a complete service. The request body is parsed and validated, and invalid
 | 🧑‍💻 **FastAPI-style DX** | Typed extractors, automatic OpenAPI from handler signatures, validation with field-level errors, `?` everywhere, an in-process test client, and a CLI with project scaffolding and a reloading dev server. |
 | 🏢 **Enterprise structure** | Dependency injection, layered config with profiles, lifecycle hooks, plugins, guards and policies, structured errors, health checks, Prometheus metrics and tracing. |
 | 🔒 **Secure defaults** | Auth policies fail closed. It has constant-time credential checks, path-traversal-proof static files, signed/private cookies, CSRF protection, rate limiting, security headers and body limits. |
+| 🤖 **AI-native** | Every new project ships an `AGENTS.md`. The guide is published as [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) plus a ~2k-token [cheatsheet](docs/src/cheatsheet.md) covering the common 90%. `zapline mcp` serves docs, generators, routes, `check` and `test` to Claude Code, Cursor and other MCP clients, and `zapline check` / `zapline test` answer in 68–79% fewer tokens than cargo ([token benchmark](bench/tokens/results.md)). |
 | 🧩 **Pay for what you use** | Optional features are Cargo features built on public extension points. Unused features cost nothing at runtime. |
 
 ## Features at a glance
@@ -47,35 +55,42 @@ That's a complete service. The request body is parsed and validated, and invalid
 | Routing | `#[get]`/`#[post]`/... macros or builder methods, typed path params, nested groups, per-route metadata, 404/405 handling |
 | Extractors | `Path`, `Query`, `Json`, `Form`, `Bytes`, `State`, `Dep`, `Valid`, `Multipart`, `BodyStream`, `CookieJar`, `Session`, `CurrentUser`, `Jwt`, `BearerToken`, `ConnInfo`, ... |
 | API docs | OpenAPI 3.1 generated from signatures and doc comments; Swagger UI, Scalar and Redoc; security schemes from auth policies; export with `zapline openapi` |
-| Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` derives, returning `422` with `[{field, code, message}]` |
+| Validation | `Valid<Json<T>>` (also `Form`, `Query`, `Path`) using `validator` rules (`#[model]` derives them), returning `422` with `[{field, code, message}]` |
 | App structure | `Dep<T>` DI with trait objects and async factories, `Config::load()` (TOML layers + env + `.env` + profiles), `on_startup`/`on_shutdown`, plugins |
 | Background work | `BackgroundTasks` after the response, `App::schedule(Schedule::every(..))`, long-running workers with shutdown tokens |
-| Security | Bearer, Basic and API-key extractors; JWT (HS/RS/ES); `Authenticate` + `CurrentUser`; `.require_roles/.require_scopes` guards; cookies; sessions; CSRF |
+| Security | Bearer, Basic and API-key extractors; JWT (HS/RS/ES); social login (GitHub, Google, any OAuth 2 provider, PKCE); `Authenticate` + `CurrentUser`; `.require_roles/.require_scopes` guards; cookies; sessions; CSRF |
 | Middleware | CORS, compression (br/zstd/gzip), rate limiting (per IP/key/route), request IDs, security headers, timeouts, catch-panic, load shedding, path normalization |
-| Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed), multipart uploads |
-| Observability | `tracing` spans per request, Prometheus `/metrics` with route labels, `/health/live` and `/health/ready` with checks |
+| Realtime & content | WebSockets, Server-Sent Events, streaming bodies and NDJSON, static files (ETag/Range/precompressed, content-hashed URLs cached forever), multipart uploads |
+| Observability | `tracing` spans per request, exported to any OpenTelemetry backend over OTLP (set `OTEL_EXPORTER_OTLP_ENDPOINT`, no SDK); Prometheus `/metrics` with route labels; `/health/live` and `/health/ready` with checks |
 | Server | HTTP/1.1 with pipelining, HTTP/2, TLS (rustls), graceful shutdown, connection limits, per-core or work-stealing runtime |
-| Tooling | `zapline new` (minimal, api and full templates), `generate`, `dev` (auto-restart), `routes`, `openapi`, `doctor`, `bench` |
+| Full-stack | SQL databases (Postgres, SQLite via sqlx) with migrations at startup and a `Db` extractor; MiniJinja views with hot reload and htmx fragments; in-memory test databases and one-line test data (`Factory::new("posts").create(&pool)` fills required columns and parent rows from the schema) plus seeds (`zapline db seed`); accounts in one command (`zapline g auth`: Argon2id, database sessions, password reset by email, GitHub/Google login, htmx pages); durable jobs with retries in the same database; email with a dev inbox; file storage on disk or S3 with expiring links; caching (stampede-free `get_or_set`, page caching, ETags); live updates pushed to every open page over SSE or WebSockets; shared cache, live updates, rate limits and sessions in Redis for running several instances (built-in client); translations (TOML per language, `Accept-Language`, plurals, `t()` in templates); an admin panel at `/admin` for every table, read from the schema (search, sort, edit, no code per table); a dev console at `/_dev` (routes, recent requests, job queue, inbox); a typed TypeScript client generated from your handlers (`zapline client`, kept live by `zapline dev --client`) |
+| Tooling | `zapline new` (minimal, api, full and fullstack templates), `generate resource name field:type...` (migration + CRUD + page + tests), `db new/migrate`, `dev` (auto-restart, detailed errors), `g tailwind` (Tailwind CSS with no Node, rebuilt live by `dev`), `g deploy fly\|railway\|render\|compose`, `routes`, `openapi`, `doctor`, `bench` |
 
 ## Getting started
 
+A full-stack app (HTML + htmx, SQL database, JSON API, tests) in four commands, with no database server and no Node:
+
 ```sh
-cargo install --path crates/zapline-cli      # provides `zapline` and `cargo zapline`
-zapline new my-api                           # --template minimal | api | full
-cd my-api && zapline dev                     # rebuilds and restarts on change
+cargo install zapline-cli                                        # provides `zapline` and `cargo zapline`
+zapline new shop --template fullstack && cd shop                 # SQLite file, migrations, htmx pages, OpenAPI
+zapline g resource product name price:float stock:int featured:bool   # migration + SQL CRUD API + htmx page + tests
+zapline dev                                                      # http://localhost:8080/products and /docs
 ```
 
-zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install --path crates\zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
+Add accounts with password reset (`zapline g auth`) and a durable background job (`zapline g job send_welcome`), and you have the [**saas example**](examples/saas): a multi-user app with sign-up, emailed reset links, per-user data, a welcome email sent by a retried job, a dev inbox at `/_dev/mail`, an admin panel for the accounts in `ADMIN_EMAILS`, and 13 end-to-end tests, about 100 lines beyond what the CLI generated.
+
+Or an API service: `zapline new my-api` (templates: `minimal`, `api`, `full`, `fullstack`).
+
+zapline supports **Linux, macOS and Windows**: CI runs the full test suite on all three. On Windows, install the Visual Studio C++ Build Tools, then use PowerShell (`.\scripts\check.ps1`, `cargo install zapline-cli`). See [Platform support](docs/src/platforms.md) for the details.
 
 Or add it to an existing project:
 
 ```toml
 [dependencies]
-zapline = "0.1"                                  # default features: macros, json, query, form, openapi, validate, config, tracing
-serde = { version = "1", features = ["derive"] }
-schemars = "1"                                   # for #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }
+zapline = "0.1"   # default features: macros, json, query, form, openapi, validate, config, tracing
 ```
+
+`#[model]` derives serde, `JsonSchema` and `Validate` through zapline's re-exports, so no other crate is needed.
 
 Enable more with features such as `ws`, `fs`, `multipart`, `compression`, `jwt`, `cookies`, `tls` and `http2`, or turn on everything with `full`.
 
@@ -142,9 +157,12 @@ async fn unknown_user_is_404() {
 
 ## Documentation
 
-- **The guide** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
+- **[Cheatsheet](docs/src/cheatsheet.md)**: one runnable file with the canonical way to do each common task. Start here, or point your AI assistant at it.
+- **For AI assistants**: [`llms.txt`](https://samsamurai301.github.io/zapline/llms.txt) (index) and [`llms-full.txt`](https://samsamurai301.github.io/zapline/llms-full.txt) (the whole guide in one file). Agents working on zapline itself should read [`AGENTS.md`](AGENTS.md).
+- **[The guide](https://samsamurai301.github.io/zapline/)** (`docs/`, an mdBook): getting started, core concepts, API docs and validation, DI and config, security, realtime, observability, deployment, and performance. Build it with `mdbook serve docs`.
 - **API reference**: `cargo doc -p zapline --all-features --open`
-- **Examples** in [`examples/examples`](examples/examples): `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
+- **The saas example** in [`examples/saas`](examples/saas): accounts, password reset, per-user data, durable jobs, email and a schedule in one app.
+- **Examples** in [`examples/examples`](examples/examples): `cheatsheet`, `hello`, `rest_api`, `openapi`, `enterprise_layered`, `auth_jwt`, `auth_session`, `middleware_stack`, `observability`, `realtime_chat`, `realtime_sse`, `realtime_files`. Run one with `cargo run -p zapline-examples --example openapi`.
 - [`ARCHITECTURE.md`](ARCHITECTURE.md) covers the internals and the plugin extension points.
 
 ## Benchmarks

@@ -35,7 +35,7 @@ The route macros read the doc comment and the handler signature (`Path<T>`, `Que
 Requirements:
 
 - Cargo features `openapi` (on by default, implies `json`) and `macros` (on by default) for the automatic parts.
-- Types appear in the spec when they implement `JsonSchema`. The derive expands to paths in the `schemars` crate, so add it to your `Cargo.toml`:
+- Types appear in the spec when they implement `JsonSchema`. `#[model]` derives it for you (along with serde and `Validate`) with no extra dependency. The plain derive expands to paths in the `schemars` crate, so add it to your `Cargo.toml`:
 
   ```toml
   schemars = "1"

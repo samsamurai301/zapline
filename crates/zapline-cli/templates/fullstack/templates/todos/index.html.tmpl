@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Todos · @@name@@{% endblock %}
+{% block content %}
+<h1>Todos</h1>
+
+<form hx-post="/todos" hx-target="#todos" hx-on::after-request="if (event.detail.successful) this.reset()">
+  <input name="title" placeholder="What needs doing?" required maxlength="200" autofocus>
+  <button>Add</button>
+</form>
+
+{# Live: other tabs and users see changes as they happen. #}
+<ul id="todos" hx-ext="sse" sse-connect="/live/todos" sse-swap="list">
+  {% block list %}
+  {% for todo in todos %}
+  <li class="{{ 'done' if todo.done }}">
+    <label>
+      <input type="checkbox" {{ 'checked' if todo.done }}
+             hx-post="/todos/{{ todo.id }}/toggle" hx-target="#todos">
+      {{ todo.title }}
+    </label>
+    <button class="link" hx-delete="/todos/{{ todo.id }}" hx-target="#todos" aria-label="Delete">✕</button>
+  </li>
+  {% else %}
+  <li class="empty">Nothing to do yet.</li>
+  {% endfor %}
+  {% endblock %}
+</ul>
+
+<p><small>JSON API and interactive docs at <a href="/docs">/docs</a>.</small></p>
+{% endblock %}

@@ -1,0 +1,68 @@
+# AGENTS.md
+
+Guidance for AI coding assistants (and humans) working on saas, a
+[zapline](https://github.com/samsamurai301/zapline) web app. Keep changes
+small and follow the conventions below; they are what the CLI generators and
+tests expect.
+
+## Commands
+
+```sh
+zapline test [name]                 # tests; prints only totals + failures
+zapline check [--clippy]            # one line per error/warning, with the fix
+cargo fmt
+zapline dev                         # run with live reload on :8080
+zapline routes --json               # machine-readable route table
+zapline openapi -o openapi.json     # the API contract, generated from code
+zapline generate resource <name>    # new CRUD module + tests, auto-registered
+zapline generate handler <name> --method get
+zapline generate auth               # accounts + password reset (needs a database)
+zapline generate job <name>         # durable background job (needs a database)
+```
+
+Run `zapline test` after every change (it wraps `cargo test` and prints a
+fraction of the output). A change is done when `cargo fmt`,
+`zapline check --clippy` and `zapline test` pass.
+
+With an MCP-capable assistant, `zapline mcp` serves all of this as tools
+(plus `docs`, which answers with just the guide section you need):
+`claude mcp add zapline -- zapline mcp`.
+
+## Conventions (one way to do each thing)
+
+- **App**: `src/lib.rs` exposes `pub fn app() -> App`. `src/main.rs` only runs it.
+  Tests call `app().test()`.
+- **Routes**: one module per resource in `src/routes/`, each with
+  `pub fn mount(app: App) -> App`. Register modules between the
+  `// zapline:routes:start` / `// zapline:routes:end` markers in
+  `src/routes/mod.rs` (the generators do this for you).
+- **Handlers**: route macros (`#[get("/path/{id}")]`, `#[post(...)]`) on
+  `async fn`s. Arguments are extractors: `Path<T>`, `Query<T>`, `Json<T>`,
+  `Valid<Json<T>>` (validated body, 422 on failure), `State<T>`, `Dep<T>`.
+- **Mounting**: `app.mount((handler_a, handler_b))`.
+- **Background work**: work that must not be lost (email, webhooks) is a
+  durable job in `src/jobs/` (`zapline g job <name>`), enqueued with
+  `jobs.enqueue(..)`; `BackgroundTasks` only for best-effort work.
+- **Errors**: return `Result<T>` (zapline's) and use `?`. Build HTTP errors
+  with `Error::not_found()`, `Error::bad_request(msg)`, `Error::conflict(msg)`,
+  and add a stable machine code with `.with_code("snake_case")`. Map domain
+  errors with `impl From<MyError> for Error`.
+- **Models**: put `#[model]` on request/response structs (it derives Debug,
+  Clone, Serialize, Deserialize, JsonSchema and Validate; no other crates
+  needed). Doc comments on handlers and fields become the OpenAPI description.
+- **Shared state**: `App::state(value)` + `State<T>` for plain values;
+  `App::provide`/`provide_dyn` + `Dep<T>` for services behind traits.
+- **Tests**: one file per resource in `tests/`, using
+  `let client = app().test(); client.get("/x").send().await`.
+
+## Don'ts
+
+- Don't add a `#[tokio::main]`; `App::run` starts a tuned runtime itself.
+- Don't add axum/tower/actix crates; zapline has its own middleware
+  (`async fn(Request, Next) -> Response`, registered with `.wrap(...)`).
+- Don't hand-write OpenAPI; it is generated from handler signatures.
+
+## Reference
+
+Full guide: <https://samsamurai301.github.io/zapline/>. Single-file version
+for LLM context: <https://samsamurai301.github.io/zapline/llms-full.txt>.

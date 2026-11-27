@@ -1,6 +1,6 @@
 # @@name@@
 
-A minimal [zapline](https://github.com/your-org/zapline) app.
+A minimal [zapline](https://github.com/samsamurai301/zapline) app.
 
 ```sh
 zapline dev          # rebuild and restart on every change
@@ -20,7 +20,7 @@ curl localhost:8080/hello/world
 | Path | What it is |
 |---|---|
 | `src/lib.rs` | Routes and `app()`, which builds the `App` |
-| `src/main.rs` | Serves `app()`; set `ADDR` to change the bind address |
+| `src/main.rs` | Serves `app()`; set `ADDR` (or just `PORT`) to change the bind address |
 | `tests/api.rs` | Integration tests using `app().test()` |
 
 Need more structure (modules, OpenAPI docs, validation)? Create a project with

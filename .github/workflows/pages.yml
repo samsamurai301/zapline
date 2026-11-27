@@ -1,0 +1,49 @@
+name: Docs site
+
+# Publishes the guide (mdBook), the API reference (rustdoc) and llms.txt to
+# GitHub Pages: https://samsamurai301.github.io/zapline/
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: check llms.txt is current
+        run: ./scripts/gen-llms.sh --check
+      - name: build the guide
+        run: |
+          curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar -xz
+          ./mdbook build docs
+      - name: build the API reference
+        run: |
+          cargo doc -p zapline --all-features --no-deps
+          mkdir -p docs/book/api
+          cp -r target/doc/. docs/book/api/
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

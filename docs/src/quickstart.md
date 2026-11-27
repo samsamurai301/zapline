@@ -18,19 +18,16 @@ Open <http://localhost:8080/docs> for the interactive API docs, and run `cargo t
 ```toml
 [dependencies]
 zapline = "0.1"
-serde = { version = "1", features = ["derive"] }
-schemars = "1"                                            # #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }   # #[derive(Validate)]
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 ```
 
 ```rust
-use serde::{Deserialize, Serialize};
 use zapline::prelude::*;
 
-#[derive(Serialize, Deserialize, JsonSchema, Validate)]
+// `#[model]` derives Debug, Clone, Serialize, Deserialize, JsonSchema and Validate.
+#[model]
 struct Todo {
     #[validate(length(min = 1, max = 200))]
     title: String,

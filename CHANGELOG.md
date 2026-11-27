@@ -6,7 +6,62 @@ All notable changes to this project are documented here. The format follows [Kee
 
 The first public release.
 
+### Full-stack
+- `zapline::db` (features `postgres`, `sqlite`): sqlx pool created at startup, SQL migrations applied automatically, `Db` extractor, `DbCheck` readiness check, `Database::sqlite_memory()` for isolated tests, and sqlx errors mapped to 404/409/422/503.
+- `zapline::view` (feature `views`): MiniJinja templates with hot reload in debug builds, `render_block`/`page_or_block` for htmx fragments, `HxRequest` and `Hx` response headers.
+- `zapline new --template fullstack`: htmx pages, SQLite with migrations (zero setup), JSON API, OpenAPI, Dockerfile.
+- `zapline generate resource <name> field:type...`: migration, sqlx CRUD API, htmx page and tests in one command.
+- `zapline db new` / `zapline db migrate`.
+- `zapline g auth`: accounts in one command (users migration, sign-up/log-in/log-out as JSON API and htmx pages, `CurrentUser` extractor, tests).
+- `zapline::auth::password` (feature `password`): Argon2id hashing on the blocking pool, with `verify_missing` against user enumeration by timing, and `new_token` / `hash_token` for single-use links.
+- `zapline g auth` includes password reset by email: hashed single-use tokens that expire after an hour, JSON endpoints and htmx pages, and tests.
+- `zapline::auth::oauth` (feature `oauth`): log in with GitHub, Google or any OAuth 2 provider. `App::oauth` mounts `/auth/{provider}`; the `OAuthLogin` extractor checks state, exchanges the code with PKCE and returns a normalized profile (GitHub's verified primary email included). `zapline g auth` wires it in: "Continue with GitHub/Google" buttons when the credentials are set, identities linked by verified email, and a test against a stand-in provider.
+- `zapline::admin`: `App::admin` serves an admin panel for every table on SQLite and Postgres, read from the schema: search, sorting, paging, typed create/edit/delete forms, secret-looking columns hidden. Debug builds and localhost only unless `.protect(middleware)`; `zapline g auth` opens it to the accounts in `ADMIN_EMAILS`, and the `fullstack` template turns it on.
+- `zapline::i18n` (feature `i18n`): translations from one TOML file per language, the visitor's language from `?lang=` (remembered in a cookie), the cookie or `Accept-Language`, fallbacks to the default language, CLDR plural rules for common languages, `t(...)` and `t.plural(...)` in templates, and `I18n::missing()` for tests.
+- `zapline::redis` (feature `redis`): a built-in RESP2 client with connection reuse and reconnects (`Redis::cmd` for any command), and Redis-backed versions of the in-memory pieces for running several instances: `Cache::redis` (degrades to misses when Redis is down), `Live::redis` (updates reach every instance, in order, without duplicates), `RateLimit::redis` (GCRA in a Lua script on Redis's clock; fails open) and `RedisStore` for sessions.
+- OpenTelemetry traces (feature `otlp`): request spans (`GET /users/{id}`), your own spans and their events exported over OTLP/HTTP JSON from a background thread, continuing W3C `traceparent`; on with `OTEL_EXPORTER_OTLP_ENDPOINT` or `Telemetry::otlp`, no OpenTelemetry SDK needed.
+- `App::assets(prefix, dir)` (feature `fs`): static files with content-hashed URLs (`Assets::url`, `{{ asset('app.css') }}` in templates) served with a one-year `immutable` cache; no build step. The `fullstack` template uses it.
+- Security: `SameOrigin` middleware, CSRF protection from `Sec-Fetch-Site`/`Origin` with no tokens; `zapline g auth` installs it, rate-limits sign-up, log-in and reset requests per client IP (`TrustedProxies::from_env`, `TRUSTED_PROXIES`), and logs out every other session when the password changes. The `fullstack` and `api` templates add `SecurityHeaders`. JWT signing moved from RustCrypto to aws-lc (`rsa` is open to the Marvin timing attack, RUSTSEC-2023-0071). OAuth's `?next=` refuses paths with control characters or backslashes (`/%09/evil.example` was an open redirect). The dev console and the unprotected admin panel refuse requests relayed by a proxy on the same machine. Admin forms work over HTTP/2.
+- Security, second pass (a multi-agent audit with each finding independently verified):
+  - Uploaded files served by `App::storage` carry `Content-Security-Policy: sandbox` and download unless they are images, audio, video, PDF or plain text, so an uploaded `.html` or `.svg` can't run script on the app's origin.
+  - `zapline g auth` admits `ADMIN_EMAILS` accounts to `/admin` only once the address is proved (a used reset link or a GitHub/Google login), so signing up first with an admin's address no longer grants the panel. A first social login to an account whose address was never proved drops its password and ends its sessions (pre-account takeover).
+  - The dev inbox (`/_dev/mail`) answers only requests from the same machine, like the dev console, and both check that `Host` is a loopback name (DNS rebinding).
+  - Admin panel: a hidden column before the primary key made edits and deletes target the wrong column; a huge `?offset=` overflowed.
+  - `Live` forgets a topic when its last subscriber leaves, so clients can't grow memory by naming topics.
+  - `ResponseCache` no longer stores `HEAD` responses (an empty body served to later `GET`s).
+  - HTTP/2 connections close after `header_read_timeout` without a request.
+  - The MCP `test` tool refuses filters that look like cargo flags (`--config` could run commands).
+- `zapline::db::Factory`: test and seed rows in one line. Every required column you don't set is filled from the schema (unique numbers and text, emails, booleans, timestamps, JSON), and required foreign keys get parent rows. SQLite and Postgres. `App::seed` and `zapline db seed` insert demo data on demand; the `fullstack` template has a seed.
+- Fixed: `Mailer::smtp` (so `g auth` apps in release builds) panicked when created before the Tokio runtime, as `main` does. Mail now opens a connection per message.
+- `zapline g deploy fly|railway|render|compose`: hosting config for the project's Dockerfile, with a volume for SQLite, Postgres and Redis services when the app uses them, health checks, and the settings from `.env.example`; prints the remaining commands. Generated apps also listen on `PORT` when `ADDR` is unset.
+- `zapline g tailwind`, `zapline css`: Tailwind CSS without Node. The standalone binary is downloaded once, pinned and checked against its SHA-256; `zapline dev` runs its watcher alongside the app. Existing CSS and CDN stylesheets move into cascade layers so utility classes win.
+- `zapline::jobs`: durable background jobs in the app's database (SQLite or Postgres), with retries and backoff, `FOR UPDATE SKIP LOCKED` on Postgres so instances share one queue, and `run_pending` for deterministic tests.
+- `zapline g job <name>`: a durable job, registered in `src/jobs/mod.rs` and `app()`, with a test.
+- `zapline::db::Listing`: pagination, multi-key sorting, typed filters, case-insensitive search and scopes from the query string, with allow-listed columns and bound values, on SQLite and Postgres; returns `Paged<T>` (`items`, `total`, `limit`, `offset`). `zapline g resource` uses it, so generated list endpoints accept `?sort=`, `?q=` and per-field filters.
+- Framework routes (`/_dev`, `/_dev/mail`, `/files`) are kept out of the OpenAPI spec and generated clients.
+- `zapline::live`: pub/sub to browsers. `publish(topic, event, data)`, `sse(topic)` for htmx's SSE extension, `subscribe(topic)` for WebSockets and tests. Slow subscribers skip instead of blocking. The fullstack template pushes every todo change to all open pages.
+- `zapline::cache` (feature `cache`): `Cache` with `get_or_set` that computes once under concurrent misses, `delete_prefix` invalidation and bounded memory; `ResponseCache` route middleware for anonymous `GET` pages (htmx-aware keys, skips cookies and private responses); `ETag` middleware with `304 Not Modified`.
+- `zapline::storage` (features `storage`, `s3`): one API over a local directory, memory and S3-compatible buckets (AWS, R2, MinIO). Keys are validated against path escapes, `unique_key` names uploads, and `url(key, ttl)` makes expiring links: presigned on S3, HMAC-signed and served by the app otherwise. Built-in SigV4 client, no AWS SDK.
+- `App::dev_console()`: a page at `/_dev` with every route, the last 50 requests (status and latency), the job queue with its latest failures and a retry button, and the dev inbox. Debug builds and localhost only; on in the `api`, `full` and `fullstack` templates.
+- `examples/saas`: a complete multi-user app (accounts, password reset, per-user data, a welcome email job, a schedule) built from `zapline new` + `g auth` + `g job`.
+- `zapline::mail` (feature `mail`): SMTP email, a dev inbox at `/_dev/mail` when `SMTP_URL` is unset in debug builds, `Mailer::sent` for tests, and `Email` as a durable job.
+- `App::database_sessions`: sessions stored in the database (`SqlSessionStore`, SQLite and Postgres). `cookies::key_from_env` / `key_from_secret` derive the cookie key from a secret, with a development fallback in debug builds.
+- `TestResponse::assert_text` and `assert_contains`.
+- `zapline client`: a typed, dependency-free TypeScript client generated from the OpenAPI document; `zapline dev --client <file>` regenerates it after every build for end-to-end types.
+- `zapline::extract::{empty_as_none, checkbox}` serde helpers for HTML forms.
+- `ZAPLINE_DEV=1` (set by `zapline dev`) shows the real cause of 500 errors.
+
+### AI-assisted development
+- `AGENTS.md` in the repository and in every project `zapline new` creates: commands, layout and the one canonical way to do each task.
+- A runnable cheatsheet (`examples/examples/cheatsheet.rs`, ~1.3k tokens; ~2k with its page) that covers the common 90% of the API.
+- `llms.txt` and `llms-full.txt` generated from the guide (`scripts/gen-llms.sh`) and published with the docs site.
+- `zapline mcp`: a Model Context Protocol server with `docs` (section-level answers from a guide built into the binary), `new_project`, the generators, `db_new_migration`, `db_migrate`, `check`, `test`, `routes` and `openapi`.
+- `#[model]`: one attribute derives `Debug`, `Clone`, `Serialize`, `Deserialize`, `JsonSchema` and `Validate` through zapline's re-exports, so an app needs no `serde`, `schemars` or `validator` dependency. The templates, generators and examples use it.
+- `zapline check [--clippy]` and `zapline test [filter]`: cargo results condensed to one line per diagnostic and only the failing tests (68–79% fewer tokens than cargo for a failing test or a type error, see `bench/tokens`).
+- `bench/tokens`: a token-efficiency benchmark. The same validated, documented, tested CRUD API takes 641 tokens in zapline, 1,257 in axum and 1,336 in actix-web (o200k_base).
+
 ### Core
+- OpenAPI operation ids for same-named handlers in different modules are prefixed with the module (`users_list`, `posts_list`) instead of numbered.
 - Radix-tree router with typed path parameters, nested route groups, per-route typed metadata, 404/405 handling and automatic HEAD.
 - Extractors: `Path`, `Query`, `Json`, `Form`, `Bytes`, `String`, `State`, `Extension`, `HeaderMap`, `Method`, `Uri`, `ConnInfo`, `MatchedPath` and `Request`, plus `Option<T>` and `Result<T, Error>` wrappers. Rejections carry stable error codes and structured details.
 - A single `Error` type that `?` works with: structured `{"error", "code", "details"}` bodies, extra headers, and a global `App::error_handler`.

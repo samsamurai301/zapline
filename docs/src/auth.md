@@ -34,7 +34,93 @@ Authentication is split in two so each part can be swapped:
 
 Policies **fail closed**: a route with a policy can never become public because a middleware was forgotten or installed in the wrong place. See [Policies fail closed](#policies-fail-closed).
 
-Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`). CSRF is in [Cookies, sessions & CSRF](sessions.md).
+Cargo features: everything here is always available except JWT, which needs `jwt` (it pulls in `jsonwebtoken`), and password hashing, which needs `password`. CSRF is in [Cookies, sessions & CSRF](sessions.md).
+
+## Accounts in one command: `zapline g auth`
+
+For apps with users who sign up with an email and password, generate the whole thing instead of assembling it. In a project with a database (the `fullstack` template, or any project with `migrations/`):
+
+```sh
+zapline g auth
+```
+
+| File | What it holds |
+|---|---|
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
+
+It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+
+**Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
+
+**Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. Sign-up doesn't check the address, so someone could open an account with another person's email ahead of them: when the real owner then logs in with GitHub or Google, that account's password is dropped and its sessions end.
+
+**Admins.** The accounts in `ADMIN_EMAILS` get into `/admin` only after the address is proved: by using a reset link sent to it, or by a GitHub/Google login with it. Until then they get `403 email_unverified`, so signing up first with the boss's address gets an attacker nowhere. See [Social login](#social-login-oauth) for the pieces underneath.
+
+Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
+
+```rust
+use crate::routes::auth::CurrentUser;
+
+#[get("/api/notes")]
+async fn my_notes(db: Db, CurrentUser(user): CurrentUser) -> Result<Json<Vec<Note>>> {
+    let notes = sqlx::query_as::<_, Note>("SELECT * FROM notes WHERE user_id = $1")
+        .bind(user.id)
+        .fetch_all(&*db)
+        .await?;
+    Ok(Json(notes))
+}
+```
+
+Take `Option<CurrentUser>` to serve visitors and users differently. The generated code is yours to change: it is about 200 lines with no framework magic.
+
+What it does for you: passwords hashed with Argon2id on the blocking thread pool; a fresh session id at login (no session fixation); changing the password logs out every other session (a `session_version` column); sign-up, log-in and reset requests limited to 10 a minute per client IP (set `TRUSTED_PROXIES` behind a proxy); requests from other sites refused ([`SameOrigin`](sessions.md#sameorigin-no-tokens), CSRF protection with nothing to add to forms); the same error and the same timing for an unknown email and a wrong password (`password::verify_missing`); sessions in the database, so logins survive restarts and deploys; `HttpOnly`, `SameSite=Lax` cookies, `Secure` in release builds. In production set `SESSION_SECRET` to 32 or more random bytes (`openssl rand -base64 48`): release builds refuse to start without it.
+
+## Passwords
+
+With the `password` feature, `zapline::auth::password` hashes and checks passwords with Argon2id (OWASP parameters, PHC strings that carry their salt and parameters):
+
+```rust
+use zapline::auth::password;
+
+let hash = password::hash("correct horse battery staple").await?;
+assert!(password::verify("correct horse battery staple", &hash).await?);
+```
+
+Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
+
+## Social login (OAuth)
+
+With the `oauth` feature, `App::oauth` adds "log in with GitHub/Google/..." using the authorization-code flow with PKCE. Register a provider, then handle its callback with the `OAuthLogin` extractor:
+
+```rust
+use zapline::auth::oauth::{OAuth, OAuthLogin};
+
+#[get("/auth/github/callback")]
+async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
+    // login.user: provider, id, email, email_verified, name, avatar_url, raw
+    let user_id = find_or_create_user(&login.user).await?;
+    session.regenerate();
+    session.insert("user_id", user_id)?;
+    Ok(Redirect::to(login.next.as_deref().unwrap_or("/")))
+}
+
+let app = App::new()
+    .oauth(OAuth::from_env("github")?) // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
+    .mount(github_done);
+```
+
+Send people to `/auth/github` (optionally `?next=/settings`) to start. That route redirects to the provider with a random `state` and a PKCE challenge, kept in a short-lived `HttpOnly` cookie scoped to `/auth`. On the way back, `OAuthLogin` checks the state, exchanges the code (sending the PKCE verifier) and fetches the profile. It answers `400 invalid_oauth_state` for a forged or replayed callback, `401 oauth_denied` when the user cancelled at the provider, `401 oauth_failed` when the provider rejects the code, and `404` for a provider that isn't registered. `next` is kept only when it is a local path, so it can't be used as an open redirect.
+
+| Provider | Constructor | Notes |
+|---|---|---|
+| GitHub | `OAuth::github(id, secret)` | Scope `read:user user:email`; the email is the verified primary one from `/user/emails` |
+| Google | `OAuth::google(id, secret)` | OpenID Connect `userinfo`; scopes `openid email profile` |
+| Any OAuth 2 provider | `OAuth::custom(name, authorize_url, token_url, userinfo_url)` | Reads `sub`/`id`, `email`, `email_verified`, `name`, `picture`/`avatar_url`; the whole profile is in `user.raw` |
+
+`.scopes([...])` replaces the scopes, `.redirect_url(url)` overrides the callback URL (by default `APP_URL` + `/auth/{name}/callback`, or the request's host when `APP_URL` is unset), and `.endpoints(..)` points a built-in provider at a test double. Only trust `user.email` for account linking when `user.email_verified` is true.
 
 ## Credential extractors
 

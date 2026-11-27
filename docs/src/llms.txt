@@ -1,0 +1,78 @@
+# zapline
+
+> zapline is a fast, batteries-included Rust web framework: FastAPI-style typed handlers, OpenAPI 3.1 generated from code, validation, DI, auth, sessions, WebSockets, metrics and a thread-per-core server. One prelude (`use zapline::prelude::*`), route macros, `App::new().mount(..).run(addr)`, and an in-process test client (`app.test()`).
+
+Conventions an assistant should follow: handlers are `async fn` with extractor arguments (`Path`, `Query`, `Json`, `Valid<Json<T>>`, `State`, `Dep`); errors are `zapline::Result<T>` with `Error::not_found()` and friends plus `.with_code("snake_case")`; no `#[tokio::main]` (`App::run` owns the runtime); middleware is `async fn(Request, Next) -> Response`.
+
+- [Cheatsheet](https://samsamurai301.github.io/zapline/cheatsheet.html): start here; one runnable file with the canonical way to do each common task (~3k tokens)
+- [Whole guide as one file](https://samsamurai301.github.io/zapline/llms-full.txt): every page below, concatenated
+- [API reference](https://samsamurai301.github.io/zapline/api/zapline/): rustdoc for the `zapline` crate
+- [Source](https://github.com/samsamurai301/zapline)
+
+## Overview
+
+- [Introduction](https://samsamurai301.github.io/zapline/introduction.html): **zapline** is a web framework for Rust that brings three things together:
+
+## Getting started
+
+- [Quickstart](https://samsamurai301.github.io/zapline/quickstart.html): cargo install --path crates/zapline-cli     # installs `zapline` and `cargo zapline`
+- [Cheatsheet](https://samsamurai301.github.io/zapline/cheatsheet.html): One runnable file showing the canonical way to do each common task: models with validation, handlers, errors, dependency injection, middleware, route groups, Op
+- [Project layout & the CLI](https://samsamurai301.github.io/zapline/cli.html): The `zapline` CLI scaffolds projects, generates code, runs a live-reloading dev server, and talks to your app to print its routes or export its OpenAPI document
+- [Coming from FastAPI, Spring, NestJS, axum or actix](https://samsamurai301.github.io/zapline/comparison.html): zapline will feel familiar. Extractors, `IntoResponse` and `State` work the same way. The differences:
+
+## Core concepts
+
+- [Routing](https://samsamurai301.github.io/zapline/routing.html): There are three equivalent styles. Use whichever reads best.
+- [Extractors](https://samsamurai301.github.io/zapline/extractors.html): Handler arguments are *extractors*: types that know how to build themselves from the request. A handler can take up to 12 arguments. Every argument except the l
+- [Responses](https://samsamurai301.github.io/zapline/responses.html): A handler can return anything that implements `IntoResponse`:
+- [Errors](https://samsamurai301.github.io/zapline/errors.html): zapline has one error type, `zapline::Error`, and one result alias, `zapline::Result<T>`.
+- [Middleware](https://samsamurai301.github.io/zapline/middleware.html): Middleware is an async function that receives the request plus `next`, the rest of the pipeline:
+- [State, lifecycle & plugins](https://samsamurai301.github.io/zapline/lifecycle.html): Register any `Clone + Send + Sync + 'static` value and extract it with `State<T>`:
+- [Testing](https://samsamurai301.github.io/zapline/testing.html): `App::test()` turns an app into an in-process client. It runs the full pipeline (global middleware, routing, route middleware, extractors, handlers, error rende
+- [Dev console](https://samsamurai301.github.io/zapline/dev-console.html): One call gives a running app a page that shows what it is made of and what it is doing:
+
+## Building APIs
+
+- [OpenAPI & interactive docs](https://samsamurai301.github.io/zapline/openapi.html): Add one line, and your API documents itself: an OpenAPI 3.1 spec at `/openapi.json` plus Swagger UI at `/docs`.
+- [Validation](https://samsamurai301.github.io/zapline/validation.html): Wrap an extractor in `Valid` and derive `Validate` on the type. Bad input never reaches your handler.
+- [Dependency injection](https://samsamurai301.github.io/zapline/di.html): Register a service once with `App::provide`, receive it in any handler with `Dep<T>`:
+- [Configuration](https://samsamurai301.github.io/zapline/config.html): Load layered settings into your own struct, then hand it to the app:
+- [Background tasks & scheduled jobs](https://samsamurai301.github.io/zapline/tasks.html): Queue work from a handler with `BackgroundTasks`, run periodic jobs with `App::schedule`, and run long-lived workers with `App::background`. All three are stopp
+- [Caching](https://samsamurai301.github.io/zapline/caching.html): `zapline::cache` (feature `cache`, included in `full`) has three tools. Pick by what you want to skip:
+
+## Full-stack
+
+- [Databases (Postgres, SQLite)](https://samsamurai301.github.io/zapline/database.html): `zapline::db` connects your app to Postgres or SQLite through [sqlx](https://docs.rs/sqlx): a connection pool created at startup, SQL migrations applied automat
+- [Views & htmx](https://samsamurai301.github.io/zapline/views.html): `zapline::view` (feature `views`) renders HTML with [MiniJinja](https://docs.rs/minijinja) templates (Jinja2 syntax: `{{ value }}`, `{% for %}`, `{% extends %}`
+- [Durable jobs](https://samsamurai301.github.io/zapline/jobs.html): Work that must not be lost (emails, webhooks, image processing, billing) goes in a **job**: a struct stored in your database until a worker has run it. Jobs sur
+- [Email](https://samsamurai301.github.io/zapline/mail.html): `zapline::mail` sends email over SMTP in production, keeps it in a **dev inbox** you can open in the browser while developing, and captures it in tests.
+- [Admin panel](https://samsamurai301.github.io/zapline/admin.html): `App::admin` serves an admin panel for every table in your database: browse, search, sort and page through rows, and create, edit and delete them through forms.
+- [Translations (i18n)](https://samsamurai301.github.io/zapline/i18n.html): With the `i18n` feature, an app can speak several languages. Put one TOML file per language in `locales/`, register them, and take a `Locale` in handlers:
+
+## Security
+
+- [Authentication & authorization](https://samsamurai301.github.io/zapline/auth.html): Authenticate a group of routes with JWTs, then declare who may call what, next to the route:
+- [Cookies, sessions & CSRF](https://samsamurai301.github.io/zapline/sessions.html): Cookies, server-side sessions and CSRF protection for browser-facing apps. All of it needs the Cargo feature `cookies` (CSRF included; it adds the `cookie`, `ge
+- [Hardening middleware](https://samsamurai301.github.io/zapline/hardening.html): A handful of built-in middleware turn a working service into one you can put on the internet. Each is one line:
+
+## Realtime & content
+
+- [WebSockets](https://samsamurai301.github.io/zapline/websockets.html): Take a `WebSocketUpgrade` in a `GET` handler and give it an async callback:
+- [Server-Sent Events & streaming](https://samsamurai301.github.io/zapline/streaming.html): Return `Sse` with a stream of `Event`s and each event reaches the client as soon as the stream yields it:
+- [Live updates (pub/sub)](https://samsamurai301.github.io/zapline/live.html): `zapline::live` pushes changes to every open page as they happen: publish to a topic, and every browser subscribed to it gets the message. With htmx you write n
+- [Static files & uploads](https://samsamurai301.github.io/zapline/files.html): Serve a directory with one line, and accept `multipart/form-data` uploads with an extractor:
+- [File storage (local, S3)](https://samsamurai301.github.io/zapline/storage.html): `zapline::storage` keeps files under string keys like `avatars/42/me.png`. The same code works with a local directory while developing, memory in tests, and S3 
+
+## Operations
+
+- [Observability: tracing, metrics, health](https://samsamurai301.github.io/zapline/observability.html): Three plugins give you logs, metrics and probes. Each is one line, and they work together:
+- [Server: TLS, HTTP/2, graceful shutdown](https://samsamurai301.github.io/zapline/server.html): `App::run(addr)` starts a production-ready server with no extra configuration:
+- [Deployment](https://samsamurai301.github.io/zapline/deployment.html): lto = "fat"
+- [Running several instances (Redis)](https://samsamurai301.github.io/zapline/scaling.html): One zapline process goes a long way (see [Performance](performance.md)), but for zero-downtime deploys or more traffic you will run two or more instances behind
+- [Performance](https://samsamurai301.github.io/zapline/performance.html): zapline is designed so that the fastest configuration is also the default one.
+
+## Reference
+
+- [Platform support (Linux, macOS, Windows)](https://samsamurai301.github.io/zapline/platforms.html): zapline runs on **Linux, macOS and Windows**. CI builds, lints and runs the full test suite on all three, and checks that projects generated by `zapline new` bu
+- [Feature flags](https://samsamurai301.github.io/zapline/features.html): zapline follows "pay only for what you use": anything that pulls in a dependency sits behind a Cargo feature, and a feature you don't use adds no code to your b
+- [Architecture](https://samsamurai301.github.io/zapline/architecture.html): zapline has a small, fast **core** (routing, extractors, responses, errors, the server) and a set of **feature modules** built only on the core's public extensi

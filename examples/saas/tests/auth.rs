@@ -1,0 +1,352 @@
+//! Sign up, log in, log out, and protected routes.
+
+use std::time::Duration;
+
+use serde_json::json;
+use zapline::db::Database;
+use zapline::mail::Mailer;
+use zapline::test::TestClient;
+
+use saas::app;
+
+fn creds(email: &str, password: &str) -> serde_json::Value {
+    json!({ "email": email, "password": password })
+}
+
+#[tokio::test]
+async fn signup_logs_in_and_logout_logs_out() {
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client.get("/api/auth/me").send().await.assert_status(401);
+
+    let res = client
+        .post("/api/auth/signup")
+        .json(&creds("Ada@Example.com", "correct horse"))
+        .send()
+        .await;
+    res.assert_status(201);
+    assert_eq!(res.json::<serde_json::Value>()["email"], "ada@example.com");
+
+    let me = client.get("/api/auth/me").send().await;
+    me.assert_status(200);
+    assert_eq!(me.json::<serde_json::Value>()["email"], "ada@example.com");
+
+    client
+        .post("/api/auth/logout")
+        .send()
+        .await
+        .assert_status(204);
+    client.get("/api/auth/me").send().await.assert_status(401);
+}
+
+#[tokio::test]
+async fn login_checks_the_password() {
+    // Two browsers on one app: clones share the app, `with_cookies` gives
+    // each its own cookie jar.
+    let client = app(Database::sqlite_memory()).test();
+    let alice = client.clone().with_cookies();
+    alice
+        .post("/api/auth/signup")
+        .json(&creds("alice@example.com", "s3cret-pass"))
+        .send()
+        .await
+        .assert_status(201);
+
+    let other = client.with_cookies();
+    let wrong = other
+        .post("/api/auth/login")
+        .json(&creds("alice@example.com", "nope-nope"))
+        .send()
+        .await;
+    wrong.assert_status(401);
+    assert_eq!(
+        wrong.json::<serde_json::Value>()["code"],
+        "invalid_credentials"
+    );
+    let unknown = other
+        .post("/api/auth/login")
+        .json(&creds("bob@example.com", "s3cret-pass"))
+        .send()
+        .await;
+    unknown.assert_status(401);
+
+    other
+        .post("/api/auth/login")
+        .json(&creds("ALICE@example.com", "s3cret-pass"))
+        .send()
+        .await
+        .assert_status(200);
+    other.get("/api/auth/me").send().await.assert_status(200);
+}
+
+#[tokio::test]
+async fn signup_rejects_duplicates_and_weak_input() {
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .post("/api/auth/signup")
+        .json(&creds("a@example.com", "long enough"))
+        .send()
+        .await
+        .assert_status(201);
+    let dup = client
+        .post("/api/auth/signup")
+        .json(&creds("A@example.com", "long enough"))
+        .send()
+        .await;
+    dup.assert_status(409);
+    assert_eq!(dup.json::<serde_json::Value>()["code"], "email_taken");
+    client
+        .post("/api/auth/signup")
+        .json(&creds("b@example.com", "short"))
+        .send()
+        .await
+        .assert_status(422);
+    client
+        .post("/api/auth/signup")
+        .json(&creds("not-an-email", "long enough"))
+        .send()
+        .await
+        .assert_status(422);
+}
+/// The token from the newest password-reset email, once there are more than
+/// `resets_before` of them. Mail is sent just after the response, so wait
+/// for it briefly.
+async fn reset_token(client: &TestClient, resets_before: usize) -> String {
+    let mailer: Mailer = client.resources().await.require().unwrap();
+    for _ in 0..200 {
+        let resets: Vec<String> = mailer
+            .sent()
+            .into_iter()
+            .filter(|m| m.subject == "Reset your password")
+            .filter_map(|m| m.text)
+            .collect();
+        if resets.len() > resets_before {
+            let text = resets.last().unwrap();
+            let start = text.find("token=").expect("a reset link") + "token=".len();
+            return text[start..].split_whitespace().next().unwrap().to_string();
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no reset email was sent");
+}
+
+#[tokio::test]
+async fn password_reset_by_email() {
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .post("/api/auth/signup")
+        .json(&creds("d@example.com", "old password"))
+        .send()
+        .await
+        .assert_status(201);
+    client
+        .post("/api/auth/logout")
+        .send()
+        .await
+        .assert_status(204);
+
+    // Unknown emails get the same answer and no mail.
+    client
+        .post("/api/auth/forgot")
+        .json(&json!({ "email": "nobody@example.com" }))
+        .send()
+        .await
+        .assert_status(202);
+    client
+        .post("/api/auth/forgot")
+        .json(&json!({ "email": "D@example.com" }))
+        .send()
+        .await
+        .assert_status(202);
+    let token = reset_token(&client, 0).await;
+
+    let reset = |password: &str| json!({ "token": token, "password": password });
+    client
+        .post("/api/auth/reset")
+        .json(&reset("short"))
+        .send()
+        .await
+        .assert_status(422);
+    client
+        .post("/api/auth/reset")
+        .json(&reset("new password"))
+        .send()
+        .await
+        .assert_status(200);
+    client.get("/api/auth/me").send().await.assert_status(200);
+
+    // The link works once; the old password is gone.
+    let again = client
+        .post("/api/auth/reset")
+        .json(&reset("another one"))
+        .send()
+        .await;
+    again.assert_status(400);
+    assert_eq!(again.json::<serde_json::Value>()["code"], "invalid_token");
+    client
+        .post("/api/auth/logout")
+        .send()
+        .await
+        .assert_status(204);
+    client
+        .post("/api/auth/login")
+        .json(&creds("d@example.com", "old password"))
+        .send()
+        .await
+        .assert_status(401);
+    client
+        .post("/api/auth/login")
+        .json(&creds("d@example.com", "new password"))
+        .send()
+        .await
+        .assert_status(200);
+}
+
+#[tokio::test]
+async fn reset_pages_work_end_to_end() {
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .post("/api/auth/signup")
+        .json(&creds("e@example.com", "old password"))
+        .send()
+        .await
+        .assert_status(201);
+    client
+        .post("/api/auth/logout")
+        .send()
+        .await
+        .assert_status(204);
+
+    client
+        .get("/login")
+        .send()
+        .await
+        .assert_contains("href=\"/forgot\"");
+    client
+        .get("/forgot")
+        .send()
+        .await
+        .assert_status(200)
+        .assert_contains("<h1>Reset your password</h1>");
+    let sent = client
+        .post("/forgot")
+        .header("hx-request", "true")
+        .form(&[("email", "e@example.com")])
+        .send()
+        .await;
+    sent.assert_status(200)
+        .assert_contains("a reset link is on its way");
+    let token = reset_token(&client, 0).await;
+
+    client
+        .get(&format!("/reset?token={token}"))
+        .send()
+        .await
+        .assert_status(200)
+        .assert_contains(&token);
+    let done = client
+        .post("/reset")
+        .header("hx-request", "true")
+        .form(&[("token", token.as_str()), ("password", "new password")])
+        .send()
+        .await;
+    done.assert_status(200).assert_header("hx-redirect", "/");
+    client.get("/api/auth/me").send().await.assert_status(200);
+
+    let used = client
+        .post("/reset")
+        .header("hx-request", "true")
+        .form(&[("token", token.as_str()), ("password", "new password")])
+        .send()
+        .await;
+    used.assert_status(200)
+        .assert_contains("invalid or has expired");
+}
+
+#[tokio::test]
+async fn html_forms_redirect_or_show_the_error() {
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .get("/signup")
+        .send()
+        .await
+        .assert_status(200)
+        .assert_contains("<h1>Sign up</h1>");
+    client
+        .get("/login")
+        .send()
+        .await
+        .assert_status(200)
+        .assert_contains("<h1>Log in</h1>");
+
+    let ok = client
+        .post("/signup")
+        .header("hx-request", "true")
+        .form(&[("email", "c@example.com"), ("password", "long enough")])
+        .send()
+        .await;
+    ok.assert_status(200).assert_header("hx-redirect", "/");
+    client.get("/api/auth/me").send().await.assert_status(200);
+
+    let bad = client
+        .post("/login")
+        .header("hx-request", "true")
+        .form(&[("email", "c@example.com"), ("password", "wrong password")])
+        .send()
+        .await;
+    bad.assert_status(200)
+        .assert_contains("wrong email or password");
+    assert!(
+        !bad.text().contains("<h1>"),
+        "htmx gets only the form: {}",
+        bad.text()
+    );
+}
+
+#[tokio::test]
+async fn only_admin_emails_get_into_the_admin_panel() {
+    // The only test that reads ADMIN_EMAILS.
+    std::env::set_var("ADMIN_EMAILS", "boss@example.com, Owner@Example.com");
+    let client = app(Database::sqlite_memory()).test().with_cookies();
+    client
+        .get("/admin")
+        .send()
+        .await
+        .assert_status(303)
+        .assert_header("location", "/login");
+
+    for (email, status) in [("ada@example.com", 403), ("owner@example.com", 403)] {
+        client
+            .post("/api/auth/signup")
+            .json(&creds(email, "correct horse"))
+            .send()
+            .await
+            .assert_status(201);
+        client
+            .get("/admin/todos")
+            .send()
+            .await
+            .assert_status(status);
+        client
+            .post("/api/auth/logout")
+            .send()
+            .await
+            .assert_status(204);
+    }
+
+    // Anyone can sign up as owner@: the address counts once its owner uses
+    // a reset link sent to it.
+    client
+        .post("/api/auth/forgot")
+        .json(&json!({ "email": "owner@example.com" }))
+        .send()
+        .await
+        .assert_status(202);
+    let token = reset_token(&client, 0).await;
+    client
+        .post("/api/auth/reset")
+        .json(&json!({ "token": token, "password": "new password" }))
+        .send()
+        .await
+        .assert_status(200);
+    client.get("/admin/todos").send().await.assert_status(200);
+}

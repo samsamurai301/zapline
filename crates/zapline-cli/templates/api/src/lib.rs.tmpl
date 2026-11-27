@@ -6,12 +6,17 @@
 pub mod models;
 pub mod routes;
 
+use zapline::middleware::SecurityHeaders;
 use zapline::openapi::OpenApi;
 use zapline::prelude::*;
 
 /// Builds the application: OpenAPI docs plus every route module.
 pub fn app() -> App {
     App::new()
+        // Browser hardening headers (nosniff, no framing, referrer policy).
+        .wrap(SecurityHeaders::default())
+        // Routes, recent requests, jobs and mail at /_dev (debug builds only).
+        .dev_console()
         // Serves /openapi.json, with Swagger UI at /docs.
         .openapi(OpenApi::new(
             env!("CARGO_PKG_NAME"),

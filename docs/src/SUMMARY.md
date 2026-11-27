@@ -5,6 +5,7 @@
 # Getting started
 
 - [Quickstart](quickstart.md)
+- [Cheatsheet](cheatsheet.md)
 - [Project layout & the CLI](cli.md)
 - [Coming from FastAPI, Spring, NestJS, axum or actix](comparison.md)
 
@@ -17,6 +18,7 @@
 - [Middleware](middleware.md)
 - [State, lifecycle & plugins](lifecycle.md)
 - [Testing](testing.md)
+- [Dev console](dev-console.md)
 
 # Building APIs
 
@@ -25,6 +27,16 @@
 - [Dependency injection](di.md)
 - [Configuration](config.md)
 - [Background tasks & scheduled jobs](tasks.md)
+- [Caching](caching.md)
+
+# Full-stack
+
+- [Databases (Postgres, SQLite)](database.md)
+- [Views & htmx](views.md)
+- [Durable jobs](jobs.md)
+- [Email](mail.md)
+- [Admin panel](admin.md)
+- [Translations (i18n)](i18n.md)
 
 # Security
 
@@ -36,13 +48,16 @@
 
 - [WebSockets](websockets.md)
 - [Server-Sent Events & streaming](streaming.md)
+- [Live updates (pub/sub)](live.md)
 - [Static files & uploads](files.md)
+- [File storage (local, S3)](storage.md)
 
 # Operations
 
 - [Observability: tracing, metrics, health](observability.md)
 - [Server: TLS, HTTP/2, graceful shutdown](server.md)
 - [Deployment](deployment.md)
+- [Running several instances (Redis)](scaling.md)
 - [Performance](performance.md)
 
 # Reference

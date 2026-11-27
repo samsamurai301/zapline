@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}Reset your password · @@package@@{% endblock %}
+{% block content %}
+<h1>Reset your password</h1>
+
+<form hx-post="/forgot">
+  {% block form %}
+  {% if sent %}
+  <p role="status">If {{ email }} has an account, a reset link is on its way. It works for an hour.</p>
+  {% else %}
+  {% if error %}<p role="alert" class="error">{{ error }}</p>{% endif %}
+  <label>Email <input type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></label>
+  <button>Email me a link</button>
+  {% endif %}
+  {% endblock %}
+</form>
+
+<p><small>Remembered it? <a href="/login">Log in</a></small></p>
+{% endblock %}

@@ -320,9 +320,18 @@ fn default_operation_id(method: &str, path: &str) -> String {
     }
 }
 
-/// Unique operation ids. Explicit ids are reserved first; clashes get the
-/// method appended, then a counter.
+/// Unique operation ids. Explicit ids are reserved first. Same-named
+/// handlers from different modules are prefixed with their module
+/// (`users::list` and `posts::list` become `users_list` and `posts_list`);
+/// any remaining clash gets the method appended, then a counter.
 fn operation_ids(ops: &[Op<'_>]) -> Vec<String> {
+    // Handler name -> the modules it is defined in.
+    let mut modules: std::collections::HashMap<&str, HashSet<&str>> = Default::default();
+    for op in ops.iter().filter(|op| op.doc.operation_id.is_none()) {
+        if let (Some(h), Some(m)) = (op.doc.handler, op.doc.module) {
+            modules.entry(h).or_default().insert(m);
+        }
+    }
     let mut used = HashSet::new();
     let mut ids: Vec<Option<String>> = vec![None; ops.len()];
     let claim = |base: String, method: &str, used: &mut HashSet<String>| {
@@ -345,9 +354,13 @@ fn operation_ids(ops: &[Op<'_>]) -> Vec<String> {
     }
     for (i, op) in ops.iter().enumerate() {
         if ids[i].is_none() {
-            let base = match op.doc.handler {
-                Some(h) => h.to_owned(),
-                None => default_operation_id(op.method, &op.path),
+            let base = match (op.doc.handler, op.doc.module) {
+                (Some(h), Some(m)) if modules.get(h).is_some_and(|ms| ms.len() > 1) => {
+                    let last = m.rsplit("::").next().unwrap_or(m);
+                    format!("{last}_{h}")
+                }
+                (Some(h), _) => h.to_owned(),
+                (None, _) => default_operation_id(op.method, &op.path),
             };
             ids[i] = Some(claim(base, op.method, &mut used));
         }

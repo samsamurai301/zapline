@@ -29,6 +29,13 @@ pub struct Opaque;
 #[cfg(feature = "openapi")]
 pub use crate::openapi::OperationDoc as Doc;
 
+// Crates `#[model]` derives from, so apps don't need them as dependencies.
+#[cfg(feature = "openapi")]
+pub use schemars;
+pub use serde;
+#[cfg(feature = "validate")]
+pub use validator;
+
 /// Placeholder when the `openapi` feature is disabled.
 #[cfg(not(feature = "openapi"))]
 #[derive(Clone, Copy, Debug, Default)]
@@ -101,6 +108,9 @@ mod imp {
             ..Doc::default()
         }
     }
+    pub fn module(doc: &mut Doc, module: &'static str) {
+        doc.module = Some(module);
+    }
     pub fn summary(doc: &mut Doc, s: &'static str) {
         doc.summary(s);
     }
@@ -149,6 +159,8 @@ mod imp {
     pub fn doc(_: &'static str) -> Doc {
         Doc
     }
+    #[inline]
+    pub fn module(_: &mut Doc, _: &'static str) {}
     #[inline]
     pub fn summary(_: &mut Doc, _: &'static str) {}
     #[inline]

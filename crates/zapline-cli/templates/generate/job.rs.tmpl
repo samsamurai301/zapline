@@ -1,0 +1,23 @@
+//! The `@@name@@` job: stored in the database until it has run, retried
+//! with backoff when it fails. Enqueue it from a handler with
+//! `jobs.enqueue(@@Pascal@@ { .. }).await?` (take `jobs: Jobs` as an argument).
+
+use zapline::jobs::Job;
+use zapline::prelude::*;
+
+/// The job's payload, stored as JSON: keep it small (ids, not records).
+#[model]
+pub struct @@Pascal@@ {}
+
+impl Job for @@Pascal@@ {
+    /// Identifies the job in the database: keep it stable.
+    const NAME: &'static str = "@@name@@";
+
+    async fn run(self, res: Resources) -> Result<()> {
+        // The app's resources: `res.require::<..>()?` gets the database pool,
+        // the mailer (`zapline::mail::Mailer`) or your own services.
+        // Return Err (or panic) to retry. Runs at least once: make it safe to repeat.
+        let _ = res;
+        Ok(())
+    }
+}

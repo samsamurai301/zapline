@@ -104,6 +104,57 @@ Things the framework cannot decide for you:
 - If users can upload `.html` or `.svg` files and you serve them back from your own origin, a script in the file runs with your origin's privileges (stored XSS). Serve user uploads from a separate domain, restrict the extensions you accept, or store files under generated names and send a download `Content-Disposition` through your own handler. `SecurityHeaders` already adds `X-Content-Type-Options: nosniff`.
 - File serving does a short blocking filesystem lookup on a worker thread (`spawn_blocking`), once per request. Put a CDN or reverse proxy in front for hot assets.
 
+## Fingerprinted assets
+
+`App::assets(prefix, dir)` serves a directory like `static_files`, and also gives every file a URL with a hash of its content, so browsers can cache it forever and still get the new version the moment it changes:
+
+```rust
+use zapline::fs::Assets;
+use zapline::prelude::*;
+
+#[get("/")]
+async fn home(assets: Assets) -> Html<String> {
+    // "/static/app.3f2a1b9c.css"
+    Html(format!(r#"<link rel="stylesheet" href="{}">"#, assets.url("app.css")))
+}
+
+fn app() -> App {
+    App::new().assets("/static", "static").mount(home)
+}
+```
+
+In templates (feature `views`) it is a function, whether `.views(..)` comes before or after `.assets(..)`:
+
+```html
+<link rel="stylesheet" href="{{ asset('app.css') }}">
+<script src="{{ asset('js/app.js') }}" defer></script>
+```
+
+- `/static/app.3f2a1b9c.css` is served with `Cache-Control: public, max-age=31536000, immutable`.
+- An old hash still serves today's file, with `no-cache`, so pages cached before a deploy keep working.
+- `/static/app.css` (no hash) is still served, without the long cache.
+- A file that does not exist keeps its plain URL; hidden files stay hidden.
+- Hashes are 8 hex digits of the content. In debug builds they are recomputed when a file's size or modification time changes, so `zapline dev` picks up edits; release builds hash each file once.
+
+No build step, bundler or manifest file: the hash is computed by the server on first use. The `fullstack` template uses it for `app.css`.
+
+## Tailwind CSS without Node
+
+```sh
+zapline g tailwind
+```
+
+This writes `styles/app.css` and compiles it to `static/app.css` with Tailwind's official standalone binary. zapline downloads it once into your user cache (`~/.cache/zapline`), pinned to one version and checked against its SHA-256 before it runs; set `ZAPLINE_TAILWIND=/path/to/tailwindcss` to use your own. No Node, npm or `package.json`.
+
+- `zapline dev` runs Tailwind's watcher alongside the app: add a class in `templates/` and `static/app.css` (and its hashed URL) is updated by the time you refresh.
+- `zapline css` builds once; `zapline css --minify` for a smaller file before you deploy.
+- Commit `static/app.css`. It is what the server (and the Docker image) serves, so deploys need no Tailwind.
+
+What the generator does with what you already had:
+
+- The CSS that was in `static/app.css` moves into `styles/app.css`, in `@layer components`, so utility classes can override it.
+- Stylesheets your `templates/base.html` loaded from a CDN (Pico, in the `fullstack` template) move into `styles/app.css` as `@import url(..) layer(base)`. They keep styling plain elements in place of Tailwind's reset, and utilities win over them. For Tailwind alone, replace the lines above `@source` with `@import "tailwindcss";`.
+
 ## `ServeFile`
 
 `ServeFile::new(path)` serves one file, whatever the request path. It is a handler, so it goes anywhere a handler goes. It has the same `ETag`, range, `HEAD` and precompression behavior, and `.cache_control(..)`, `.precompressed_gzip()` and `.precompressed_br()`. A missing file answers `404`.

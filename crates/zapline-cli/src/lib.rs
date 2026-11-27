@@ -10,17 +10,22 @@
 #![warn(missing_docs)]
 
 pub mod bench;
+pub mod brief;
 pub mod build;
 pub mod cli;
+pub mod client;
+pub mod db;
 pub mod dev;
 pub mod doctor;
 pub mod generate;
+pub mod mcp;
 pub mod naming;
 pub mod new;
 pub mod openapi;
 pub mod project;
 pub mod render;
 pub mod routes;
+pub mod tailwind;
 pub mod templates;
 pub mod ui;
 
@@ -35,7 +40,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{CommandFactory, FromArgMatches};
 
-use cli::{Cli, Command, GenerateKind};
+use cli::{Cli, Command, DbCommand, GenerateKind};
 use project::Project;
 
 /// How the binary was started.
@@ -120,13 +125,31 @@ pub fn execute(cli: Cli) -> Result<()> {
         Command::Generate(g) => {
             let here = Path::new(".");
             let report = match g.kind {
-                GenerateKind::Resource { name, plural } => {
-                    generate::resource(here, &name, plural.as_deref(), g.force)?
-                }
+                GenerateKind::Resource {
+                    name,
+                    fields,
+                    plural,
+                    memory,
+                } => generate::resource_with_fields(
+                    here,
+                    &name,
+                    plural.as_deref(),
+                    &fields,
+                    memory,
+                    g.force,
+                )?,
                 GenerateKind::Handler { name, method, path } => {
                     generate::handler(here, &name, method, path.as_deref(), g.force)?
                 }
                 GenerateKind::Middleware { name } => generate::middleware(here, &name, g.force)?,
+                GenerateKind::Auth => generate::auth::generate(&Project::discover(here)?, g.force)?,
+                GenerateKind::Job { name } => {
+                    generate::job::generate(&Project::discover(here)?, &name, g.force)?
+                }
+                GenerateKind::Deploy { target } => {
+                    generate::deploy::generate(&Project::discover(here)?, target, g.force)?
+                }
+                GenerateKind::Tailwind => tailwind::generate(&Project::discover(here)?, g.force)?,
             };
             report.print();
             Ok(())
@@ -140,6 +163,14 @@ pub fn execute(cli: Cli) -> Result<()> {
                     release: a.release,
                     app_args: a.app_args,
                     debounce: Duration::from_millis(a.debounce_ms),
+                    client: match a.client {
+                        Some(c) => Some(openapi::resolve_output(
+                            &std::env::current_dir()
+                                .context("cannot determine the current directory")?,
+                            &c,
+                        )),
+                        None => None,
+                    },
                     ..dev::DevOptions::default()
                 },
             )
@@ -152,11 +183,57 @@ pub fn execute(cli: Cli) -> Result<()> {
             let project = Project::discover(Path::new("."))?;
             openapi::run(&project, a.bin.as_deref(), &a.output)
         }
+        Command::Db(DbCommand::New { name }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::new(&project.root, &name)
+        }
+        Command::Db(DbCommand::Migrate { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::migrate(&project, bin.as_deref())
+        }
+        Command::Db(DbCommand::Seed { bin }) => {
+            let project = Project::discover(Path::new("."))?;
+            db::seed(&project, bin.as_deref())
+        }
+        Command::Check { clippy } => {
+            let project = Project::discover(Path::new("."))?;
+            finish(brief::check(&project, clippy)?)
+        }
+        Command::Test { filter } => {
+            let project = Project::discover(Path::new("."))?;
+            finish(brief::test(&project, filter.as_deref())?)
+        }
+        Command::Client(a) => {
+            let project = Project::discover(Path::new("."))?;
+            client::run(&project, a.bin.as_deref(), &a.output)
+        }
+        Command::Css { minify, watch } => {
+            let project = Project::discover(Path::new("."))?;
+            if watch {
+                let (mut child, _stdin) = tailwind::watch(&project.root)?;
+                child.wait().context("tailwindcss failed")?;
+                Ok(())
+            } else {
+                tailwind::build(&project.root, minify)
+            }
+        }
+        Command::Mcp => mcp::run(),
         Command::Doctor => doctor::run(),
         Command::Bench(a) => {
             let cpus = std::thread::available_parallelism().map_or(1, |n| n.get());
             let cfg = bench::configure(&a.url, a.connections, &a.duration, a.threads, cpus)?;
             bench::run(&cfg, a.raw)
         }
+    }
+}
+
+/// Prints a condensed report; a failed check or test run is an error exit
+/// without another message (the report already says what failed).
+fn finish((ok, report): (bool, String)) -> Result<()> {
+    print!("{report}");
+    if ok {
+        Ok(())
+    } else {
+        std::process::exit(1)
     }
 }

@@ -149,6 +149,24 @@ impl Error {
 // impl does not overlap with `From<T> for T` (same trick as `anyhow`).
 impl<E: std::error::Error + Send + Sync + 'static> From<E> for Error {
     fn from(e: E) -> Self {
+        // Database errors carry meaning (missing row, duplicate key) that
+        // maps to 4xx statuses. A specialized impl would overlap with this
+        // blanket one, so recognize them here; the check is a TypeId compare
+        // that the compiler resolves per `E`.
+        #[cfg(any(feature = "postgres", feature = "sqlite"))]
+        {
+            let mut slot = Some(e);
+            if let Some(db) =
+                (&mut slot as &mut dyn std::any::Any).downcast_mut::<Option<sqlx::Error>>()
+            {
+                if let Some(err) = db.take() {
+                    return crate::db::from_sqlx(err);
+                }
+            }
+            let e = slot.expect("error taken only for sqlx::Error");
+            return Error::internal(GENERIC_500).with_source(e);
+        }
+        #[allow(unreachable_code)]
         Error::internal(GENERIC_500).with_source(e)
     }
 }
@@ -249,7 +267,11 @@ impl IntoResponse for Error {
             if self.message != GENERIC_500 || self.source.is_some() {
                 log_server_error(self.status, &self.message, self.source.as_deref());
             }
-            Cow::Borrowed(GENERIC_500)
+            if dev_mode() {
+                Cow::Owned(dev_message(&self.message, self.source.as_deref()))
+            } else {
+                Cow::Borrowed(GENERIC_500)
+            }
         } else {
             if self.status.is_server_error() {
                 if let Some(src) = &self.source {
@@ -291,6 +313,36 @@ impl IntoResponse for Error {
 }
 
 const GENERIC_500: &str = "internal server error";
+
+/// Set to `1` to send the real message and cause chain of 500 errors to
+/// clients instead of a generic message. `zapline dev` sets it; never set it
+/// in production, where those details are for the logs only.
+pub const ENV_DEV: &str = "ZAPLINE_DEV";
+
+fn dev_mode() -> bool {
+    static DEV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *DEV.get_or_init(|| std::env::var_os(ENV_DEV).is_some_and(|v| v == "1"))
+}
+
+fn dev_message(
+    message: &str,
+    source: Option<&(dyn std::error::Error + Send + Sync + 'static)>,
+) -> String {
+    let mut out = String::from(message);
+    let mut next: Option<&(dyn std::error::Error + 'static)> = match source {
+        Some(e) => Some(e),
+        None => None,
+    };
+    while let Some(err) = next {
+        let text = err.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        next = err.source();
+    }
+    out
+}
 
 #[cfg(feature = "tracing")]
 fn log_server_error(

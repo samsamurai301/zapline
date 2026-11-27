@@ -196,15 +196,7 @@ fn minimal_projects_get_a_routes_module_and_dependency_hints() {
     assert!(notes.contains("pub mod routes;"), "{notes}");
     assert!(notes.contains("src/lib.rs"), "{notes}");
     assert!(notes.contains("routes::install"), "{notes}");
-    assert!(
-        notes.contains("cargo add serde --features derive"),
-        "{notes}"
-    );
-    assert!(notes.contains("cargo add schemars@1"), "{notes}");
-    assert!(
-        notes.contains("cargo add validator@0.21 --features derive"),
-        "{notes}"
-    );
+    assert!(!notes.contains("schemars"), "{notes}");
     assert!(notes.contains("cargo add --dev serde_json"), "{notes}");
     // tokio is already a dev-dependency of the minimal template.
     assert!(!notes.contains("cargo add --dev tokio"), "{notes}");

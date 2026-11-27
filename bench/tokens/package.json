@@ -1,0 +1,8 @@
+{
+  "name": "zapline-token-bench",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "gpt-tokenizer": "4.0.0"
+  }
+}

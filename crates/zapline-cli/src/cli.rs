@@ -20,6 +20,7 @@ Examples:
   zapline new my-api                       Create an API project (docs, validation, Docker, CI)
   zapline new hello --template minimal     Create a tiny single-route project
   zapline new shop --template full         Add config layers, DI, metrics, tracing, hardened middleware
+  zapline new todo --template fullstack    HTML + htmx + SQLite + JSON API, zero setup
   zapline dev                              Rebuild and restart on every change
   zapline dev -- --port 9000               Pass arguments to your app
   zapline generate resource post           Add src/routes/posts.rs and tests/posts.rs, mounted for you
@@ -27,6 +28,8 @@ Examples:
   zapline g middleware audit               Add a middleware function
   zapline routes                           Print the route table
   zapline openapi -o docs/openapi.json     Export the OpenAPI document
+  zapline db new create_posts              Add a SQL migration
+  zapline db migrate                       Apply pending migrations
   zapline doctor                           Check your toolchain
   zapline bench http://localhost:8080/     Load test with wrk
 
@@ -63,8 +66,11 @@ Templates:
   api      Structured REST API: routes, models, validation, OpenAPI docs, Dockerfile, CI (default)
   full     api plus layered config, DI, health probes, Prometheus metrics, tracing,
            security headers, request IDs, CORS, rate limiting, background tasks
+  fullstack  Server-rendered HTML with htmx, SQL database with migrations (SQLite, zero
+           setup), JSON API with OpenAPI docs, Dockerfile, CI
 
 Examples:
+  zapline new my-app --template fullstack
   zapline new my-api
   zapline new my-api --template full --path ~/code
   zapline new hello --template minimal --no-git")]
@@ -76,7 +82,7 @@ Examples:
 
     /// Rebuild and restart the app whenever files change
     #[command(after_long_help = "\
-Watches src/, config/, templates/, Cargo.toml and build.rs (ignoring target/ and editor
+Watches src/, config/, migrations/, Cargo.toml and build.rs (ignoring target/ and editor
 temp files), rebuilds after the changes settle, and restarts the binary. The old process
 gets SIGTERM and is killed after 5 seconds if it does not exit. If a build fails, the
 previous version keeps running.
@@ -84,6 +90,7 @@ previous version keeps running.
 Examples:
   zapline dev
   zapline dev --bin server
+  zapline dev --client web/src/api.ts   Also keep a typed TypeScript client up to date
   zapline dev -- --port 9000")]
     Dev(DevArgs),
 
@@ -105,6 +112,79 @@ Examples:
   zapline openapi
   zapline openapi -o docs/openapi.json")]
     Openapi(OpenapiArgs),
+
+    /// Generate a typed TypeScript client for the app's JSON API
+    #[command(after_long_help = "\
+Exports the OpenAPI document (like `zapline openapi`) and turns it into one dependency-free
+TypeScript file: an interface per schema, and `createClient()` with one typed method per
+operation, named after its operationId. Non-2xx responses throw `ApiError` (status, code,
+details). Routes that answer with HTML are skipped. The file is only rewritten when it changes.
+
+Examples:
+  zapline client -o web/src/api.ts
+  zapline dev --client web/src/api.ts      Regenerate after every rebuild")]
+    Client(ClientArgs),
+
+    /// Create and apply SQL migrations
+    #[command(
+        subcommand,
+        after_long_help = "\
+Examples:
+  zapline db new create_posts      Add migrations/<timestamp>_create_posts.sql
+  zapline db migrate               Apply pending migrations using the app's DATABASE_URL"
+    )]
+    Db(DbCommand),
+
+    /// Type-check the project and print one line per error or warning
+    #[command(after_long_help = "\
+Runs `cargo check --all-targets` (or clippy) and prints each diagnostic as
+`level[code] file:line:col: message`, with the span label and the first suggested fix.
+No progress output, no ASCII art: a fraction of cargo's output, built for AI assistants
+and quick terminal reads. Exits non-zero when the build fails.
+
+Examples:
+  zapline check
+  zapline check --clippy")]
+    Check {
+        /// Run clippy instead of `cargo check`
+        #[arg(long)]
+        clippy: bool,
+    },
+
+    /// Run the tests and print only the totals and the failures
+    #[command(after_long_help = "\
+Compiles the tests first and, if they do not build, prints the condensed compile errors.
+Otherwise runs `cargo test` and prints each failing test with the start of its panic
+message, then one summary line. Exits non-zero when anything fails.
+
+Examples:
+  zapline test
+  zapline test users::")]
+    Test {
+        /// Only run tests whose name contains this
+        filter: Option<String>,
+    },
+
+    /// Compile styles/app.css to static/app.css with Tailwind (see `zapline g tailwind`)
+    Css {
+        /// Minify the output
+        #[arg(long)]
+        minify: bool,
+        /// Rebuild whenever templates or styles change
+        #[arg(long, conflicts_with = "minify")]
+        watch: bool,
+    },
+
+    /// Serve zapline's tools to AI assistants (Model Context Protocol, stdio)
+    #[command(after_long_help = "\
+Speaks MCP over stdin/stdout. Tools: docs (cheatsheet or the guide section you ask for),
+new_project, generate_resource, generate_handler, generate_middleware, db_new_migration,
+db_migrate, check, test, routes, openapi. Start it from the project directory.
+
+Setup:
+  Claude Code   claude mcp add zapline -- zapline mcp
+  Cursor/others {\"mcpServers\": {\"zapline\": {\"command\": \"zapline\", \"args\": [\"mcp\"]}}}")]
+    Mcp,
 
     /// Check that the tools zapline relies on are installed
     Doctor,
@@ -165,16 +245,30 @@ the module is declared and mounted automatically; otherwise you get instructions
 
 The name can be singular or plural and in any case style: post, Posts, blog-post, BlogPosts.
 
+In a project with a migrations/ directory (the fullstack template), the resource is
+database-backed: a SQL migration, sqlx queries, a JSON API, an htmx page when
+templates/base.html exists, and tests. Field types: string, text, int, float, bool;
+append `?` for optional.
+
 Examples:
   zapline generate resource post
+  zapline g resource post title body:text published:bool
+  zapline g resource product name price:float stock:int notes:text?
   zapline g resource blog-post
   zapline g resource person --plural people")]
     Resource {
         /// Resource name, e.g. `post` or `blog-post`
         name: String,
+        /// Columns for a database-backed resource: `title`, `body:text`, `views:int`,
+        /// `price:float`, `done:bool`; add `?` for optional (`bio:text?`)
+        #[arg(value_name = "FIELD:TYPE")]
+        fields: Vec<String>,
         /// Plural form, for irregular nouns the built-in rules get wrong
         #[arg(long, value_name = "WORD")]
         plural: Option<String>,
+        /// Use an in-memory store even in a project with a database
+        #[arg(long)]
+        memory: bool,
     },
 
     /// A single route handler in src/routes/<name>.rs
@@ -199,6 +293,67 @@ Examples:
         /// Middleware name, e.g. `audit`
         name: String,
     },
+
+    /// Accounts: sign-up, log-in, log-out, sessions and a CurrentUser extractor
+    #[command(after_long_help = "\
+Needs a project with a database (migrations/), like the fullstack template. Generates:
+  migrations/<ts>_create_users.sql   users table (email, Argon2id password hash)
+  src/routes/auth.rs                 JSON API under /api/auth, CurrentUser extractor,
+                                     sessions stored in the database
+  templates/auth/*.html              sign-up and log-in pages (when templates/base.html exists)
+  tests/auth.rs                      end-to-end tests
+and enables zapline's `cookies` and `password` features in Cargo.toml.
+
+Protect a handler by taking `CurrentUser`. Set SESSION_SECRET (32+ random bytes) in production.
+
+Examples:
+  zapline g auth")]
+    Auth,
+
+    /// A durable background job, stored in the database and retried on failure
+    #[command(after_long_help = "\
+Needs a project with a database (migrations/), like the fullstack template. Generates:
+  src/jobs/<name>.rs      the job: payload struct + `impl Job`
+  src/jobs/mod.rs         declares and registers it (`jobs::register`)
+  tests/<name>_job.rs     runs the job once
+and adds `.jobs(jobs::register)` to `app()` in src/lib.rs.
+
+Enqueue from a handler that takes `jobs: Jobs`: `jobs.enqueue(MyJob { .. }).await?`.
+
+Examples:
+  zapline g job send_welcome
+  zapline g job nightly-report")]
+    Job {
+        /// Job name, e.g. `send_welcome`
+        name: String,
+    },
+
+    /// Tailwind CSS without Node: styles/app.css compiled to static/app.css
+    #[command(after_long_help = "\
+Creates styles/app.css (`@import \"tailwindcss\"` plus the CSS that was in static/app.css)
+and builds static/app.css with the standalone Tailwind binary, downloaded once and
+checked against its SHA-256. From then on `zapline dev` rebuilds it as you edit
+templates, and `zapline css` builds it on demand.
+
+Examples:
+  zapline g tailwind")]
+    Tailwind,
+
+    /// Hosting config: fly.toml, railway.json, render.yaml or compose.yaml
+    #[command(after_long_help = "\
+Writes the target's config for the project's Dockerfile (adding one if missing), with a
+volume for a SQLite file, Postgres and Redis when zapline's features use them, health
+checks when the Health plugin is installed, and the settings from .env.example. Prints
+the commands that remain (creating the app, setting secrets).
+
+Examples:
+  zapline g deploy fly
+  zapline g deploy compose")]
+    Deploy {
+        /// Where to deploy
+        #[arg(value_enum)]
+        target: crate::generate::deploy::Target,
+    },
 }
 
 /// Arguments of `zapline dev`.
@@ -211,6 +366,10 @@ pub struct DevArgs {
     /// Build in release mode
     #[arg(long)]
     pub release: bool,
+
+    /// Keep a TypeScript client of the API up to date (see `zapline client`)
+    #[arg(long, value_name = "FILE")]
+    pub client: Option<PathBuf>,
 
     /// How long (ms) files must stay quiet before rebuilding
     #[arg(long, value_name = "MS", default_value_t = 300, hide = true)]
@@ -243,6 +402,40 @@ pub struct OpenapiArgs {
     /// Binary to run [default: the package's only binary]
     #[arg(long, value_name = "NAME")]
     pub bin: Option<String>,
+}
+
+/// Arguments of `zapline client`.
+#[derive(Debug, Args)]
+pub struct ClientArgs {
+    /// Where to write the client
+    #[arg(short, long, value_name = "FILE", default_value = "client.ts")]
+    pub output: PathBuf,
+
+    /// Binary to run [default: the package's only binary]
+    #[arg(long, value_name = "NAME")]
+    pub bin: Option<String>,
+}
+
+/// `zapline db` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum DbCommand {
+    /// Create an empty migration file in migrations/
+    New {
+        /// What the migration does, e.g. `create_posts`
+        name: String,
+    },
+    /// Apply pending migrations (runs the app with ZAPLINE_MIGRATE_ONLY=1)
+    Migrate {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
+    },
+    /// Insert the app's seed data: migrate, then run `App::seed` once (ZAPLINE_SEED=1)
+    Seed {
+        /// Binary to run [default: the package's only binary]
+        #[arg(long, value_name = "NAME")]
+        bin: Option<String>,
+    },
 }
 
 /// Arguments of `zapline bench`.
@@ -326,7 +519,7 @@ mod tests {
                 panic!()
             };
             assert!(g.force);
-            let GenerateKind::Resource { name, plural } = g.kind else {
+            let GenerateKind::Resource { name, plural, .. } = g.kind else {
                 panic!()
             };
             assert_eq!(name, "post");

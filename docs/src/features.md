@@ -32,9 +32,21 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (RustCrypto backend, PEM keys) |
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
-| `full` | | Every feature above | all | |
+| `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
+| `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
+| `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
+| `otlp` | `full` | OpenTelemetry trace export over OTLP/HTTP: `Telemetry::otlp`, or just `OTEL_EXPORTER_OTLP_ENDPOINT` ([Observability](observability.md#traces-to-opentelemetry-otlp)) | `tracing`, `json` | `hyper-rustls` (hyper client, rustls) |
+| `storage` | `full` | `zapline::storage`: `Storage` (local directory, memory), signed links, `App::storage` ([File storage](storage.md)) | | `mime_guess`, `hmac`, `sha2`, `getrandom` |
+| `s3` | | `Storage::s3` and `S3`: S3, R2, MinIO and other S3-compatible services ([File storage](storage.md)) | `storage` | `hyper-rustls` (hyper client, rustls) |
+| `cache` | `full` | `zapline::cache`: `Cache` (`get_or_set` without stampedes), `ResponseCache`, `ETag` ([Caching](caching.md)) | `json` | |
+| `postgres` | | `zapline::db` for Postgres: `Database`, `Db`, `DbCheck`, migrations ([Databases](database.md)) | | `sqlx` (`postgres`, `runtime-tokio`, `migrate`, rustls) |
+| `sqlite` | | `zapline::db` for SQLite, including `Database::sqlite_memory()` for tests ([Databases](database.md)) | | `sqlx` (`sqlite`, `runtime-tokio`, `migrate`) |
 
-<!-- TODO(integration): confirm the http2 and tls rows once the server package lands -->
+With `postgres` or `sqlite` (and `json`), `zapline::jobs` adds [durable jobs](jobs.md) stored in the same database. With `postgres` or `sqlite`, `App::admin` adds an [admin panel](admin.md) for every table.
+| `full` | | Every feature above except the database backends (pick `postgres` and/or `sqlite`) | all | |
 
 `openapi`, `validate`, `jwt` and `cookies` turn on `json` as well, because their error bodies, schemas and session data are JSON.
 
@@ -62,13 +74,13 @@ Some modules have no feature flag because they add no dependencies:
 
 Features are additive and unify across your dependency tree, so one crate enabling `full` enables it for all. The same applies to the macros: `#[get(..)]` works without `openapi`, it just doesn't document anything.
 
-Your own `Cargo.toml` still needs the crates whose derives expand to paths in their own crate:
+Put `#[model]` on request and response types and `zapline` is the only dependency you need: it derives `Serialize`, `Deserialize`, `JsonSchema` (with `openapi`) and `Validate` (with `validate`) through zapline's own re-exports. Writing the derives yourself still works; then add the crates they expand to:
 
 ```toml
-serde = { version = "1", features = ["derive"] }                    # always
-schemars = "1"                                                     # for #[derive(JsonSchema)]
-validator = { version = "0.21", features = ["derive"] }            # for #[derive(Validate)]
-tokio = { version = "1", features = ["macros", "rt"] }             # for #[tokio::test]
+serde = { version = "1", features = ["derive"] }                    # #[derive(Serialize, Deserialize)]
+schemars = "1"                                                     # #[derive(JsonSchema)]
+validator = { version = "0.21", features = ["derive"] }            # #[derive(Validate)]
+tokio = { version = "1", features = ["macros", "rt"] }             # #[tokio::test], in [dev-dependencies]
 ```
 
 `cargo doc -p zapline --all-features --open` builds the API reference with every module visible. The reference on docs.rs is built the same way.

@@ -388,3 +388,78 @@ async fn handlers_can_inspect_rejections() {
         r#"invalid_path:{"param":"id"}"#
     );
 }
+
+#[test]
+fn dev_mode_shows_the_real_500_message() {
+    // ZAPLINE_DEV is read once per process, so check it in a child process.
+    if std::env::var_os("ZAPLINE_DEV_CHILD").is_some() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let app = zapline::App::new().get("/", || async {
+                Err::<(), _>(zapline::Error::internal("pool exhausted"))
+            });
+            let res = app.test().get("/").send().await;
+            assert_eq!(res.status(), 500);
+            assert!(res.text().contains("pool exhausted"), "{}", res.text());
+        });
+        return;
+    }
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(exe)
+        .args([
+            "dev_mode_shows_the_real_500_message",
+            "--exact",
+            "--nocapture",
+        ])
+        .env("ZAPLINE_DEV_CHILD", "1")
+        .env(zapline::ENV_DEV, "1")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+#[tokio::test]
+async fn form_helpers_handle_empty_inputs_and_checkboxes() {
+    #[derive(Deserialize)]
+    struct Profile {
+        #[serde(default, deserialize_with = "zapline::extract::empty_as_none")]
+        age: Option<u32>,
+        #[serde(default, deserialize_with = "zapline::extract::checkbox")]
+        public: bool,
+    }
+    let app = App::new().post("/", |Form(p): Form<Profile>| async move {
+        format!("{:?} {}", p.age, p.public)
+    });
+    let client = app.test();
+    let res = client.post("/").form(&[("age", "")]).send().await;
+    assert_eq!(res.text(), "None false");
+    let res = client
+        .post("/")
+        .form(&[("age", "42"), ("public", "on")])
+        .send()
+        .await;
+    assert_eq!(res.text(), "Some(42) true");
+    let res = client.post("/").form(&[("age", "x")]).send().await;
+    assert_eq!(res.status(), 422);
+
+    // The same struct works for JSON bodies.
+    let app = App::new().post("/", |Json(p): Json<Profile>| async move {
+        format!("{:?} {}", p.age, p.public)
+    });
+    let client = app.test();
+    let res = client
+        .post("/")
+        .json(&json!({"age": 7, "public": true}))
+        .send()
+        .await;
+    assert_eq!(res.text(), "Some(7) true");
+    let res = client.post("/").json(&json!({"age": null})).send().await;
+    assert_eq!(res.text(), "None false");
+}

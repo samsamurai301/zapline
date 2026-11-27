@@ -11,10 +11,9 @@
 //! line and costs nothing when unused.
 //!
 //! ```no_run
-//! use serde::{Deserialize, Serialize};
 //! use zapline::prelude::*;
 //!
-//! #[derive(Serialize, Deserialize, JsonSchema)]
+//! #[model] // Serialize, Deserialize, JsonSchema, Validate, Debug, Clone
 //! struct User {
 //!     id: u64,
 //!     name: String,
@@ -42,8 +41,10 @@
 //!
 //! `use zapline::prelude::*` brings in the app builder, extractors,
 //! responses, route macros and the types most apps touch (see [`prelude`]).
-//! Deriving [`JsonSchema`] or `Validate` expands to paths in `schemars` /
-//! `validator`, so add those crates to your `Cargo.toml` when you derive them.
+//! [`model`] derives everything a request or response type needs through
+//! zapline's own re-exports, so `zapline` is the only dependency. Deriving
+//! [`JsonSchema`] or `Validate` by hand expands to paths in `schemars` /
+//! `validator`; add those crates to your `Cargo.toml` if you do.
 //!
 //! # Where to start
 //!
@@ -52,14 +53,22 @@
 //! | Building and running an app | [`App`], [`Routes`], [`ServerConfig`] |
 //! | Reading requests | [`extract`]: `Path`, `Query`, `Json`, `Form`, `State`, ...; [`stream::BodyStream`] |
 //! | Writing responses | [`IntoResponse`], [`Html`], [`Redirect`], [`sse`], [`stream::StreamBody`] |
+//! | Server-rendered HTML | [`view`]: templates, htmx fragments |
 //! | Errors | [`Error`] (`{"error", "code", "details"}` JSON), [`App::error_handler`] |
 //! | Middleware | [`middleware`]: CORS, timeouts, rate limiting, request IDs, compression, ... |
 //! | API docs and validation | [`openapi`], [`validate`] |
-//! | Security | [`auth`] (bearer, basic, API keys, JWT, guards, CSRF), [`cookies`], [`session`] |
+//! | Security | [`auth`] (bearer, basic, API keys, JWT, social login, guards, CSRF), [`cookies`], [`session`] |
 //! | App structure | [`di`] (dependency injection), [`config`], [`tasks`], [`lifecycle`], [`Plugin`] |
-//! | Realtime and content | [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
+//! | Databases | [`db`]: sqlx pool, migrations, `Db` extractor, test databases; [`jobs`]: durable background jobs; [`admin`]: an admin panel for every table |
+//! | Email | [`mail`]: SMTP, dev inbox, test outbox |
+//! | Translations | [`i18n`]: messages per language, `Locale` extractor, plurals, `t()` in templates |
+//! | Caching | [`cache`]: values with `get_or_set`, whole responses, ETags |
+//! | Several instances | [`redis`]: shared cache, live updates, rate limits and sessions |
+//! | Files | [`storage`]: local, memory and S3 storage with expiring links |
+//! | Realtime and content | [`live`] (pub/sub to browsers), [`ws`], [`sse`], [`stream`], [`multipart`], [`fs`] |
 //! | Observability | [`telemetry`], [`metrics`], [`health`] |
 //! | Testing | [`test`](mod@test): `app.test()` runs the whole pipeline in-process |
+//! | Development | [`dev`]: routes, recent requests, jobs and mail at `/_dev` ([`App::dev_console`]) |
 //!
 //! # Cargo features
 //!
@@ -76,11 +85,23 @@
 //! | `http2` | | HTTP/2 in the server |
 //! | `tls` | | [`tls`]: HTTPS with rustls |
 //! | `ws` | | [`ws`]: WebSockets |
-//! | `fs` | | [`fs`]: static files with ranges, ETags and precompressed variants |
+//! | `fs` | | [`fs`]: static files with ranges, ETags, precompressed variants and content-hashed URLs |
 //! | `multipart` | | [`multipart`]: `multipart/form-data` uploads |
 //! | `compression` | | [`middleware::Compression`]: gzip, brotli, zstd and deflate |
 //! | `jwt` | | JSON Web Tokens: [`auth::Jwt`], [`auth::JwtConfig`], [`auth::Claims`] |
 //! | `cookies` | | [`cookies`], [`session`] and [`auth::Csrf`] |
+//! | `views` | | [`view`]: HTML templates (MiniJinja) with dev hot reload and htmx helpers |
+//! | `password` | | [`auth::password`]: Argon2id password hashing |
+//! | `mail` | | [`mail`]: SMTP email, a dev inbox, captured mail in tests |
+//! | `oauth` | | [`auth::oauth`]: log in with GitHub, Google or any OAuth 2 provider |
+//! | `i18n` | | [`i18n`]: translations, language negotiation, plurals |
+//! | `redis` | | [`redis`]: Redis client; shared cache, live updates, rate limits and sessions |
+//! | `otlp` | | OpenTelemetry traces over OTLP/HTTP from [`telemetry`] |
+//! | `cache` | | [`cache`]: in-memory cache, response caching, ETags |
+//! | `storage` | | [`storage`]: files in a local directory or memory, with signed links |
+//! | `s3` | | S3-compatible storage for [`storage`] |
+//! | `postgres` | | [`db`]: Postgres pool, migrations, `Db` extractor (sqlx) |
+//! | `sqlite` | | [`db`]: SQLite pool, migrations, `Db` extractor (sqlx) |
 //! | `full` | | All of the above |
 //!
 //! Always available: routing, extractors, middleware, [`auth`] (bearer,
@@ -90,6 +111,7 @@
 // ---- core -----------------------------------------------------------------
 mod app;
 mod body;
+pub mod dev;
 mod error;
 pub mod extract;
 mod handler;
@@ -113,12 +135,15 @@ pub mod validate;
 // ---- protocols & content -----------------------------------------------------
 #[cfg(feature = "fs")]
 pub mod fs;
+pub mod live;
 #[cfg(feature = "multipart")]
 pub mod multipart;
 pub mod sse;
 pub mod stream;
 #[cfg(feature = "tls")]
 pub mod tls;
+#[cfg(feature = "views")]
+pub mod view;
 #[cfg(feature = "ws")]
 pub mod ws;
 
@@ -130,9 +155,29 @@ pub mod cookies;
 pub mod session;
 
 // ---- application structure ---------------------------------------------------
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub mod admin;
+#[cfg(feature = "cache")]
+pub mod cache;
 #[cfg(feature = "config")]
 pub mod config;
+#[cfg(any(feature = "postgres", feature = "sqlite"))]
+pub mod db;
 pub mod di;
+#[cfg(feature = "_http-client")]
+mod http_client;
+#[cfg(feature = "i18n")]
+pub mod i18n;
+#[cfg(all(feature = "json", any(feature = "postgres", feature = "sqlite")))]
+pub mod jobs;
+#[cfg(feature = "mail")]
+pub mod mail;
+#[cfg(feature = "otlp")]
+mod otlp;
+#[cfg(feature = "redis")]
+pub mod redis;
+#[cfg(feature = "storage")]
+pub mod storage;
 pub mod tasks;
 
 // ---- observability -----------------------------------------------------------
@@ -143,7 +188,7 @@ pub mod telemetry;
 
 pub use app::{App, Plugin, DEFAULT_BODY_LIMIT, ENV_PRINT_ROUTES};
 pub use body::{Body, BoxError, ReqBody};
-pub use error::{Error, ErrorReport, Result};
+pub use error::{Error, ErrorReport, Result, ENV_DEV};
 #[cfg(feature = "form")]
 pub use extract::Form;
 #[cfg(feature = "json")]
@@ -163,7 +208,7 @@ pub use bytes::{self, Bytes};
 pub use http::{self, header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 
 #[cfg(feature = "macros")]
-pub use zapline_macros::{delete, get, head, options, patch, post, put, route};
+pub use zapline_macros::{delete, get, head, model, options, patch, post, put, route};
 
 /// Everything a typical app needs: `use zapline::prelude::*;`
 ///
@@ -188,7 +233,7 @@ pub mod prelude {
     pub use crate::extract::{Extension, MatchedPath, Path, State};
     pub use crate::middleware::{Next, RequestId};
     #[cfg(feature = "macros")]
-    pub use crate::{delete, get, head, options, patch, post, put, route};
+    pub use crate::{delete, get, head, model, options, patch, post, put, route};
     pub use crate::{
         header, App, Bytes, ConnInfo, Error, HeaderMap, HeaderValue, Html, IntoResponse, Method,
         Plugin, Redirect, Request, Resources, Response, Result, Routes, StatusCode, Uri,

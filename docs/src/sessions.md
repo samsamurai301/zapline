@@ -133,7 +133,21 @@ How it behaves:
 
 `MemoryStore` keeps sessions in the process. It is meant for development, tests and single-instance apps: sessions vanish on restart and aren't shared between replicas. It holds at most 100,000 sessions by default (`MemoryStore::with_capacity(n)` changes that), purging expired ones as new ones arrive and evicting the sessions closest to expiry when full.
 
-For several instances, implement `SessionStore` over Redis, a database or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
+With a database ([Databases](database.md)), keep sessions there: they survive restarts and are shared by every instance. `App::database_sessions` creates the `zapline_sessions` table at startup and installs the session layer (register the database first):
+
+```rust
+use zapline::cookies::key_from_env;
+use zapline::db::Database;
+
+App::new()
+    .database(Database::from_env())
+    .cookie_key(key_from_env("SESSION_SECRET")?)
+    .database_sessions(|layer| layer.secure(!cfg!(debug_assertions)))
+```
+
+`key_from_env(var)` derives the cookie key from a secret of 32 or more bytes. When the variable is unset, debug builds use a fixed development key (so sessions survive `zapline dev` restarts) and release builds fail. `key_from_secret(s)` does the same derivation from a string you load yourself.
+
+For anything else, implement `SessionStore` over Redis or whatever you run. It has three async methods. Ids are 256-bit random URL-safe strings, so they are safe to use as keys directly:
 
 ```rust
 use std::collections::HashMap;
@@ -244,6 +258,29 @@ async fn session_survives_a_round_trip() {
 ```
 
 ## CSRF
+
+There are two ways to stop cross-site request forgery. Most apps want the first.
+
+### `SameOrigin`: no tokens
+
+`SameOrigin` (no feature needed) refuses unsafe requests (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) that a browser sent on behalf of another site, with `403 cross_origin`. It reads the headers browsers add themselves: `Sec-Fetch-Site` (every current browser), otherwise `Origin`, which must match the request's host. Requests with neither are not from a browser (curl, API clients, tests) and pass. Nothing changes in your forms, htmx attributes or `fetch` calls. `zapline g auth` installs it.
+
+```rust
+use zapline::middleware::SameOrigin;
+use zapline::prelude::*;
+
+fn app() -> App {
+    App::new()
+        .wrap(SameOrigin::new()
+            .allow(["https://app.example.com"])   // a front end on another origin, with cookies
+            .exempt(["/webhooks/"]))              // callbacks other services send
+        .post("/transfer", || async { "sent" })
+}
+```
+
+It also stops sibling subdomains (`Sec-Fetch-Site: same-site`), which `SameSite=Lax` cookies let through. Keep `GET` handlers free of side effects: they always pass. Browsers that send neither header (versions from before 2020) are left to `SameSite` cookies; if you must support them fully, use `Csrf`.
+
+### `Csrf`: signed tokens
 
 `Csrf` is signed double-submit-cookie protection for browser apps that authenticate with cookies. On the first response to a client it sets a random token cookie (`__Host-zapline.csrf`, deliberately readable by JavaScript). Requests with an unsafe method (anything but `GET`, `HEAD`, `OPTIONS` and `TRACE`) must send the same token back in the `x-csrf-token` header or, for `application/x-www-form-urlencoded` bodies, in the `csrf_token` form field. Otherwise they get `403` with the code `csrf_failed`. The comparison is constant-time.
 

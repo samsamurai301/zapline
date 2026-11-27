@@ -61,11 +61,30 @@ jobs:
       - name: each feature alone
         shell: bash
         run: |
-          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies; do
+          for f in macros json query form openapi validate config tracing http2 tls ws fs multipart compression jwt cookies views postgres sqlite password mail storage s3 cache oauth i18n redis otlp; do
             echo "::group::$f"
             cargo check -p zapline --no-default-features --features "$f"
             echo "::endgroup::"
           done
+
+  # zapline::db against a real Postgres (SQLite runs in the main test job).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p zapline --features postgres,sqlite --test db --test db_postgres
+        env:
+          ZAPLINE_TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/postgres
 
   # The documented minimum supported Rust version.
   msrv:
@@ -85,6 +104,8 @@ jobs:
       - run: cargo doc -p zapline --all-features --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
+      - name: llms.txt is current
+        run: ./scripts/gen-llms.sh --check
       - name: build the guide
         run: |
           curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar -xz
@@ -113,12 +134,40 @@ jobs:
           ROOT="$(native "$PWD")"
           WORK="$(native "$RUNNER_TEMP")/scaffold"
           mkdir -p "$WORK"
-          for t in minimal api full; do
+          for t in minimal api full fullstack; do
             echo "::group::template $t"
             "$ROOT/target/debug/zapline" new "demo-$t" --template "$t" --path "$WORK" --zapline-path "$ROOT/crates/zapline" --no-git
+            if [ "$t" = fullstack ]; then
+              # The database-backed generator must produce code that builds and passes its tests.
+              (cd "$WORK/demo-$t" && "$ROOT/target/debug/zapline" g resource product name price:float stock:int 'notes:text?' featured:bool \
+                && "$ROOT/target/debug/zapline" g auth && "$ROOT/target/debug/zapline" g job send_welcome)
+            fi
             (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" cargo test)
+            if [ "$t" != minimal ] && [ "$RUNNER_OS" = Linux ]; then
+              # The generated TypeScript client must type-check under the strictest settings.
+              (cd "$WORK/demo-$t" && CARGO_TARGET_DIR="$ROOT/target/scaffold" "$ROOT/target/debug/zapline" client -o web/api.ts \
+                && npx --yes -p typescript@5.9.3 tsc --noEmit --strict --exactOptionalPropertyTypes --noUncheckedIndexedAccess \
+                     --noUnusedLocals --target es2022 --lib es2022,dom --module esnext --moduleResolution bundler web/api.ts)
+            fi
             echo "::endgroup::"
           done
+
+  # The token benchmark is deterministic: check its numbers are reproducible.
+  token-bench:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            bench/tokens
+      - run: (cd bench/tokens && cargo test -q && ./run.sh)
+      - uses: actions/upload-artifact@v5
+        with:
+          name: token-bench-results
+          path: bench/tokens/results.md
 
   # Smoke-run the benchmark harness (shared runners are noisy: not results).
   bench:

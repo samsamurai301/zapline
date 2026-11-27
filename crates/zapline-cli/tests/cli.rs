@@ -117,6 +117,7 @@ fn new_minimal_project() {
         files_of(&root),
         [
             ".gitignore",
+            "AGENTS.md",
             "Cargo.toml",
             "README.md",
             "src/lib.rs",
@@ -157,11 +158,11 @@ fn new_api_is_the_default_template() {
     }
     let manifest = read_toml(&root.join("Cargo.toml"));
     let deps = manifest["dependencies"].as_table().unwrap();
-    for d in ["zapline", "serde", "schemars", "validator"] {
-        assert!(deps.contains_key(d), "missing dependency {d}");
+    // Models use `#[model]`: zapline is the only dependency they need.
+    assert!(deps.contains_key("zapline"));
+    for d in ["serde", "schemars", "validator"] {
+        assert!(!deps.contains_key(d), "unneeded dependency {d}");
     }
-    assert_eq!(deps["validator"]["features"][0].as_str(), Some("derive"));
-    assert_eq!(deps["serde"]["features"][0].as_str(), Some("derive"));
     let mod_rs = fs::read_to_string(root.join("src/routes/mod.rs")).unwrap();
     assert!(mod_rs.contains("// zapline:routes:start") && mod_rs.contains("// zapline:routes:end"));
 }
@@ -414,7 +415,7 @@ fn generate_in_a_minimal_project_explains_what_is_missing() {
     let tmp = tempfile::tempdir().unwrap();
     let root = new_project(tmp.path(), "tiny", "minimal");
     let log = expect_success(&run_in(&root, &["g", "resource", "post"]));
-    assert!(log.contains("cargo add serde --features derive"), "{log}");
+    assert!(log.contains("cargo add --dev serde_json"), "{log}");
     assert!(log.contains("pub mod routes;"), "{log}");
     assert!(root.join("src/routes/mod.rs").is_file());
 }
@@ -540,4 +541,35 @@ fn doctor_reports_the_toolchain() {
     assert!(text.contains("cargo"), "{text}");
     assert!(text.contains("wrk"), "{text}");
     assert!(text.contains("docker"), "{text}");
+}
+
+#[test]
+fn generate_job_registers_it_in_the_app() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = new_project(tmp.path(), "shop", "fullstack");
+    let log = expect_success(&run_in(&root, &["g", "job", "send-receipt"]));
+    assert!(log.contains("Created src/jobs/send_receipt.rs"), "{log}");
+    assert!(log.contains("Created tests/send_receipt_job.rs"), "{log}");
+    assert!(log.contains("Created src/jobs/mod.rs"), "{log}");
+    assert!(log.contains("Modified src/lib.rs"), "{log}");
+
+    expect_success(&run_in(&root, &["g", "job", "purge"]));
+    let jobs = fs::read_to_string(root.join("src/jobs/mod.rs")).unwrap();
+    assert!(
+        jobs.contains("pub mod purge;\npub mod send_receipt;\n"),
+        "{jobs}"
+    );
+    assert!(
+        jobs.contains(".register::<send_receipt::SendReceipt>()"),
+        "{jobs}"
+    );
+    assert!(jobs.contains(".register::<purge::Purge>()"), "{jobs}");
+    let lib = fs::read_to_string(root.join("src/lib.rs")).unwrap();
+    assert_eq!(lib.matches(".jobs(jobs::register)").count(), 1, "{lib}");
+    assert!(lib.contains("pub mod jobs;\npub mod routes;"), "{lib}");
+
+    // Jobs live in the database.
+    let api = new_project(tmp.path(), "svc", "api");
+    let log = expect_failure(&run_in(&api, &["g", "job", "x"]));
+    assert!(log.contains("no migrations/ directory"), "{log}");
 }

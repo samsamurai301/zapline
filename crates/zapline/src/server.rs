@@ -119,8 +119,9 @@ pub struct ServerConfig {
     /// where supported). Ignored by [`App::serve`], which uses your runtime.
     pub runtime: RuntimeMode,
     /// Abort connections that do not send complete request headers in time
-    /// (slowloris protection); also bounds HTTP/2 detection. `None` disables
-    /// it. Default: 30s.
+    /// (slowloris protection); also bounds HTTP/2 detection, and closes
+    /// HTTP/2 connections that send no request for this long. `None`
+    /// disables it. Default: 30s.
     pub header_read_timeout: Option<Duration>,
     /// TCP listen backlog. Default: 4096.
     pub backlog: i32,
