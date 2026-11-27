@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+  # Weekly, so a new stable Rust (new lints, deprecations) that breaks main
+  # is caught even when nobody pushes. `ci-alert.yml` opens an issue.
+  schedule:
+    - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
