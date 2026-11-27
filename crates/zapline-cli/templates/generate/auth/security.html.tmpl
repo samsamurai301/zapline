@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% block title %}Account security · @@package@@{% endblock %}
+{% block content %}
+<h1>Two-factor login</h1>
+
+{% if recovery_codes %}
+<p role="status">Two-factor login is on. Save these recovery codes somewhere safe: each one logs you in once if you lose your phone, and you won't see them again.</p>
+<pre>{% for code in recovery_codes %}{{ code }}
+{% endfor %}</pre>
+<p><a href="/">Done</a></p>
+
+{% elif setup %}
+<p>Add @@package@@ to your authenticator app: open <a href="{{ setup.otpauth_uri }}">this link</a> on your phone, or type in this key:</p>
+<p><code>{{ setup.secret }}</code></p>
+<form method="post" action="/account/security/enable">
+  <label>Then enter the code it shows <input name="code" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="32" autofocus{% if errors.code %} aria-invalid="true"{% endif %}></label>
+  {% if errors.code %}<small class="error">That code {{ errors.code }}</small>{% endif %}
+  <button>Turn on two-factor login</button>
+</form>
+
+{% elif enabled %}
+<p>Two-factor login is on: logging in asks for a code from your authenticator app.</p>
+<form method="post" action="/account/security/disable">
+  <label>To turn it off, enter a current code <input name="code" inputmode="numeric" autocomplete="one-time-code" required minlength="6" maxlength="32"{% if errors.code %} aria-invalid="true"{% endif %}></label>
+  {% if errors.code %}<small class="error">That code {{ errors.code }}</small>{% endif %}
+  <button class="secondary">Turn off two-factor login</button>
+</form>
+
+{% else %}
+<p>Two-factor login is off. Turn it on, and logging in will also ask for a code from an authenticator app on your phone.</p>
+<form method="post" action="/account/security/setup">
+  <button>Set up two-factor login</button>
+</form>
+{% endif %}
+{% endblock %}

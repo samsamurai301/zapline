@@ -86,6 +86,24 @@ impl MagicLinks {
         format!("{payload}.{sig}")
     }
 
+    /// The user `token` names, **unverified**: only to look up that user's
+    /// binding value (from a database, say) before calling
+    /// [`verify`](Self::verify). Never trust it on its own.
+    ///
+    /// ```
+    /// use std::time::Duration;
+    /// use zapline::auth::magic_link::MagicLinks;
+    /// use zapline::cookies::Key;
+    ///
+    /// let links = MagicLinks::new(&Key::generate());
+    /// let token = links.issue("42", "sign-in", "3", Duration::from_secs(60));
+    /// assert_eq!(MagicLinks::user_of(&token).as_deref(), Some("42"));
+    /// assert_eq!(MagicLinks::user_of("junk"), None);
+    /// ```
+    pub fn user_of(token: &str) -> Option<String> {
+        unb64(token.trim().split('.').next()?)
+    }
+
     /// The user a valid `token` for `purpose` names. `binding` is called
     /// with that user and returns their current binding value (`None` when
     /// the user no longer exists).
