@@ -21,6 +21,8 @@ fn app() -> App {
 |---|---|---|
 | [`SecurityHeaders`](#securityheaders) | Clickjacking, MIME sniffing, downgrade attacks, over-broad browser features | |
 | [`RateLimit`](#ratelimit) | Brute force, scraping, noisy clients | |
+| [`Idempotency`](#idempotency) | Retried `POST`s charging twice | |
+| [`Captcha`](#captcha) | Bots on signup and other public forms | `captcha` |
 | [`Compression`](#compression) | Bandwidth cost (not an attack, but it is why you want it) | `compression` |
 | [`ConcurrencyLimit`](#concurrencylimit) | Overload: sheds load instead of collapsing | |
 | [`Timeout`](#timeout) | Handlers (or dependencies) that hang | |
@@ -195,6 +197,110 @@ fn app() -> App {
 ```
 
 `.rate_limit(limit, period)` is on both `App` and `Routes` and applies to the most recently registered route. Policies that share a `.scope(name)` share buckets, for example to cap login and password reset together. A limiter installed with plain `App::wrap` runs before routing and cannot see policies: it applies its own limit to everything, 404s included.
+
+## `Idempotency`
+
+A client that times out on `POST /payments` can't tell whether the payment went through. Retrying could charge twice, and giving up could lose the payment. With `Idempotency`, the client sends an `Idempotency-Key` header with a unique value, such as a UUID, and retries with the same key. The handler runs once, and every retry gets the first response back:
+
+```rust
+use zapline::middleware::Idempotency;
+use zapline::prelude::*;
+
+fn app() -> App {
+    let payments = Routes::new()
+        .post("/payments", || async { (StatusCode::CREATED, "charged") })
+        .wrap(
+            Idempotency::new()
+                .required()                       // clients must send a key
+                // Whose key it is: here an account header your auth layer
+                // (wrapped outside) has checked. Without `.scope(..)`, it's
+                // the `Authorization` header, and requests with neither skip
+                // idempotency.
+                .scope(|req| {
+                    req.headers().get("x-account")?.to_str().ok().map(str::to_owned)
+                }),
+        );
+
+    App::new().nest("/api", payments)
+}
+```
+
+Use `App::wrap(Idempotency::new())` instead to make keys optional on every route. Don't stack both on the same route.
+
+It follows the IETF `Idempotency-Key` header draft and applies only to `POST` and `PATCH`, since `PUT` and `DELETE` are idempotent already. Requests without a key pass through untouched unless the middleware is `.required()`:
+
+| Situation | Answer |
+|---|---|
+| First request with a key | Runs the handler, and the response is stored for `.ttl(..)` (default 24 hours) |
+| Retry of the same request | The stored response, with `Idempotent-Replayed: true` |
+| Retry while the first request still runs | `409`, code `idempotency_key_in_use` |
+| Same key, different method, path, query, content type or body | `422`, code `idempotency_key_reused` |
+| No key, with `.required()` | `400`, code `idempotency_key_missing` |
+| Key longer than 255 characters or with spaces or control characters | `400`, code `idempotency_key_invalid` |
+
+Things to know:
+
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request. The scope is only as trustworthy as what it's read from: check the `Authorization` header (authentication wrapped outside `Idempotency`) or scope by an authenticated identity, or a client sending a new bogus header per request can fill the memory store.
+- **Only final answers are stored.** A `2xx`, or a `4xx` like "card declined", is stored, so a retry gets the same answer. These aren't stored, so the client's retry runs the handler again:
+  - `5xx` responses;
+  - answers that may change: `401`, `403`, `404` and `405`;
+  - answers that ask for a retry: `408`, `409`, `425` and `429`;
+  - streamed bodies, and responses over 1 MiB (body and headers).
+
+  `Set-Cookie` headers reach the first response only and are never replayed, so a replay can't hand a session to whoever sends the key again. Apps that refresh a session cookie on every response still get idempotency.
+- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed, and `SetRequestId` and `Cors`, so a retry gets its own request id and its own origin's CORS headers instead of the first request's.
+- **Large uploads pass through.** Fingerprinting buffers the request body within the app's body limit. Bodies whose `Content-Length` is over that limit skip idempotency, since a `BodyStream` route may read them under its own larger limit (and a route without one rejects them unread). A chunked upload with no `Content-Length` is buffered like any body, so leave routes taking large chunked uploads out of `Idempotency` (`Routes::wrap` on the routes that need it).
+- **Slow handlers keep their key.** While a handler runs, and until its response is stored, its lock is renewed every third of `.lock_timeout(..)` (at least 30 ms). If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, or takes over 5 seconds to answer, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
+- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. Stored responses use at most `.max_memory(bytes)` (default 64 MiB), again a tenth per client. When the store is full, the oldest stored responses are dropped. A client whose whole share is requests still running gets `429` (code `idempotency_keys_exhausted`) for new keys, and other clients are unaffected. Use Redis where a second run costs money.
+
+## Captcha
+
+Public forms (signup, contact, password reset) attract bots. With the `captcha` feature, a form can require a Cloudflare Turnstile, hCaptcha or Google reCAPTCHA check. The page shows the provider's widget, which puts a token in a hidden form field. The handler passes that token to `Captcha::verify`:
+
+```rust
+use serde::Deserialize;
+use zapline::captcha::Captcha;
+use zapline::prelude::*;
+
+#[derive(Deserialize)]
+struct Signup {
+    email: String,
+    #[serde(rename = "cf-turnstile-response", default)]
+    captcha: String,
+}
+
+async fn signup(captcha: Captcha, conn: ConnInfo, Form(form): Form<Signup>) -> Result<String> {
+    captcha.verify(&form.captcha, conn.remote_addr.map(|a| a.ip())).await?;
+    Ok(format!("welcome, {}", form.email))
+}
+
+fn app(secret: String) -> App {
+    App::new()
+        .captcha(Captcha::turnstile(secret))      // or ::hcaptcha / ::recaptcha
+        .post("/signup", signup)
+}
+```
+
+On the page, inside the `<form>`, add the provider's widget with your site key:
+
+```html
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="{{ site_key }}"></div>
+```
+
+| Situation | Answer |
+|---|---|
+| Valid token | `verify` returns `Ok(())` |
+| Empty token (widget not completed) | `400`, code `captcha_missing`, without calling the provider |
+| Token rejected by the provider | `400`, code `captcha_failed` |
+| Provider unreachable, too slow (`.timeout(..)`, default 10 s) or answering nonsense | `503`, code `captcha_unavailable` |
+
+- **It fails closed.** An outage at the provider blocks the form rather than letting bots through. Expect a few `503`s if the provider goes down.
+- **Field names:** `Captcha::field()` gives the field each widget posts: `cf-turnstile-response`, `h-captcha-response` or `g-recaptcha-response`.
+- **Client IP:** pass it when you know it; behind a proxy, use the IP from your `TrustedProxies`. Providers use it as one more signal.
+- **Tests and self-hosting:** `.verify_url(url)` sends verifications to a compatible endpoint instead, such as a test double. Turnstile also publishes test keys that always pass or always fail.
+- **Secrets:** keep the secret key in the environment, not in code. `Captcha`'s `Debug` output hides it.
 
 ## `Compression`
 

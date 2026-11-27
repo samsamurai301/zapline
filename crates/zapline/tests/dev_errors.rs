@@ -124,11 +124,10 @@ async fn panics_show_where_they_happened() {
     assert_eq!(body["code"], "ZL0080");
     assert_eq!(body["error_code"], "panic");
     assert_eq!(body["detail"], "panicked: no items to show");
+    // The location is the path as the compiler wrote it: `file!()` spells it
+    // the same way (backslashes on Windows, so editors there can open it).
     let at = body["location"].as_str().unwrap();
-    assert!(
-        at.starts_with("crates/zapline/tests/dev_errors.rs:"),
-        "{at}"
-    );
+    assert!(at.starts_with(concat!(file!(), ":")), "{at}");
 
     let html = client
         .get("/boom")
@@ -137,7 +136,7 @@ async fn panics_show_where_they_happened() {
         .await;
     html.assert_status(500)
         .assert_contains("ZL0080 · Handler panicked")
-        .assert_contains("Panicked at <code id=location>crates/zapline/tests/dev_errors.rs:");
+        .assert_contains(concat!("Panicked at <code id=location>", file!(), ":"));
 }
 
 #[tokio::test]

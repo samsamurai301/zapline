@@ -46,14 +46,22 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
-| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash, two-factor columns, a sign-in counter), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; two-factor login (`POST /api/auth/2fa`, `/2fa/setup`, `/2fa/enable`, `/2fa/disable`); sign-in links (`POST /api/auth/link`, `GET /api/auth/link/{token}`); the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/login/2fa`, `/login/link`, `/account/security`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, two-factor login (codes, recovery codes, turning it off, resets still asking for it), sign-in links, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
-It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail`, `oauth`, `password` and `two-factor` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
 
 **Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
+
+**Two-factor login.** Users turn it on at `/account/security` (or with `POST /api/auth/2fa/setup`, then `/2fa/enable` with a code). They add the app to an authenticator app by its `otpauth://` link or key, confirm with one code, and get 10 recovery codes, shown once. From then on, every way of signing in stops half-way: the password, a sign-in link, a password reset and GitHub/Google all do. The session remembers the pending sign-in for 5 minutes, `/login/2fa` (or `POST /api/auth/2fa`, after a `401 two_factor_required`) takes an app code or a recovery code, and only then is the user signed in.
+- **Each code works once.** The last accepted time step and the unused recovery code hashes are stored. They're updated conditionally, so two requests can't use the same code.
+- **Turning it on or off** needs a code, so a stolen session alone can't do it, and it ends the account's other sessions.
+- **Rate limited:** code attempts share the 10-a-minute limit with logins.
+- **The app's name** in authenticator apps is `APP_NAME`, falling back to the package name.
+
+**Sign-in links.** `/login/link` (or `POST /api/auth/link`) emails a link that signs the user in. It answers the same whether or not the account exists. The link is a [magic link](#magic-links) bound to the account's sign-in count, so it works once, expires after 15 minutes, and stops working after any other sign-in. Using it also proves the email address.
 
 **Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. Sign-up doesn't check the address, so someone could open an account with another person's email ahead of them: when the real owner then logs in with GitHub or Google, that account's password is dropped and its sessions end.
 
@@ -61,7 +69,7 @@ It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, ad
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
-```rust
+```rust,ignore
 use crate::routes::auth::CurrentUser;
 
 #[get("/api/notes")]
@@ -85,8 +93,11 @@ With the `password` feature, `zapline::auth::password` hashes and checks passwor
 ```rust
 use zapline::auth::password;
 
+# async fn demo() -> zapline::Result<()> {
 let hash = password::hash("correct horse battery staple").await?;
 assert!(password::verify("correct horse battery staple", &hash).await?);
+# Ok(())
+# }
 ```
 
 Both run on the blocking thread pool, since a hash takes tens of milliseconds by design. `password::verify_missing(pw)` spends the same time and returns `false`: call it when the account doesn't exist. `hash_blocking` and `verify_blocking` are the synchronous versions.
@@ -97,6 +108,10 @@ With the `oauth` feature, `App::oauth` adds "log in with GitHub/Google/..." usin
 
 ```rust
 use zapline::auth::oauth::{OAuth, OAuthLogin};
+# use zapline::prelude::*;
+# use zapline::session::Session;
+# async fn find_or_create_user(_: &zapline::auth::oauth::OAuthUser) -> Result<i64> { Ok(1) }
+# fn demo() -> Result<()> {
 
 #[get("/auth/github/callback")]
 async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
@@ -110,6 +125,8 @@ async fn github_done(login: OAuthLogin, session: Session) -> Result<Redirect> {
 let app = App::new()
     .oauth(OAuth::from_env("github")?) // GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET
     .mount(github_done);
+# Ok(())
+# }
 ```
 
 Send people to `/auth/github` (optionally `?next=/settings`) to start. That route redirects to the provider with a random `state` and a PKCE challenge, kept in a short-lived `HttpOnly` cookie scoped to `/auth`. On the way back, `OAuthLogin` checks the state, exchanges the code (sending the PKCE verifier) and fetches the profile. It answers `400 invalid_oauth_state` for a forged or replayed callback, `401 oauth_denied` when the user cancelled at the provider, `401 oauth_failed` when the provider rejects the code, and `404` for a provider that isn't registered. `next` is kept only when it is a local path, so it can't be used as an open redirect.
@@ -121,6 +138,78 @@ Send people to `/auth/github` (optionally `?next=/settings`) to start. That rout
 | Any OAuth 2 provider | `OAuth::custom(name, authorize_url, token_url, userinfo_url)` | Reads `sub`/`id`, `email`, `email_verified`, `name`, `picture`/`avatar_url`; the whole profile is in `user.raw` |
 
 `.scopes([...])` replaces the scopes, `.redirect_url(url)` overrides the callback URL (by default `APP_URL` + `/auth/{name}/callback`, or the request's host when `APP_URL` is unset), and `.endpoints(..)` points a built-in provider at a test double. Only trust `user.email` for account linking when `user.email_verified` is true.
+
+## Two-factor login (TOTP) and recovery codes
+
+With the `two-factor` feature, users can add an authenticator app (Google Authenticator, 1Password, Authy, ...) as a second step after their password. `zapline::auth::totp::Totp` makes and checks the six-digit codes (RFC 6238), and `zapline::auth::recovery_codes` covers users who lose their phone.
+
+**Turning it on for a user:**
+1. Make a secret with `Totp::generate()?` (an error, never a weak secret, when the OS has no secure randomness), and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
+2. Ask for one code and check it, to be sure their app is set up.
+3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)?` (ten distinct codes). Show the codes themselves once.
+
+**Signing in**, after the password:
+
+```rust
+use zapline::auth::recovery_codes;
+use zapline::auth::totp::Totp;
+
+/// What a `users` row holds for two-factor login.
+struct TwoFactor {
+    secret: String,
+    last_step: Option<u64>,
+    recovery_hashes: Vec<String>,
+}
+
+fn second_step(user: &mut TwoFactor, code: &str) -> zapline::Result<bool> {
+    let totp = Totp::from_base32(&user.secret)?;
+    if let Some(step) = totp.verify(code, user.last_step) {
+        user.last_step = Some(step); // save it: the same code is refused next time
+        return Ok(true);
+    }
+    if let Some(i) = recovery_codes::find(code, &user.recovery_hashes) {
+        user.recovery_hashes.remove(i); // each recovery code works once
+        return Ok(true);
+    }
+    Ok(false)
+}
+```
+
+- **Clock drift:** a code is accepted for its own 30-second step and one step either side, so a phone clock that's a little off still works.
+- **Replay protection:** pass the user's last accepted step to `verify`, and save the step it returns. A code that was already used, or one from before it, is refused, so an intercepted code can't be used again.
+- **Recovery codes:** they look like `x7k2m-q9pd4`, avoid look-alike characters (0/o, 1/l/i), and match regardless of case, spaces and dashes. Store only `recovery_codes::hash(code)`.
+- **Rate-limit the step:** six digits can be guessed with enough tries. Limit attempts per account, as `zapline g auth` does for the password.
+
+## Magic links
+
+Sign-in links sent by email, email confirmation and invitations need a token that names a user, expires, and works only once. `MagicLinks` (with the `cookies` feature, signed with the app's cookie key) issues and checks them:
+
+```rust
+use std::time::Duration;
+use zapline::auth::magic_link::MagicLinks;
+use zapline::prelude::*;
+
+async fn send_link(links: MagicLinks) -> String {
+    // Bound to the user's last sign-in: once they sign in, it changes and
+    // this link stops working.
+    let token = links.issue("42", "sign-in", "last-login=1731400000", Duration::from_secs(900));
+    format!("https://shop.example/magic/{token}") // email this
+}
+
+async fn open_link(links: MagicLinks, Path(token): Path<String>) -> Result<String> {
+    let user_id = links.verify(&token, "sign-in", |id| {
+        // Look the user up and return their current binding value.
+        (id == "42").then(|| "last-login=1731400000".to_owned())
+    })?;
+    // ...start the session, update last-login...
+    Ok(format!("signed in as {user_id}"))
+}
+```
+
+- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, use a per-user counter you increment on every sign-in (a timestamp in whole seconds may not change between two quick sign-ins); for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Consume the link before signing in.** `verify` only checks the token. Two requests opening the same link at once both pass it, so claim it with a conditional update, such as `UPDATE users SET login_count = login_count + 1 WHERE id = $1 AND login_count = $2`, and start the session only when that changed a row. `zapline g auth` does this.
+- **What's in a token:** the user and purpose are signed, so a sign-in link can't be used to confirm an email, and a token can't be edited to name another user. The signature is checked in constant time.
+- **Errors:** an expired link gets `400`, code `link_expired`, so the page can offer to send a new one. Anything else (tampered, wrong purpose, used, unknown user) gets `400`, code `link_invalid`.
 
 ## Credential extractors
 

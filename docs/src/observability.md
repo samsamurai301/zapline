@@ -143,6 +143,7 @@ OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318 OTEL_SERVICE_NAME=shop cargo r
 `telemetry::init()` (and any `Telemetry`) picks it up. Or configure it in code:
 
 ```rust
+# use zapline::telemetry::Telemetry;
 Telemetry::new()
     .otlp("http://localhost:4318") // or the full .../v1/traces URL
     .service_name("shop")

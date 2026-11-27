@@ -45,6 +45,8 @@ Without `SMTP_URL`, a **debug** build uses the outbox described below, and a **r
 ## Recipients and headers
 
 ```rust
+# use zapline::mail::Email;
+# let _ =
 Email::to("ada@example.com")
     .and_to("grace@example.com")       // more `To` recipients
     .cc("team@example.com")             // visible copies
@@ -60,6 +62,11 @@ Blind copies go to the SMTP envelope only: the sent message has no `Bcc` header,
 ## Attachments and inline images
 
 ```rust
+# use zapline::mail::Email;
+# struct User { email: String }
+# let user = User { email: "ada@example.com".into() };
+# let pdf_bytes: Vec<u8> = Vec::new();
+# let logo_png: Vec<u8> = Vec::new();
 let email = Email::to(&user.email)
     .subject("Your invoice")
     .text("Your invoice is attached.")
@@ -78,6 +85,11 @@ With the `views` feature, `Email::template` renders the subject and both bodies 
 
 ```rust
 use zapline::view::{context, Views};
+# use zapline::mail::{Email, Mailer};
+# use zapline::prelude::*;
+# #[model]
+# struct Signup { email: String, name: String }
+# fn token(_email: &str) -> String { String::new() }
 
 #[post("/signup")]
 async fn signup(views: Views, mail: Mailer, Json(form): Json<Signup>) -> Result<StatusCode> {
@@ -109,6 +121,13 @@ An outbox mailer sends nothing. It logs each message and serves the last 50 at *
 Sending inline makes the request wait for the SMTP server and fail if it is down. With a database, `Email` is also a [durable job](jobs.md): register it once and enqueue messages instead of sending them.
 
 ```rust
+# use zapline::db::Database;
+# use zapline::jobs::Jobs;
+# use zapline::mail::{Email, Mailer};
+# use zapline::prelude::*;
+# struct User { email: String }
+# async fn demo(jobs: Jobs, user: User, body: String) -> Result<()> {
+# let _app =
 App::new()
     .database(Database::from_env())
     .mailer(Mailer::from_env()?)
@@ -116,6 +135,8 @@ App::new()
 
 // in a handler
 jobs.enqueue(Email::to(&user.email).subject("Welcome").text(body)).await?;
+# Ok(())
+# }
 ```
 
 A failed send is retried with backoff (5 s, 20 s, 80 s, ...). Attachments travel with the job (stored base64 in its payload).
@@ -123,6 +144,11 @@ A failed send is retried with backoff (5 s, 20 s, 80 s, ...). Attachments travel
 ## Testing
 
 ```rust
+# use zapline::mail::Mailer;
+# use zapline::prelude::*;
+# #[post("/invite")]
+# async fn invite() -> &'static str { "" }
+# async fn demo() {
 let mailer = Mailer::outbox();
 let client = App::new().mailer(mailer.clone()).mount(invite).test();
 
@@ -130,6 +156,7 @@ client.post("/invite").send().await.assert_status(200);
 let sent = mailer.sent();
 assert_eq!(sent[0].to, ["ada@example.com"]);
 assert!(sent[0].text.as_deref().unwrap().contains("/join"));
+# }
 ```
 
 `Email` is a plain struct with public fields (`to`, `cc`, `bcc`, `subject`, `text`, `html`, `headers`, `attachments`), so assertions can look at anything. Generated emails come with such a test (`zapline g mailer`).

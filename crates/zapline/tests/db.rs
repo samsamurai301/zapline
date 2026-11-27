@@ -67,6 +67,28 @@ async fn migrations_run_and_queries_work() {
 }
 
 #[tokio::test]
+async fn pool_without_the_checkout_ping_serves_requests() {
+    let client = App::new()
+        .database(
+            Database::sqlite_memory()
+                .migrations(MIGRATIONS)
+                .test_before_acquire(false),
+        )
+        .post("/notes", create)
+        .get("/notes/{slug}", get_one)
+        .test();
+    // Many checkouts of the same pooled connections, none of them pinged.
+    for i in 0..20 {
+        let body = json!({"slug": format!("n{i}"), "body": "x"});
+        assert_eq!(client.post("/notes").json(&body).send().await.status(), 201);
+        assert_eq!(
+            client.get(&format!("/notes/n{i}")).send().await.status(),
+            200
+        );
+    }
+}
+
+#[tokio::test]
 async fn missing_row_is_404_and_duplicate_is_409() {
     let client = app().test();
     assert_eq!(client.get("/notes/nope").send().await.status(), 404);

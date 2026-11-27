@@ -3,9 +3,13 @@
 `App::admin` serves an admin panel for every table in your database: browse, search, sort and page through rows, and create, edit and delete them through forms. There is no code per table. It reads the schema on each request, so a table added by a new migration shows up on the next reload.
 
 ```rust
+# use zapline::prelude::*;
+# use zapline::db::Database;
+# let _app =
 App::new()
     .database(Database::from_env())
     .admin(|admin| admin) // http://localhost:8080/admin
+# ;
 ```
 
 It works on SQLite and Postgres and needs no extra Cargo feature. The `fullstack` template turns it on.
@@ -18,6 +22,14 @@ To use it in production, protect it with a [middleware](middleware.md) that deci
 
 ```rust
 use zapline::middleware::Next;
+# use zapline::prelude::*;
+# #[derive(Clone)]
+# struct User { email: String, email_verified: bool }
+# struct CurrentUser(User);
+# impl CurrentUser {
+#     async fn from_request_parts(_: &mut Request) -> Result<Self> { Err(Error::unauthorized()) }
+# }
+# let app = App::new();
 
 async fn admins_only(mut req: Request, next: Next) -> Response {
     let user = match CurrentUser::from_request_parts(&mut req).await {
@@ -35,7 +47,9 @@ async fn admins_only(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+# let _app =
 app.admin(|admin| admin.protect(admins_only))
+# ;
 ```
 
 [`zapline g auth`](auth.md#accounts-in-one-command-zapline-g-auth) generates this: the accounts listed in `ADMIN_EMAILS` get in once their owner has proved the address (by using a password reset link, or by logging in with GitHub/Google), others get `403`, and visitors are sent to `/login`. Calling `admin` again replaces the earlier setup, which is how the generated `auth::mount` protects the panel that the template turned on.

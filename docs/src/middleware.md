@@ -21,7 +21,7 @@ Middleware can short-circuit by returning a response without calling `next.run`.
 
 ## Where middleware runs
 
-```
+```text
 request ─▶ global (App::wrap) ─▶ routing ─▶ route (App::wrap_route) ─▶ group (Routes::wrap) ─▶ handler
 ```
 
@@ -38,6 +38,7 @@ Middleware runs in the order it was added (the first `wrap` is the outermost lay
 Insert typed values into the request extensions and read them with `Extension<T>`:
 
 ```rust
+# use zapline::prelude::*;
 #[derive(Clone)]
 struct Tenant(String);
 

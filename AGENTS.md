@@ -12,6 +12,7 @@ with `zapline new` get their own `AGENTS.md`.
 | `crates/zapline` | The framework (core + feature modules behind Cargo features) |
 | `crates/zapline-macros` | `#[get]`/`#[post]`/... route macros |
 | `crates/zapline-codegen` | Typed TypeScript/JavaScript clients from an OpenAPI document (used by `OpenApi::client_js` and `zapline client`) |
+| `crates/zapline-wasm` | Sandboxed WebAssembly components (plugins): fuel, memory caps, no WASI. Rust 1.97, outside the MSRV check |
 | `crates/zapline-cli` | `zapline` / `cargo zapline`: new, generate, dev, routes, openapi, doctor, bench. Templates in `templates/*.tmpl` |
 | `examples/examples` | Runnable examples; `cheatsheet.rs` is the canonical-usage file included in the guide |
 | `examples/ecosystem` | sqlx / SeaORM / Diesel / Leptos example apps: their own workspace and lockfile, checked by `./scripts/check.sh ecosystem` |
@@ -44,7 +45,7 @@ Windows: `.\scripts\check.ps1`.
 - Every public item gets a doc comment with a short example. New behavior gets
   an integration test in `crates/zapline/tests/`.
 - New Cargo features must compile alone: add them to the feature loop in
-  `scripts/check.sh` and `.github/workflows/ci.yml`.
+  `scripts/check.sh` and `scripts/check.ps1`.
 - Changing a CLI template means updating the expected-file lists in
   `crates/zapline-cli/src/new.rs` tests.
 - Keep the public surface small: one obvious way per task. If you add an

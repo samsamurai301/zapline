@@ -1,6 +1,5 @@
 # zapline
 
-[![CI](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml/badge.svg)](https://github.com/samsamurai301/zapline/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/zapline.svg)](https://crates.io/crates/zapline)
 [![docs.rs](https://img.shields.io/docsrs/zapline)](https://docs.rs/zapline)
 [![guide](https://img.shields.io/badge/guide-mdBook-blue)](https://samsamurai301.github.io/zapline/)

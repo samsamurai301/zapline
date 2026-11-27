@@ -319,17 +319,30 @@ fn dry_run_shows_every_command_and_file() {
         Path::new("/tmp/stage"),
     );
     let stamp = embed_stamp(dir.path());
+    // Staged files are local paths, joined the platform's way
+    // (`/tmp/stage\ship.sh` on Windows, quoted for the shell there).
+    let staged = |name: &str| Path::new("/tmp/stage").join(name).display().to_string();
+    let scp = format!(
+        "scp -q -C -o ControlMaster=auto -o 'ControlPath=~/.ssh/zapline-%C' -o ControlPersist=60 -i /keys/deploy -P 2222 /t/release/Todo_App {} {} {} {} deploy@web1:/tmp/zapline-ship.todo_app.",
+        sh_quote(&staged("ship.sh")),
+        sh_quote(&staged("unit")),
+        sh_quote(&staged("env")),
+        sh_quote(&staged("env.set")),
+    );
+    let ship_sh = format!("# ---- {} ----\n#!/bin/sh\n", staged("ship.sh"));
+    let unit = format!("# ---- {} ----\n", staged("unit"));
+    let env_set = format!("# ---- {} ----\nSMTP_HOST=mail\n", staged("env.set"));
     for want in [
         "# zapline ship --dry-run: todo_app release 20260101000000-abc1234 on deploy@web1",
         "ssh -o ControlMaster=auto -o 'ControlPath=~/.ssh/zapline-%C' -o ControlPersist=60 -i /keys/deploy -p 2222 deploy@web1 'uname -sm'",
         &format!("ZAPLINE_EMBED_STAMP={stamp} cargo build --release --bin Todo_App"),
         "'mkdir -m 700 /tmp/zapline-ship.todo_app.20260101000000-abc1234.",
-        "scp -q -C -o ControlMaster=auto -o 'ControlPath=~/.ssh/zapline-%C' -o ControlPersist=60 -i /keys/deploy -P 2222 /t/release/Todo_App /tmp/stage/ship.sh /tmp/stage/unit /tmp/stage/env /tmp/stage/env.set deploy@web1:/tmp/zapline-ship.todo_app.",
+        &scp,
         "deploy@web1 'sh /tmp/zapline-ship.todo_app.",
-        "# ---- /tmp/stage/ship.sh ----\n#!/bin/sh\n",
-        "# ---- /tmp/stage/unit ----\n",
+        &ship_sh,
+        &unit,
         "Type=notify",
-        "# ---- /tmp/stage/env.set ----\nSMTP_HOST=mail\n",
+        &env_set,
         "\nSECRETS=SESSION_KEY\n",
     ] {
         assert!(text.contains(want), "missing {want:?} in:\n{text}");

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full local verification: what CI runs, in one command.
+# Full local verification, in one command: the bar for merging.
 #
 #   ./scripts/check.sh            # everything
 #   ./scripts/check.sh quick      # fmt + clippy + tests (all features)
@@ -13,13 +13,23 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 step "rustfmt"
 cargo fmt --all --check
 
+# zapline-wasm needs Rust 1.97 (wasmtime); the rest of zapline needs 1.88.
+rust_minor=$(rustc --version | cut -d. -f2)
+wasm=(--exclude zapline-wasm)
+(( rust_minor >= 97 )) && wasm=()
+
 step "clippy (all features)"
-cargo clippy --workspace --exclude bench-servers --all-features --all-targets -- -D warnings
+cargo clippy --workspace --exclude bench-servers ${wasm[@]+"${wasm[@]}"} --all-features --all-targets -- -D warnings
 
 step "tests (all features)"
 cargo test -p zapline --all-features
 cargo test -p zapline-codegen
 cargo test -p zapline-cli
+if (( rust_minor >= 97 )); then
+  cargo test -p zapline-wasm
+else
+  echo "  (skipping zapline-wasm: it needs Rust 1.97, this is 1.$rust_minor)"
+fi
 
 [[ "${1:-}" == "quick" ]] && exit 0
 
@@ -27,7 +37,7 @@ step "feature matrix"
 # Each feature alone, tests included: test files guard themselves with
 # `#![cfg(feature = ...)]` for the features they use.
 cargo clippy -q -p zapline --no-default-features --all-targets -- -D warnings
-for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password mail storage s3 cache oauth i18n redis redis-tls otlp tz chrono uuid; do
+for f in macros json query form openapi validate config tracing http2 tls http3 ws fs multipart compression jwt jwks cookies views postgres sqlite password two-factor mail storage s3 cache oauth captcha http-client ai webhooks i18n redis redis-tls otlp tz chrono uuid; do
   echo "  - $f"
   cargo clippy -q -p zapline --no-default-features --features "$f" --all-targets -- -D warnings
 done
@@ -55,6 +65,9 @@ fi
 
 step "docs"
 RUSTDOCFLAGS="-D warnings" cargo doc -p zapline --all-features --no-deps
+
+step "the guide's code compiles"
+cargo test -p zapline-guide-check --doc
 
 if [[ "${1:-}" == "ecosystem" ]]; then
   step "ecosystem examples (sqlx, SeaORM, Diesel, Leptos)"

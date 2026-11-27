@@ -29,8 +29,10 @@
 //! ```
 
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::task::{ready, Context, Poll};
+use std::time::Duration;
 
 use bytes::Bytes;
 use futures_core::Stream;
@@ -77,15 +79,45 @@ pub struct BodyStream {
     limit: usize,
     read: usize,
     started: bool,
+    /// [`ServerConfig::body_idle_timeout`](crate::server::ServerConfig::body_idle_timeout).
+    idle: Option<Duration>,
+    /// Made the first time the stream waits on the network, then re-armed
+    /// for each wait; bodies already in memory never make one.
+    timer: Option<Pin<Box<tokio::time::Sleep>>>,
+    /// Whether `timer` counts down the current wait.
+    waiting: bool,
 }
 
 impl BodyStream {
-    pub(crate) fn new(body: Option<ReqBody>, limit: usize) -> Self {
+    pub(crate) fn new(body: Option<ReqBody>, limit: usize, idle: Option<Duration>) -> Self {
         BodyStream {
             body,
             limit,
             read: 0,
             started: false,
+            idle,
+            timer: None,
+            waiting: false,
+        }
+    }
+
+    /// No data yet: arm (or keep) the idle timer, and fail with `408` once
+    /// it runs out.
+    fn wait(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<Bytes, Error>>> {
+        let Some(idle) = self.idle else {
+            return Poll::Pending;
+        };
+        let deadline = tokio::time::Instant::now() + idle;
+        let timer = self
+            .timer
+            .get_or_insert_with(|| Box::pin(tokio::time::sleep_until(deadline)));
+        if !self.waiting {
+            timer.as_mut().reset(deadline);
+            self.waiting = true;
+        }
+        match timer.as_mut().poll(cx) {
+            Poll::Ready(()) => self.fail(Error::body_timeout()),
+            Poll::Pending => Poll::Pending,
         }
     }
 
@@ -161,36 +193,50 @@ impl Stream for BodyStream {
                     }
                     b
                 }
-                Some(ReqBody::Incoming(inc)) => match ready!(Pin::new(inc).poll_frame(cx)) {
-                    None => {
-                        this.body = None;
-                        return Poll::Ready(None);
+                Some(ReqBody::Incoming(inc)) => {
+                    let Poll::Ready(frame) = Pin::new(inc).poll_frame(cx) else {
+                        return this.wait(cx);
+                    };
+                    this.waiting = false;
+                    match frame {
+                        None => {
+                            this.body = None;
+                            return Poll::Ready(None);
+                        }
+                        Some(Err(e)) => {
+                            return this.fail(
+                                Error::bad_request("failed to read request body").with_source(e),
+                            )
+                        }
+                        Some(Ok(frame)) => match frame.into_data() {
+                            Ok(data) if !data.is_empty() => data,
+                            // Trailers and empty frames carry no body bytes.
+                            _ => continue,
+                        },
                     }
-                    Some(Err(e)) => {
-                        return this
-                            .fail(Error::bad_request("failed to read request body").with_source(e))
-                    }
-                    Some(Ok(frame)) => match frame.into_data() {
-                        Ok(data) if !data.is_empty() => data,
-                        // Trailers and empty frames carry no body bytes.
-                        _ => continue,
-                    },
-                },
+                }
                 #[cfg(feature = "http3")]
-                Some(ReqBody::Stream(body)) => match ready!(body.as_mut().poll_frame(cx)) {
-                    None => {
-                        this.body = None;
-                        return Poll::Ready(None);
+                Some(ReqBody::Stream(body)) => {
+                    let Poll::Ready(frame) = body.as_mut().poll_frame(cx) else {
+                        return this.wait(cx);
+                    };
+                    this.waiting = false;
+                    match frame {
+                        None => {
+                            this.body = None;
+                            return Poll::Ready(None);
+                        }
+                        Some(Err(e)) => {
+                            return this.fail(
+                                Error::bad_request("failed to read request body").with_source(e),
+                            )
+                        }
+                        Some(Ok(frame)) => match frame.into_data() {
+                            Ok(data) if !data.is_empty() => data,
+                            _ => continue,
+                        },
                     }
-                    Some(Err(e)) => {
-                        return this
-                            .fail(Error::bad_request("failed to read request body").with_source(e))
-                    }
-                    Some(Ok(frame)) => match frame.into_data() {
-                        Ok(data) if !data.is_empty() => data,
-                        _ => continue,
-                    },
-                },
+                }
             };
             this.read = this.read.saturating_add(chunk.len());
             if this.read > this.limit {
@@ -210,8 +256,8 @@ impl Stream for BodyStream {
 
 impl FromRequest for BodyStream {
     async fn from_request(mut req: Request) -> Result<Self, Error> {
-        let limit = req.body_limit();
-        Ok(BodyStream::new(req.take_body(), limit))
+        let (limit, idle) = (req.body_limit(), req.body_idle_timeout());
+        Ok(BodyStream::new(req.take_body(), limit, idle))
     }
 }
 

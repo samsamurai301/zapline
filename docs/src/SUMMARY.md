@@ -31,6 +31,9 @@
 - [Background tasks & scheduled jobs](tasks.md)
 - [Cron schedules](cron.md)
 - [Caching](caching.md)
+- [Calling other services](outbound.md)
+- [AI & language models](ai.md)
+- [Webhooks](webhooks.md)
 
 # Full-stack
 
@@ -41,6 +44,7 @@
 - [Email](mail.md)
 - [Admin panel](admin.md)
 - [Translations (i18n)](i18n.md)
+- [Plugins (WebAssembly)](plugins.md)
 
 # Security
 
@@ -68,6 +72,7 @@
 # Reference
 
 - [Platform support (Linux, macOS, Windows)](platforms.md)
+- [Stability & versioning](stability.md)
 - [Feature flags](features.md)
 - [Architecture](architecture.md)
 - [Upstream issues](upstream-issues.md)

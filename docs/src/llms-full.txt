@@ -500,7 +500,7 @@ Run it with `cargo run -p zapline-examples --example cheatsheet` and open <http:
 | HTML + htmx | `App::views("templates")` + `views: Views, hx: HxRequest`, then `views.page_or_block(&hx, "page.html", "block", context!{..})` ([Views](views.md)) |
 | Admin panel | `App::admin(\|admin\| admin)`: every table at `/admin` (debug + localhost); production: `.protect(middleware)`; `.exclude([..])`, `.hide(["users.email"])`, `.read_only()` ([Admin panel](admin.md)) |
 | Translations | `App::i18n(I18n::load("locales")?)` (`locales/en.toml`: `hello = "Hi, {name}!"`) + `t: Locale`, then `t.t_with("hello", &[("name", &n)])`, `t.plural("items", n, &[])`; templates: `context! { t }`, `{{ t("hello", name=n) }}`; language from `?lang=`, cookie, `Accept-Language` ([Translations](i18n.md)) |
-| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
+| Several instances | `let redis = Redis::from_env()?` (`REDIS_URL`); `Cache::redis(redis.clone())`, `Live::new().redis(..)`, `RateLimit::per_ip(..).redis(..)`, `Idempotency::new().redis(..)`, `SessionLayer::new(RedisStore::new(..))`; `redis.cmd(["INCR", "k"]).await?.int()`; TLS: feature `redis-tls`, `rediss://...?ca_file=ca.pem&sni=name` ([Several instances](scaling.md), [over TLS](scaling.md#redis-over-tls)) |
 | OpenTelemetry | feature `otlp`, then `OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4318` (or `Telemetry::new().otlp(url)`); requests become spans, `traceparent` is continued ([Observability](observability.md#traces-to-opentelemetry-otlp)) |
 | Caching | `App::cache(Cache::memory())` + `cache: Cache`, then `cache.get_or_set("key", ttl, \|\| async { Ok(v) })`; pages: `Routes::wrap(ResponseCache::new(ttl))`; `App::wrap(ETag)` ([Caching](caching.md)) |
 | Files | `App::storage(Storage::from_env()?)` + `storage: Storage`: `put`, `put_with(k, b, PutOptions)`, `get`, `get_stream`/`put_stream`, `list(prefix)`, `metadata`, `copy`, `delete`, `url(key, ttl)`, `upload_url` (browser to S3) ([File storage](storage.md)) |
@@ -974,7 +974,9 @@ async fn add_member(
     Query(opts): Query<AddOptions>,       // query string
     user: CurrentUser<Claims>,            // auth (see the Security chapter)
     Json(body): Json<NewMember>,          // body: must be last
-) -> Result<StatusCode> { /* ... */ }
+) -> Result<StatusCode> {
+    todo!()
+}
 ```
 
 If an extractor fails, its error response is returned and the handler isn't called. For example, a bad path parameter gives a 400 and a wrong content type gives a 415. Rejections carry a stable `code`, and `details` that locate the problem:
@@ -1565,10 +1567,10 @@ Raise the limit: App::new().body_limit(16 * 1024 * 1024); or stream the body wit
 
 ### ZL0068
 
-**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body. The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
+**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body, or a streaming body (`BodyStream`, `Multipart`) sent no data for `ServerConfig::body_idle_timeout` (30s by default). The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
 
 ```text
-Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); or stream large uploads with BodyStream or Multipart
+Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); for streaming uploads, body_idle_timeout instead
 ```
 
 ### ZL0070
@@ -1705,7 +1707,7 @@ Middleware can short-circuit by returning a response without calling `next.run`.
 
 ## Where middleware runs
 
-```
+```text
 request ─▶ global (App::wrap) ─▶ routing ─▶ route (App::wrap_route) ─▶ group (Routes::wrap) ─▶ handler
 ```
 
@@ -2072,7 +2074,8 @@ Click through your app once and keep what happened as a regression test. In a de
 1. **Record.** Start the app with `zapline dev --record` (it sets `ZAPLINE_RECORD=1`), or press **Start recording** at `/_dev`. Then use the app: a browser, curl, your frontend.
 2. **Save.** Run `zapline snap signup`, or name the snapshot in the console and press **Save as snapshot test**. You get `tests/snapshots/signup.json` and, the first time, `tests/snapshots.rs`:
 
-   ```rust
+   ```rust,ignore
+   // `my_app` is your crate: this is the file `zapline snap` writes into it.
    #[tokio::test]
    async fn recorded_traffic() {
        my_app::app()
@@ -4010,6 +4013,303 @@ let app = App::new().wrap(zapline::cache::ETag);
 
 ---
 
+<!-- outbound.md -->
+
+# Calling other services
+
+Use `HttpClient` from `zapline::outbound` (feature `http-client`) when a handler calls another HTTP API. It comes with production defaults, so a slow or broken upstream can't hang your handler, and a URL a user typed can't reach your internal network.
+
+```rust
+use serde::{Deserialize, Serialize};
+use zapline::outbound::HttpClient;
+use zapline::prelude::*;
+
+#[derive(Deserialize, Serialize)]
+struct Rate {
+    usd: f64,
+}
+
+async fn rate(http: HttpClient) -> Result<Json<Rate>> {
+    let rate: Rate = http
+        .get("https://api.example.com/rate")
+        .bearer(&std::env::var("RATES_TOKEN").unwrap_or_default())
+        .send()
+        .await?
+        .error_for_status()   // non-2xx → 502 with the upstream's status
+        .await?
+        .json()
+        .await?;
+    Ok(Json(rate))
+}
+
+fn app() -> App {
+    App::new()
+        .state(HttpClient::new().header("x-client", "shop"))   // optional: configure once
+        .get("/rate", rate)
+}
+```
+
+A handler that takes `HttpClient` gets the one registered with `.state(..)`, or a shared default. Requests are built with `.get` / `.post` / `.put` / `.patch` / `.delete`, then `.header(..)`, `.bearer(..)`, `.json(&value)` or `.body(..)`, and `.send().await`. The response has `.status()`, `.headers()`, `.json::<T>()`, `.text()`, `.bytes()`, and `.chunk()` for streams.
+
+## Defaults
+
+| Setting | Default | Change with |
+|---|---|---|
+| Timeout per attempt, until headers and again for the body (or between chunks when streaming); each retry gets it again | 30 s | `.timeout(d)`, per request too |
+| Connecting | 10 s | `.connect_timeout(d)` |
+| Retries for `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` after a failed connection, a timeout, `429`, `502`, `503` or `504` | 2, with backoff (100 ms, 200 ms, ... ± 25%), or what `Retry-After` asks for (up to 10 s) | `.retries(n)` |
+| Largest buffered body (`json`, `text`, `bytes`) | 16 MiB | `.max_response_size(n)` |
+| Private and reserved networks | refused | `.allow_private_networks(true)` |
+
+`POST` and `PATCH` are never retried: they may have taken effect. To retry them safely, send an `Idempotency-Key` to an API that supports it (zapline's own [`Idempotency`](hardening.md#idempotency) middleware does).
+
+## Errors
+
+Every failure is an `Error` that a handler can return with `?`:
+
+| Failure | Answer |
+|---|---|
+| The address is refused (see below) | `400`, code `upstream_blocked` |
+| Not an absolute `http://` or `https://` URL | `400`, code `upstream_invalid_url` |
+| No connection | `502`, code `upstream_unreachable` |
+| `error_for_status()` on a non-2xx answer | `502`, code `upstream_status`. The message names the host and status only; the URL (without its query) and the start of the body are in the error's source, for your logs |
+| Body larger than the limit | `502`, code `upstream_too_large` |
+| `json()` on a body that doesn't match | `502`, code `upstream_invalid_json` |
+| Timeout | `504`, code `upstream_timeout` |
+
+## Server-side request forgery
+
+When your app fetches a URL that came from a user (a webhook endpoint, an avatar URL, a link preview), an attacker can point it at `http://169.254.169.254/` (the cloud metadata endpoint, which hands out credentials), `http://localhost:6379/`, or an internal admin service. `HttpClient` refuses these by default:
+
+- **Refused addresses:** loopback, private (10/8, 172.16/12, 192.168/16, `fc00::/7`), link-local (169.254/16, `fe80::/10`), shared (100.64/10), documentation, benchmarking, multicast, broadcast and reserved ranges, IPv4 inside IPv6 (`::ffff:10.0.0.1`), and NAT64/6to4 prefixes, which can embed a private IPv4.
+- **Checked after DNS:** hostnames are checked after they're resolved, so `localhost`, or a domain that points (or rebinds) to `10.0.0.5`, is refused too.
+- **Redirects aren't followed,** so a public URL can't redirect to an internal one. A `3xx` comes back as the response.
+- **The opt-out:** `.allow_private_networks(true)` turns this off. Use it only for a client that talks to your own internal services, never for URLs users supply. If you need both, keep two clients.
+
+
+---
+
+<!-- ai.md -->
+
+# AI & language models
+
+The `ai` feature adds `zapline::ai::Llm`. It calls Claude through Anthropic's Messages API, or any OpenAI-compatible chat API (a local Ollama or vLLM, other providers). It returns whole replies, or streams the text to the browser as it's written.
+
+```rust
+use zapline::ai::Llm;
+use zapline::prelude::*;
+
+async fn summarize(llm: Llm, body: String) -> Result<String> {
+    let reply = llm
+        .chat()
+        .system("Summarize the text in one sentence.")
+        .user(body)
+        .send()
+        .await?;
+    Ok(reply.text)
+}
+
+async fn ask(llm: Llm, question: String) -> Result<impl IntoResponse> {
+    // Text appears in the browser as the model writes it.
+    Ok(llm.chat().user(question).stream().await?.into_sse())
+}
+
+fn app() -> App {
+    App::new()
+        .state(Llm::from_env().expect("set ANTHROPIC_API_KEY"))
+        .post("/summarize", summarize)
+        .post("/ask", ask)
+}
+```
+
+## Choosing a model
+
+| Constructor | Calls |
+|---|---|
+| `Llm::anthropic(key)` | Claude, model `claude-opus-5-5` by default; change it with `.model("claude-sonnet-5-5")` or `.model("claude-haiku-5-5")` |
+| `Llm::from_env()` | Claude with `ANTHROPIC_API_KEY`, and `LLM_MODEL` when set |
+| `Llm::openai_compatible(base_url, key, model)` | `POST {base_url}/chat/completions`, e.g. `http://localhost:11434/v1` for Ollama (the key may be empty) |
+
+A model server on your own network is a private address, which the HTTP client refuses by default ([Calling other services](outbound.md#server-side-request-forgery)). Allow it explicitly for that client:
+
+```rust
+let local = Llm::openai_compatible("http://10.0.0.5:8000/v1", "", "qwen")
+    .http_client(HttpClient::new().allow_private_networks(true));
+```
+
+## Requests and replies
+
+`llm.chat()` starts a request: `.system(..)` (instructions), `.user(..)` and `.assistant(..)` (the conversation so far), `.max_tokens(n)` (default 16 000, or 64 000 when streaming) and, for Claude, `.effort(Effort::Low | Medium | High | XHigh | Max)`. Lower effort is faster and cheaper; Claude Opus 5.5 defaults to `Medium`.
+
+`.send().await?` returns a `Reply`:
+
+| Field | What |
+|---|---|
+| `text` | The answer |
+| `stop` | Why it stopped: `EndTurn`, `MaxTokens` (cut off), `Refusal` (declined: don't show `text` as an answer), `StopSequence`, `ToolUse` |
+| `usage` | `input_tokens` and `output_tokens`, what the provider bills |
+| `model` | The model that answered |
+
+`.stream().await?` returns a `TokenStream`: call `.next().await?` for each piece of text until `None`, then read `.stop_reason()` and `.usage()`. Or hand it to the browser with `.into_sse()`, which sends one `token` event per piece, then `done` with `{"stop", "input_tokens", "output_tokens"}`, or `error`:
+
+```js
+const events = new EventSource("/ask?q=...");
+events.addEventListener("token", (e) => (answer.textContent += e.data));
+events.addEventListener("done", () => events.close());
+```
+
+## Reliability
+
+- **Retries:** `429`, `500`, `502`, `503`, `504` and `529` (overloaded) are retried before any output arrives, twice by default (`.retries(n)`). The wait is what `retry-after` says, or 1 s, then 2 s. A request that keeps failing returns `429` (code `llm_rate_limited`) or `502` (`llm_error`, with the provider's message).
+- **Timeouts:** each call waits up to 10 minutes for the first byte and between streamed pieces. Long generations are normal; stream them so users see progress.
+- **Refusals:** Claude's safety classifiers can decline a request. For the models that support it (Claude Opus 5.5, Opus 5, Sonnet 5.5, Fable 5.1 and 5.2), `Llm` opts into Anthropic's server-side fallback by default: a declined request is retried on a fallback model in the same call, and `reply.model` says which model answered. Turn it off with `.refusal_fallbacks(false)` to get `StopReason::Refusal` back instead.
+- **Secrets:** the API key never appears in `Debug` output or logs.
+
+## Tools
+
+Give the model functions it can call: look up an order, check stock, fetch the weather. A tool is a Rust function. Its argument type, a `#[model]` struct, becomes the JSON schema the model sees, and doc comments on its fields become their descriptions:
+
+```rust
+use zapline::ai::{Llm, ToolContext, Tools};
+use zapline::prelude::*;
+
+#[model]
+struct OrderId {
+    /// The order number, like "A-1042".
+    id: String,
+}
+
+fn tools() -> Tools {
+    Tools::new().tool("order_status", "Where an order is.", |order: OrderId, cx: ToolContext| async move {
+        // `cx.state::<T>()` reaches the app's state (a database pool, say),
+        // as handlers do.
+        let _ = cx;
+        Ok(format!("Order {} shipped yesterday.", order.id))
+    })
+}
+
+async fn support(llm: Llm, cx: ToolContext, question: String) -> Result<String> {
+    let reply = llm.chat().user(question).run(&tools(), &cx).await?;
+    Ok(reply.text)
+}
+```
+
+- **The loop:** `chat.run(&tools, &cx)` sends the request with the tools, runs every tool the model calls (calls in one turn run concurrently), sends the results back, and repeats until the model answers. `reply.tool_calls` records each call. `reply.usage` adds up every turn. It works with Claude and with OpenAI-compatible APIs.
+- **Limits:** at most 10 turns and 50 tool calls. A model that keeps going gets `502` (code `llm_tool_limit`).
+- **Failures go back to the model** as a failed tool call, so it can recover or tell the user. That covers bad arguments, unknown tools and errors your tool returns. A server error (`5xx`) is reported only as "the tool failed", so internal details stay on your server.
+- **Tool results are data, not instructions.** Text a tool returns (from users, from the web) reaches the model. Give tools no more power than any user of the app should have, and check permissions inside the tool, not in the prompt.
+
+## MCP: tools for other AI apps
+
+The same `Tools` can be served over the [Model Context Protocol](https://modelcontextprotocol.io), so Claude Desktop, Claude Code and other MCP clients can call them:
+
+```rust
+use zapline::ai::{ToolContext, Tools};
+use zapline::prelude::*;
+
+#[model]
+struct Add {
+    a: i64,
+    b: i64,
+}
+
+fn app() -> App {
+    let tools = Tools::new().tool("add", "Add two numbers.", |x: Add, _cx: ToolContext| async move {
+        Ok(x.a + x.b)
+    });
+    App::new().mcp("/mcp", tools)
+}
+```
+
+- **Transport:** MCP's Streamable HTTP, answering with JSON. `POST /mcp` handles `initialize`, `ping`, `tools/list` and `tools/call`. Notifications get `202`, and `GET` gets `405`, because the server sends no event stream.
+- **Cross-origin requests are refused** (`403`), as the MCP spec requires, so a web page can't reach your MCP server through the visitor's browser (DNS rebinding).
+- **To require a login,** mount it in a group with your authentication: `.nest("/", Routes::new().mcp("/mcp", tools).wrap(auth))`. Tools get the app's state through `ToolContext`, as in `run`.
+- **Connect a client:**
+
+  ```sh
+  claude mcp add --transport http my-app http://localhost:8080/mcp
+  ```
+
+
+---
+
+<!-- webhooks.md -->
+
+# Webhooks
+
+The `webhooks` feature covers both directions. Your app can receive webhooks from other services and check that each one is genuine, and it can send its own, signed, to your customers.
+
+## Receiving
+
+A webhook endpoint is a public URL, so anyone can post to it. A provider proves a request is theirs by signing it with a secret you both know. `Webhook` holds that secret, and the `Signed<T>` extractor checks the signature before your handler runs:
+
+```rust
+use serde::Deserialize;
+use zapline::prelude::*;
+use zapline::webhooks::{Signed, Webhook};
+
+#[derive(Deserialize)]
+struct Event {
+    r#type: String,
+}
+
+async fn billing(Signed(event): Signed<Event>) -> StatusCode {
+    println!("Stripe sent {}", event.r#type);
+    StatusCode::NO_CONTENT
+}
+
+fn app() -> App {
+    App::new()
+        .post("/webhooks/stripe", billing)
+        .meta(Webhook::stripe(std::env::var("STRIPE_WEBHOOK_SECRET").expect("STRIPE_WEBHOOK_SECRET")))
+}
+```
+
+| Provider | Constructor | Signature it checks |
+|---|---|---|
+| Anything following [Standard Webhooks](https://www.standardwebhooks.com) (Svix, Clerk, Resend, ...) | `Webhook::standard("whsec_...")?` | `webhook-id`, `webhook-timestamp`, `webhook-signature: v1,<base64>` |
+| GitHub | `Webhook::github(secret)` | `X-Hub-Signature-256: sha256=<hex>` |
+| Stripe | `Webhook::stripe("whsec_...")` | `Stripe-Signature: t=<time>,v1=<hex>` |
+
+- **Which secret applies:** `.meta(Webhook::...)` sets the secret for the route just added. `.state(Webhook::...)` sets one for the whole app; a route's own `meta` wins.
+- **Rejections:**
+  - missing or malformed signature headers: `400`, code `webhook_signature_missing`;
+  - a signature that doesn't match: `401`, `webhook_signature_invalid`;
+  - a body that isn't the expected JSON: `422`.
+- **Replays:** signed timestamps more than 5 minutes from now are refused (`401`, `webhook_timestamp_stale`), so a captured request can't be sent again later. Change the window with `.tolerance(..)`. GitHub signs no timestamp; skip repeats by their `X-GitHub-Delivery` id.
+- **Rotating secrets:** `.also(old_secret)` accepts both the old and the new secret during the switch.
+- **Empty or invalid secrets are refused at startup:** `Webhook::github("")`, `Webhook::stripe("")` and an invalid `.also(..)` panic, since an empty key would let anyone sign. Read the secret with `expect`, not `unwrap_or_default`.
+- **Malformed signatures:** a header with no well-formed signature, or more than 8, is `400 webhook_signature_missing`, so junk entries can't make a request expensive to check.
+- **Verifying it yourself:** `webhook.verify(headers, body)` gives the same check on raw bytes.
+- **Exempt it from cross-site checks.** A provider's server sends no browser `Origin`, so exempt the signed endpoint, and only it: `SameOrigin::new().exempt(["/webhooks/stripe"])` and `Csrf::new().exempt("/webhooks/stripe")`. A whole `/webhooks/` prefix would also exempt any unsigned route added under it later.
+
+## Sending
+
+`WebhookSender` signs payloads the Standard Webhooks way, so receivers can verify them with any Standard Webhooks library, including `Webhook::standard` above:
+
+```rust
+use zapline::prelude::*;
+use zapline::webhooks::WebhookSender;
+
+async fn notify(url: &str, secret: &str) -> Result<()> {
+    let sender = WebhookSender::new(secret)?;
+    let delivery = sender
+        .send(url, &serde_json::json!({"type": "invoice.paid", "id": "inv_42"}))
+        .await?;
+    println!("{} delivered after {} attempt(s)", delivery.id, delivery.attempts);
+    Ok(())
+}
+```
+
+- **Secrets:** give each subscriber their own secret from `WebhookSender::generate_secret()?` (`whsec_` and 32 random bytes; an error, never a weaker secret, when the OS has no secure randomness). Store it, and show it to them once.
+- **Retries:** a connection failure, timeout, `408`, `429` or `5xx` is retried 3 times, waiting 1 s, 2 s, then 4 s (`.retries(n)`, `.backoff(d)`). Every attempt carries the same `webhook-id`, so receivers can drop duplicates. Each attempt is signed with the current time, so a late retry isn't refused as stale.
+- **No retry:** another `4xx` (the receiver refused it) isn't retried. When every attempt fails, `send` returns `502` (code `webhook_delivery_failed`) with the last answer.
+- **Durable delivery:** `send` retries for seconds, within one request or job. For delivery that survives restarts, call it from a [durable job](jobs.md), which retries with backoff of its own.
+- **Unsafe URLs are refused.** Subscribers type their own URLs, so the sender uses the [outbound client](outbound.md) with its guard on: private, loopback and cloud-metadata addresses are refused (`400`, code `upstream_blocked`) and never retried.
+
+
+---
+
 <!-- database.md -->
 
 # Databases
@@ -4056,7 +4356,7 @@ fn main() -> std::io::Result<()> {
 | `Database::sqlite(url)` / `Database::postgres(url)` | Pick the backend explicitly (when both features are on) |
 | `Database::sqlite_memory()` | A private in-memory database per app: ideal for tests |
 
-Pool settings: `.max_connections(n)` (default 4 × CPUs, at least 10), `.min_connections(n)`, `.acquire_timeout(d)` (default 5 s; a request that can't get a connection in time gets a 503).
+Pool settings: `.max_connections(n)` (default 4 × CPUs, at least 10), `.min_connections(n)`, `.acquire_timeout(d)` (default 5 s; a request that can't get a connection in time gets a 503), and `.test_before_acquire(bool)`. The last one defaults to `true`: each checkout pings the database, so a dropped connection is replaced instead of failing a request. That ping is one round trip per request, about a quarter of single-query throughput against Postgres. Turn it off when the database is close and reliable.
 
 With both features enabled, `Db` and `Database` default to Postgres; use `SqliteDb` (or `Db<sqlx::Sqlite>`) and `Database::sqlite(url)` for SQLite.
 
@@ -5250,7 +5550,7 @@ With the `views` feature, pass the `Locale` into the context and call it:
 ```rust
 #[get("/")]
 async fn index(views: Views, t: Locale) -> Result<Html<String>> {
-    views.render("index.html", context! { t, unread: 3 })
+    views.render("index.html", context! { t, unread => 3 })
 }
 ```
 
@@ -5263,6 +5563,100 @@ async fn index(views: Views, t: Locale) -> Result<Html<String>> {
 Translated text is escaped like any other value.
 
 If you cache pages with [`ResponseCache`](caching.md), the language is part of the page: cache only pages that don't depend on it, or vary the cache by language.
+
+
+---
+
+<!-- plugins.md -->
+
+# Plugins (WebAssembly)
+
+Some apps run code they did not write: a shop's discount rules, a
+customer's webhook transform, a tenant's validation. The `zapline-wasm`
+crate runs that code as WebAssembly components, sandboxed and metered, so
+a plugin can compute but cannot reach anything you do not lend it.
+
+```toml
+[dependencies]
+zapline-wasm = "0.1"
+```
+
+It is a separate crate because wasmtime needs Rust 1.97, newer than
+zapline's minimum (1.88).
+
+## What a plugin gets
+
+- **A fresh instance per call.** Nothing carries over between calls.
+- **Fuel:** about one unit per instruction; 50 million a call by default.
+  An endless loop ends with an error, not a stuck thread.
+- **Memory and tables:** each linear memory stops at 32 MiB and each table
+  at 10,000 elements by default; `memory.grow` or `table.grow` past the cap
+  returns -1 (not an error: most plugins then trap, which is one).
+- **Size:** `component` refuses anything over 64 MiB before compiling it.
+- **Only what you link.** No WASI: no network, files, clock or randomness.
+  The same input always gives the same answer.
+
+A trap, running out of fuel or memory, or a component that asks for an
+import you did not link, is an `Err`, never a panic. Keep the reason in a
+`PluginLog` so whoever installed the plugin can see why it failed.
+
+## Your interface
+
+Describe what the plugin exports and what the host lends in WIT, and let
+`bindgen!` write the types. Point it at the wasmtime `zapline-wasm`
+re-exports so the versions always match:
+
+```rust,ignore
+zapline_wasm::wasmtime::component::bindgen!({
+    path: "wit/discounts.wit",
+    world: "discounts",
+    wasmtime_crate: zapline_wasm::wasmtime,
+});
+```
+
+The store's data is a `Sandbox<T>`: your state is `T`, and the host
+traits `bindgen!` generates are implemented on it.
+
+```rust,ignore
+use zapline_wasm::wasmtime::component::HasSelf;
+use zapline_wasm::{Limits, PluginLog, WasmHost};
+
+struct State {
+    settings: std::collections::HashMap<String, String>,
+    log: PluginLog,
+}
+
+impl acme::plugin::host::Host for State {
+    fn setting(&mut self, key: String) -> Option<String> {
+        self.settings.get(&key).cloned()
+    }
+}
+
+let host = WasmHost::new(Limits::default())?;
+let component = host.component(&std::fs::read("plugin.wasm")?)?;
+let mut linker = host.linker::<State>();
+acme::plugin::host::add_to_linker::<_, HasSelf<State>>(&mut linker, |s| &mut s.data)?;
+let pre = DiscountsPre::new(linker.instantiate_pre(&component)?)?;
+
+// Per call: a fresh store with the limits and a full tank.
+let log = PluginLog::new(200);
+let answer = host.call(State { settings, log: log.clone() }, |store| {
+    pre.instantiate(&mut *store)?.call_discount(&mut *store, &cart)
+});
+if let Err(e) = &answer {
+    log.push(format!("error: {e}"));
+}
+```
+
+Compile the component and build the `*Pre` once, at startup; a call then
+only instantiates. Change the limits with `Limits::default().fuel(..)` and
+`.memory_bytes(..)`, `.table_elements(..)` and `.component_bytes(..)`.
+
+## Building a plugin
+
+Any language with a component toolchain works against your WIT file: Rust
+with `wit-bindgen` or `cargo component`, JavaScript with `jco`, Python with
+`componentize-py`, Go with TinyGo.
 
 
 ---
@@ -5317,14 +5711,22 @@ zapline g auth
 
 | File | What it holds |
 |---|---|
-| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
-| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
-| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
-| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
+| `migrations/<ts>_create_users.sql` | `users` table (unique lowercased email, Argon2id password hash, two-factor columns, a sign-in counter), `password_resets` (hashed single-use tokens) and `oauth_accounts` (linked GitHub/Google identities) |
+| `src/routes/auth.rs` | `POST /api/auth/signup`, `/login`, `/logout`, `/forgot`, `/reset`, `GET /api/auth/me`; two-factor login (`POST /api/auth/2fa`, `/2fa/setup`, `/2fa/enable`, `/2fa/disable`); sign-in links (`POST /api/auth/link`, `GET /api/auth/link/{token}`); the `CurrentUser` extractor; sessions stored in the database; the [admin panel](admin.md) opened to the accounts in `ADMIN_EMAILS`, once each owner has proved the address |
+| `templates/auth/*.html` | htmx pages at `/signup`, `/login`, `/login/2fa`, `/login/link`, `/account/security`, `/forgot` and `/reset` (when `templates/base.html` exists): rejected posts come back as a 422 with a message next to each field and the email kept (passwords are never echoed); success redirects with a flash message ([Forms](views.md#forms-errors-next-to-each-field)) |
+| `tests/auth.rs` | Sign-up, log-in, log-out, wrong passwords, duplicates, weak input, password reset, two-factor login (codes, recovery codes, turning it off, resets still asking for it), sign-in links, the HTML forms, GitHub login against a stand-in provider, who gets into `/admin` |
 
-It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
+It also enables zapline's `cookies`, `mail`, `oauth`, `password` and `two-factor` features, adds `SESSION_SECRET`, `SMTP_URL`, `MAIL_FROM`, `APP_URL`, `ADMIN_EMAILS` and the GitHub/Google client variables to `.env.example`, and compiles Argon2 optimized in debug builds, so tests stay fast.
 
 **Password reset.** `POST /api/auth/forgot` (or the `/forgot` page) emails a link to `APP_URL/reset?token=...` and answers the same whether or not the account exists; the email goes out after the response, so timing doesn't tell either. The token is 256 random bits, stored only as a SHA-256 digest, valid for an hour and usable once; using it sets the new password, logs the user in and voids the account's other reset links. While developing, without `SMTP_URL`, the emails appear in the [dev inbox](mail.md#the-dev-inbox) at `/_dev/mail`, so the whole flow works on your machine.
+
+**Two-factor login.** Users turn it on at `/account/security` (or with `POST /api/auth/2fa/setup`, then `/2fa/enable` with a code). They add the app to an authenticator app by its `otpauth://` link or key, confirm with one code, and get 10 recovery codes, shown once. From then on, every way of signing in stops half-way: the password, a sign-in link, a password reset and GitHub/Google all do. The session remembers the pending sign-in for 5 minutes, `/login/2fa` (or `POST /api/auth/2fa`, after a `401 two_factor_required`) takes an app code or a recovery code, and only then is the user signed in.
+- **Each code works once.** The last accepted time step and the unused recovery code hashes are stored. They're updated conditionally, so two requests can't use the same code.
+- **Turning it on or off** needs a code, so a stolen session alone can't do it, and it ends the account's other sessions.
+- **Rate limited:** code attempts share the 10-a-minute limit with logins.
+- **The app's name** in authenticator apps is `APP_NAME`, falling back to the package name.
+
+**Sign-in links.** `/login/link` (or `POST /api/auth/link`) emails a link that signs the user in. It answers the same whether or not the account exists. The link is a [magic link](#magic-links) bound to the account's sign-in count, so it works once, expires after 15 minutes, and stops working after any other sign-in. Using it also proves the email address.
 
 **Log in with GitHub or Google.** Set `GITHUB_CLIENT_ID` and `GITHUB_CLIENT_SECRET` (or the `GOOGLE_` pair) and the login and sign-up pages show "Continue with GitHub"; providers without credentials are simply left out. Register the callback `APP_URL/auth/github/callback` (or `/auth/google/callback`) with the provider. The first social login links the identity to the account with the same verified email, or creates an account without a usable password ("Forgot your password?" sets one); later logins use the link. Sign-up doesn't check the address, so someone could open an account with another person's email ahead of them: when the real owner then logs in with GitHub or Google, that account's password is dropped and its sessions end.
 
@@ -5332,7 +5734,7 @@ It also enables zapline's `cookies`, `mail`, `oauth` and `password` features, ad
 
 Protect a handler by taking the generated extractor; it answers `401 login_required` when nobody is logged in:
 
-```rust
+```rust,ignore
 use crate::routes::auth::CurrentUser;
 
 #[get("/api/notes")]
@@ -5392,6 +5794,78 @@ Send people to `/auth/github` (optionally `?next=/settings`) to start. That rout
 | Any OAuth 2 provider | `OAuth::custom(name, authorize_url, token_url, userinfo_url)` | Reads `sub`/`id`, `email`, `email_verified`, `name`, `picture`/`avatar_url`; the whole profile is in `user.raw` |
 
 `.scopes([...])` replaces the scopes, `.redirect_url(url)` overrides the callback URL (by default `APP_URL` + `/auth/{name}/callback`, or the request's host when `APP_URL` is unset), and `.endpoints(..)` points a built-in provider at a test double. Only trust `user.email` for account linking when `user.email_verified` is true.
+
+## Two-factor login (TOTP) and recovery codes
+
+With the `two-factor` feature, users can add an authenticator app (Google Authenticator, 1Password, Authy, ...) as a second step after their password. `zapline::auth::totp::Totp` makes and checks the six-digit codes (RFC 6238), and `zapline::auth::recovery_codes` covers users who lose their phone.
+
+**Turning it on for a user:**
+1. Make a secret with `Totp::generate()?` (an error, never a weak secret, when the OS has no secure randomness), and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
+2. Ask for one code and check it, to be sure their app is set up.
+3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)?` (ten distinct codes). Show the codes themselves once.
+
+**Signing in**, after the password:
+
+```rust
+use zapline::auth::recovery_codes;
+use zapline::auth::totp::Totp;
+
+/// What a `users` row holds for two-factor login.
+struct TwoFactor {
+    secret: String,
+    last_step: Option<u64>,
+    recovery_hashes: Vec<String>,
+}
+
+fn second_step(user: &mut TwoFactor, code: &str) -> zapline::Result<bool> {
+    let totp = Totp::from_base32(&user.secret)?;
+    if let Some(step) = totp.verify(code, user.last_step) {
+        user.last_step = Some(step); // save it: the same code is refused next time
+        return Ok(true);
+    }
+    if let Some(i) = recovery_codes::find(code, &user.recovery_hashes) {
+        user.recovery_hashes.remove(i); // each recovery code works once
+        return Ok(true);
+    }
+    Ok(false)
+}
+```
+
+- **Clock drift:** a code is accepted for its own 30-second step and one step either side, so a phone clock that's a little off still works.
+- **Replay protection:** pass the user's last accepted step to `verify`, and save the step it returns. A code that was already used, or one from before it, is refused, so an intercepted code can't be used again.
+- **Recovery codes:** they look like `x7k2m-q9pd4`, avoid look-alike characters (0/o, 1/l/i), and match regardless of case, spaces and dashes. Store only `recovery_codes::hash(code)`.
+- **Rate-limit the step:** six digits can be guessed with enough tries. Limit attempts per account, as `zapline g auth` does for the password.
+
+## Magic links
+
+Sign-in links sent by email, email confirmation and invitations need a token that names a user, expires, and works only once. `MagicLinks` (with the `cookies` feature, signed with the app's cookie key) issues and checks them:
+
+```rust
+use std::time::Duration;
+use zapline::auth::magic_link::MagicLinks;
+use zapline::prelude::*;
+
+async fn send_link(links: MagicLinks) -> String {
+    // Bound to the user's last sign-in: once they sign in, it changes and
+    // this link stops working.
+    let token = links.issue("42", "sign-in", "last-login=1731400000", Duration::from_secs(900));
+    format!("https://shop.example/magic/{token}") // email this
+}
+
+async fn open_link(links: MagicLinks, Path(token): Path<String>) -> Result<String> {
+    let user_id = links.verify(&token, "sign-in", |id| {
+        // Look the user up and return their current binding value.
+        (id == "42").then(|| "last-login=1731400000".to_owned())
+    })?;
+    // ...start the session, update last-login...
+    Ok(format!("signed in as {user_id}"))
+}
+```
+
+- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, use a per-user counter you increment on every sign-in (a timestamp in whole seconds may not change between two quick sign-ins); for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Consume the link before signing in.** `verify` only checks the token. Two requests opening the same link at once both pass it, so claim it with a conditional update, such as `UPDATE users SET login_count = login_count + 1 WHERE id = $1 AND login_count = $2`, and start the session only when that changed a row. `zapline g auth` does this.
+- **What's in a token:** the user and purpose are signed, so a sign-in link can't be used to confirm an email, and a token can't be edited to name another user. The signature is checked in constant time.
+- **Errors:** an expired link gets `400`, code `link_expired`, so the page can offer to send a new one. Anything else (tampered, wrong purpose, used, unknown user) gets `400`, code `link_invalid`.
 
 ## Credential extractors
 
@@ -6393,6 +6867,8 @@ fn app() -> App {
 |---|---|---|
 | [`SecurityHeaders`](#securityheaders) | Clickjacking, MIME sniffing, downgrade attacks, over-broad browser features | |
 | [`RateLimit`](#ratelimit) | Brute force, scraping, noisy clients | |
+| [`Idempotency`](#idempotency) | Retried `POST`s charging twice | |
+| [`Captcha`](#captcha) | Bots on signup and other public forms | `captcha` |
 | [`Compression`](#compression) | Bandwidth cost (not an attack, but it is why you want it) | `compression` |
 | [`ConcurrencyLimit`](#concurrencylimit) | Overload: sheds load instead of collapsing | |
 | [`Timeout`](#timeout) | Handlers (or dependencies) that hang | |
@@ -6567,6 +7043,110 @@ fn app() -> App {
 ```
 
 `.rate_limit(limit, period)` is on both `App` and `Routes` and applies to the most recently registered route. Policies that share a `.scope(name)` share buckets, for example to cap login and password reset together. A limiter installed with plain `App::wrap` runs before routing and cannot see policies: it applies its own limit to everything, 404s included.
+
+## `Idempotency`
+
+A client that times out on `POST /payments` can't tell whether the payment went through. Retrying could charge twice, and giving up could lose the payment. With `Idempotency`, the client sends an `Idempotency-Key` header with a unique value, such as a UUID, and retries with the same key. The handler runs once, and every retry gets the first response back:
+
+```rust
+use zapline::middleware::Idempotency;
+use zapline::prelude::*;
+
+fn app() -> App {
+    let payments = Routes::new()
+        .post("/payments", || async { (StatusCode::CREATED, "charged") })
+        .wrap(
+            Idempotency::new()
+                .required()                       // clients must send a key
+                // Whose key it is: here an account header your auth layer
+                // (wrapped outside) has checked. Without `.scope(..)`, it's
+                // the `Authorization` header, and requests with neither skip
+                // idempotency.
+                .scope(|req| {
+                    req.headers().get("x-account")?.to_str().ok().map(str::to_owned)
+                }),
+        );
+
+    App::new().nest("/api", payments)
+}
+```
+
+Use `App::wrap(Idempotency::new())` instead to make keys optional on every route. Don't stack both on the same route.
+
+It follows the IETF `Idempotency-Key` header draft and applies only to `POST` and `PATCH`, since `PUT` and `DELETE` are idempotent already. Requests without a key pass through untouched unless the middleware is `.required()`:
+
+| Situation | Answer |
+|---|---|
+| First request with a key | Runs the handler, and the response is stored for `.ttl(..)` (default 24 hours) |
+| Retry of the same request | The stored response, with `Idempotent-Replayed: true` |
+| Retry while the first request still runs | `409`, code `idempotency_key_in_use` |
+| Same key, different method, path, query, content type or body | `422`, code `idempotency_key_reused` |
+| No key, with `.required()` | `400`, code `idempotency_key_missing` |
+| Key longer than 255 characters or with spaces or control characters | `400`, code `idempotency_key_invalid` |
+
+Things to know:
+
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request. The scope is only as trustworthy as what it's read from: check the `Authorization` header (authentication wrapped outside `Idempotency`) or scope by an authenticated identity, or a client sending a new bogus header per request can fill the memory store.
+- **Only final answers are stored.** A `2xx`, or a `4xx` like "card declined", is stored, so a retry gets the same answer. These aren't stored, so the client's retry runs the handler again:
+  - `5xx` responses;
+  - answers that may change: `401`, `403`, `404` and `405`;
+  - answers that ask for a retry: `408`, `409`, `425` and `429`;
+  - streamed bodies, and responses over 1 MiB (body and headers).
+
+  `Set-Cookie` headers reach the first response only and are never replayed, so a replay can't hand a session to whoever sends the key again. Apps that refresh a session cookie on every response still get idempotency.
+- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed, and `SetRequestId` and `Cors`, so a retry gets its own request id and its own origin's CORS headers instead of the first request's.
+- **Large uploads pass through.** Fingerprinting buffers the request body within the app's body limit. Bodies whose `Content-Length` is over that limit skip idempotency, since a `BodyStream` route may read them under its own larger limit (and a route without one rejects them unread). A chunked upload with no `Content-Length` is buffered like any body, so leave routes taking large chunked uploads out of `Idempotency` (`Routes::wrap` on the routes that need it).
+- **Slow handlers keep their key.** While a handler runs, and until its response is stored, its lock is renewed every third of `.lock_timeout(..)` (at least 30 ms). If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, or takes over 5 seconds to answer, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
+- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. Stored responses use at most `.max_memory(bytes)` (default 64 MiB), again a tenth per client. When the store is full, the oldest stored responses are dropped. A client whose whole share is requests still running gets `429` (code `idempotency_keys_exhausted`) for new keys, and other clients are unaffected. Use Redis where a second run costs money.
+
+## Captcha
+
+Public forms (signup, contact, password reset) attract bots. With the `captcha` feature, a form can require a Cloudflare Turnstile, hCaptcha or Google reCAPTCHA check. The page shows the provider's widget, which puts a token in a hidden form field. The handler passes that token to `Captcha::verify`:
+
+```rust
+use serde::Deserialize;
+use zapline::captcha::Captcha;
+use zapline::prelude::*;
+
+#[derive(Deserialize)]
+struct Signup {
+    email: String,
+    #[serde(rename = "cf-turnstile-response", default)]
+    captcha: String,
+}
+
+async fn signup(captcha: Captcha, conn: ConnInfo, Form(form): Form<Signup>) -> Result<String> {
+    captcha.verify(&form.captcha, conn.remote_addr.map(|a| a.ip())).await?;
+    Ok(format!("welcome, {}", form.email))
+}
+
+fn app(secret: String) -> App {
+    App::new()
+        .captcha(Captcha::turnstile(secret))      // or ::hcaptcha / ::recaptcha
+        .post("/signup", signup)
+}
+```
+
+On the page, inside the `<form>`, add the provider's widget with your site key:
+
+```html
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>
+<div class="cf-turnstile" data-sitekey="{{ site_key }}"></div>
+```
+
+| Situation | Answer |
+|---|---|
+| Valid token | `verify` returns `Ok(())` |
+| Empty token (widget not completed) | `400`, code `captcha_missing`, without calling the provider |
+| Token rejected by the provider | `400`, code `captcha_failed` |
+| Provider unreachable, too slow (`.timeout(..)`, default 10 s) or answering nonsense | `503`, code `captcha_unavailable` |
+
+- **It fails closed.** An outage at the provider blocks the form rather than letting bots through. Expect a few `503`s if the provider goes down.
+- **Field names:** `Captcha::field()` gives the field each widget posts: `cf-turnstile-response`, `h-captcha-response` or `g-recaptcha-response`.
+- **Client IP:** pass it when you know it; behind a proxy, use the IP from your `TrustedProxies`. Providers use it as one more signal.
+- **Tests and self-hosting:** `.verify_url(url)` sends verifications to a compatible endpoint instead, such as a test double. Turnstile also publishes test keys that always pass or always fail.
+- **Secrets:** keep the secret key in the environment, not in code. `Captcha`'s `Debug` output hides it.
 
 ## `Compression`
 
@@ -8429,7 +9009,8 @@ For full control, use `App::server_config(..)` or `App::server_config_mut()`:
 | `workers` | CPU count | Worker threads |
 | `runtime` | `PerCore` (Linux) | `PerCore` or `MultiThread` |
 | `header_read_timeout` | 30s | Slowloris protection; also closes idle keep-alive connections |
-| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes. Streaming bodies set their own pace |
+| `body_read_timeout` | 30s | A buffered body (`Json`, `Form`, `String`, ...) that arrives slower gets `408` and the connection closes |
+| `body_idle_timeout` | 30s | A streaming body (`BodyStream`, `Multipart`) that sends nothing for this long gets `408` and the connection closes; a slow but steady upload is unaffected |
 | `keep_alive` / `pipeline_flush` | true / false | HTTP/1.1 behavior. `pipeline_flush` batches pipelined responses (see the limitation below) |
 | `max_connections` | unlimited | Per worker. Accepting pauses at the limit. WebSockets keep their slot after the upgrade. |
 | `max_upgraded` | none | Per worker. A separate limit for WebSockets; upgrades beyond it get `503`. |
@@ -9027,9 +9608,11 @@ Honest gaps, so you can decide where it fits today:
   such clients held about 800 MiB of 4 MiB responses). axum has the same
   behavior; a reverse proxy, `max_connections`, or streaming large
   responses bounds it.
-- **Streaming bodies set their own pace.** `body_read_timeout` covers
-  buffered bodies; `BodyStream` and `Multipart` handlers should bound their
-  own uploads.
+- **Streaming bodies are limited per gap, not in total.** `body_read_timeout`
+  covers buffered bodies; `body_idle_timeout` (default 30s) answers `408` when
+  a `BodyStream` or `Multipart` upload sends nothing for that long. A slow but
+  steady upload still finishes, so handlers that must cap a whole upload's
+  duration still bound it themselves.
 - **Young code, small team.** Bugs like the `zapline ship` settings one are
   what a young project still has. The chaos suite and fuzzer exist so the
   next one is found by a test, not by a user.
@@ -9103,6 +9686,57 @@ Any of the three platforms works in production. For the highest throughput, depl
 
 ---
 
+<!-- stability.md -->
+
+# Stability & versioning
+
+What you can rely on when you upgrade zapline, and how changes reach you.
+
+## What counts as the public API
+
+A change to any of these is a change you may have to act on, and is treated by the rules below:
+
+| Surface | Examples |
+|---|---|
+| Public Rust items | Types, functions, traits, macros and their signatures in `zapline`, `zapline-macros` and `zapline-codegen` |
+| Cargo features | Their names, and what each one turns on |
+| Wire formats | The JSON error body (`{"error", "code", ...}`), error `code` strings, `ZL####` diagnostic codes, response headers the framework sets |
+| Configuration | `zapline.toml` keys, environment variables the framework reads (`DATABASE_URL`, `SESSION_SECRET`, ...) |
+| The CLI | `zapline` subcommands and flags, and the layout of projects `zapline new` and `zapline generate` create |
+
+Not covered: items marked `#[doc(hidden)]`, anything in `__private` modules, the exact wording of error messages and log lines, the dev console's HTML, and performance (which is tracked by the benchmarks, not promised).
+
+## Versions
+
+zapline follows [Semantic Versioning](https://semver.org).
+
+- **Before 1.0 (now: 0.x):** a minor release (0.1 → 0.2) may break the public API; a patch release (0.1.0 → 0.1.1) never does. Every break is listed under **Changed** or **Removed** in the [CHANGELOG](https://github.com/samsamurai301/zapline/blob/main/CHANGELOG.md), with what to do instead.
+- **From 1.0:** breaking changes only in a major release.
+- **Checked by a tool:** before each release, [`cargo-semver-checks`](https://github.com/obi1kenobi/cargo-semver-checks) compares the public Rust API with the previous release. A break without the matching version bump stops the release (see `RELEASING.md`). The other surfaces (features, wire formats, configuration, the CLI) have no such tool: the release checklist compares them by hand.
+
+## Deprecation
+
+An API is not removed without warning:
+
+1. **It's deprecated first.** A Rust item gets `#[deprecated(since = "0.x.y", note = "use ... instead")]`: your build warns and the note names the replacement. Surfaces that can't carry the attribute warn another way: a renamed Cargo feature stays as an alias of the new one, a config key or environment variable still works and logs a warning at startup, a CLI flag still works and prints a warning, and a wire-format change ships behind an opt-in first. Either way the CHANGELOG lists it under **Deprecated**.
+2. **It stays for at least one minor release** before 1.0, and until the next major release after 1.0.
+3. **Then it's removed**, listed under **Removed** in the CHANGELOG.
+
+Generated project files are yours once written: a new release never rewrites them. When a template changes, the CHANGELOG says what to update by hand.
+
+## Minimum supported Rust version (MSRV)
+
+- **Today: Rust 1.88**, the `rust-version` in `Cargo.toml`, checked before every release (`cargo +1.88 check --workspace --all-features`, excluding `zapline-wasm`, which needs 1.97).
+- **Raising it is not a breaking change,** but it only happens in a minor release, is listed in the CHANGELOG, and stays at least six months (about four stable releases) behind the newest stable Rust.
+- **Dependencies follow the MSRV:** the lockfile pins versions that build with it (`CARGO_RESOLVER_INCOMPATIBLE_RUST_VERSIONS=fallback cargo update`).
+
+## Security fixes
+
+Fixes for vulnerabilities go into the latest release as a patch release, and into the previous minor release when it is less than three months old. Report vulnerabilities privately as described in `SECURITY.md`.
+
+
+---
+
 <!-- features.md -->
 
 # Feature flags
@@ -9149,11 +9783,16 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt`; key rings with `JwtKey` (rotate, retire) and `App::serve_jwks` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (aws-lc backend, PEM keys) |
 | `jwks` | `full` | `Jwks`: verify tokens with an identity provider's JWK Set, cached with a TTL, refreshed on unknown `kid` (rate limited), stale keys kept on errors, OpenID discovery ([JWKS](auth.md#tokens-from-an-identity-provider-jwks)) | `jwt` | `hyper-rustls` (hyper client, rustls) |
-| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
+| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) and `auth::magic_link::MagicLinks` ([Magic links](auth.md#magic-links)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE, typed `Tools` and `App::mcp` ([AI & language models](ai.md)) | `http-client`, `openapi` | none beyond `http-client` |
+| `webhooks` | `full` | `zapline::webhooks`: verify incoming webhooks (`Webhook`, `Signed<T>`: Standard Webhooks, GitHub, Stripe) and send signed ones (`WebhookSender`) ([Webhooks](webhooks.md)) | `http-client` | `hmac`, `sha2`, `getrandom` |
+| `http-client` | `full` | `zapline::outbound`: `HttpClient` with timeouts, retries and an SSRF guard ([Calling other services](outbound.md)) | `json` | `hyper-rustls` (hyper client, rustls), `tower-service` |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `captcha` | `full` | `zapline::captcha`: `Captcha` (Turnstile, hCaptcha, reCAPTCHA), `App::captcha` ([Captchas](hardening.md#captcha)) | `json` | `hyper-rustls` (hyper client, rustls) |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `redis-tls` | `full` | `rediss://` URLs for the Redis client: TLS with rustls, the Mozilla root store or your own CA (`?ca_file=`, `Redis::with_ca_pem`), and an SNI override (`?sni=`) ([Running several instances](scaling.md#redis-over-tls)) | `redis` | `tokio-rustls`, `webpki-roots` |
@@ -9179,7 +9818,7 @@ Some modules have no feature flag because they add no dependencies:
 | Module | What it provides |
 |---|---|
 | Core | Routing, `Path`, `State`, `Extension`, `Bytes` and `String` extractors, responses, errors, the test client, startup/shutdown hooks and plugins |
-| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `SetRequestId`, `SecurityHeaders` |
+| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `Idempotency`, `SetRequestId`, `SecurityHeaders` |
 | `auth` | `BearerToken`, `BasicAuth`, `ApiKey`, `Authenticate`, `Guard`, route policies (JWT and CSRF need their own features) |
 | `di` | `Dep<T>`, `Cached<T>`, `Inject` and the `provide*` methods |
 | `tasks` | `BackgroundTasks`, `App::schedule`, `App::background` |

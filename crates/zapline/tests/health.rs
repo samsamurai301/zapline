@@ -118,12 +118,13 @@ async fn checks_report_up_down_and_errors() {
 
 #[tokio::test]
 async fn question_mark_errors_include_their_source() {
+    const MISSING: &str = "/definitely/not/here/zapline";
     let c = App::new()
         .plugin(
             Health::new()
                 .show_errors(true)
                 .check("file", |_res: Resources| async move {
-                    std::fs::read("/definitely/not/here/zapline")?;
+                    std::fs::read(MISSING)?;
                     Ok(())
                 }),
         )
@@ -132,7 +133,10 @@ async fn question_mark_errors_include_their_source() {
     assert_eq!(s, 503);
     let err = body["checks"]["file"]["error"].as_str().unwrap();
     assert!(err.starts_with("internal server error: "), "{err}");
-    assert!(err.to_lowercase().contains("no such file"), "{err}");
+    // The OS's own words ("No such file or directory" on Unix, "The system
+    // cannot find the path specified." on Windows).
+    let os = std::fs::read(MISSING).unwrap_err().to_string();
+    assert!(err.contains(&os), "{err}");
 }
 
 #[tokio::test]

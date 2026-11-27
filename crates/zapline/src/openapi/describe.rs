@@ -137,6 +137,22 @@ undocumented_input!(
     [] auth::CsrfToken,
 );
 
+/// Form handlers take a [`Flash`](crate::session::Flash) to redirect after
+/// the post: `flash.redirect(..)` answers `303` (and, to htmx, the route's
+/// usual success status with `HX-Redirect`).
+#[cfg(feature = "cookies")]
+impl ApiInput for crate::session::Flash {
+    fn describe_input(op: &mut OperationDoc) {
+        // Keep the route's own success status too: htmx gets it, and a
+        // declared 303 would otherwise replace the default 200.
+        // `redirect` documents the `Location` header too. Declared on
+        // every route taking a `Flash`: any of them may redirect, and a
+        // documented answer that never comes is harmless to clients and
+        // `zapline fuzz`, where a missing one fails them.
+        op.success_empty().redirect();
+    }
+}
+
 /// A cached extractor documents like the extractor itself.
 impl<T: ApiInput> ApiInput for crate::di::Cached<T> {
     fn describe_input(op: &mut OperationDoc) {

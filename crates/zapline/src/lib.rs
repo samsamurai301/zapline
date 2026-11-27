@@ -177,15 +177,25 @@ pub mod session;
 // ---- application structure ---------------------------------------------------
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod admin;
+#[cfg(feature = "ai")]
+pub mod ai;
 #[cfg(feature = "cache")]
 pub mod cache;
+#[cfg(feature = "captcha")]
+pub mod captcha;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod cron;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
-#[cfg(feature = "_http-client")]
+#[cfg(any(
+    feature = "jwks",
+    feature = "oauth",
+    feature = "otlp",
+    feature = "s3",
+    feature = "captcha"
+))]
 mod http_client;
 #[cfg(feature = "i18n")]
 pub mod i18n;
@@ -195,11 +205,15 @@ pub mod jobs;
 pub mod mail;
 #[cfg(feature = "otlp")]
 mod otlp;
+#[cfg(feature = "http-client")]
+pub mod outbound;
 #[cfg(feature = "redis")]
 pub mod redis;
 #[cfg(feature = "storage")]
 pub mod storage;
 pub mod tasks;
+#[cfg(feature = "webhooks")]
+pub mod webhooks;
 
 // ---- observability -----------------------------------------------------------
 pub mod health;

@@ -46,7 +46,7 @@ fn snapshot(name: &str, actual: &str) {
             .lines()
             .zip(actual.lines())
             .position(|(a, b)| a != b)
-            .map_or(expected.lines().count().min(actual.lines().count()), |i| i)
+            .unwrap_or(expected.lines().count().min(actual.lines().count()))
             + 1;
         panic!(
             "{name} is out of date (first difference at line {line}); rerun with \

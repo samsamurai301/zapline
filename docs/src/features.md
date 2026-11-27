@@ -42,11 +42,16 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt`; key rings with `JwtKey` (rotate, retire) and `App::serve_jwks` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (aws-lc backend, PEM keys) |
 | `jwks` | `full` | `Jwks`: verify tokens with an identity provider's JWK Set, cached with a TTL, refreshed on unknown `kid` (rate limited), stale keys kept on errors, OpenID discovery ([JWKS](auth.md#tokens-from-an-identity-provider-jwks)) | `jwt` | `hyper-rustls` (hyper client, rustls) |
-| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
+| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) and `auth::magic_link::MagicLinks` ([Magic links](auth.md#magic-links)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
+| `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE, typed `Tools` and `App::mcp` ([AI & language models](ai.md)) | `http-client`, `openapi` | none beyond `http-client` |
+| `webhooks` | `full` | `zapline::webhooks`: verify incoming webhooks (`Webhook`, `Signed<T>`: Standard Webhooks, GitHub, Stripe) and send signed ones (`WebhookSender`) ([Webhooks](webhooks.md)) | `http-client` | `hmac`, `sha2`, `getrandom` |
+| `http-client` | `full` | `zapline::outbound`: `HttpClient` with timeouts, retries and an SSRF guard ([Calling other services](outbound.md)) | `json` | `hyper-rustls` (hyper client, rustls), `tower-service` |
 | `oauth` | `full` | `zapline::auth::oauth`: `OAuth` (GitHub, Google, custom), `App::oauth`, `OAuthLogin` ([Social login](auth.md#social-login-oauth)) | `json` | `hyper-rustls` (hyper client, rustls), `sha2`, `getrandom` |
+| `captcha` | `full` | `zapline::captcha`: `Captcha` (Turnstile, hCaptcha, reCAPTCHA), `App::captcha` ([Captchas](hardening.md#captcha)) | `json` | `hyper-rustls` (hyper client, rustls) |
 | `i18n` | `full` | `zapline::i18n`: `I18n` (TOML files per language), `App::i18n`, the `Locale` extractor, plurals, `t(...)` in templates ([Translations](i18n.md)) | | `toml` |
 | `redis` | `full` | `zapline::redis`: a built-in Redis client (`Redis`, `App::redis`), `Cache::redis`, `Live::redis`, `RateLimit::redis`, `RedisStore` for sessions ([Running several instances](scaling.md)) | `json` | |
 | `redis-tls` | `full` | `rediss://` URLs for the Redis client: TLS with rustls, the Mozilla root store or your own CA (`?ca_file=`, `Redis::with_ca_pem`), and an SNI override (`?sni=`) ([Running several instances](scaling.md#redis-over-tls)) | `redis` | `tokio-rustls`, `webpki-roots` |
@@ -72,7 +77,7 @@ Some modules have no feature flag because they add no dependencies:
 | Module | What it provides |
 |---|---|
 | Core | Routing, `Path`, `State`, `Extension`, `Bytes` and `String` extractors, responses, errors, the test client, startup/shutdown hooks and plugins |
-| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `SetRequestId`, `SecurityHeaders` |
+| `middleware` | `Logger`, `Cors`, `Timeout`, `DefaultHeaders`, `CatchPanic`, `ConcurrencyLimit`, `NormalizePath`, `RateLimit`, `Idempotency`, `SetRequestId`, `SecurityHeaders` |
 | `auth` | `BearerToken`, `BasicAuth`, `ApiKey`, `Authenticate`, `Guard`, route policies (JWT and CSRF need their own features) |
 | `di` | `Dep<T>`, `Cached<T>`, `Inject` and the `provide*` methods |
 | `tasks` | `BackgroundTasks`, `App::schedule`, `App::background` |
