@@ -49,7 +49,7 @@ response and lists the extension points every feature is built on. Read its
 3. **Every public item has a doc comment with a short example**, and new
    behavior gets an integration test in `crates/zapline/tests/`.
 4. **New Cargo features compile alone**: add them to the feature loop in
-   `scripts/check.sh` and `.github/workflows/ci.yml`.
+   `scripts/check.sh` and `scripts/check.ps1`.
 5. **One obvious way per task.** If you add an alternative API, say why in
    the pull request.
 6. **MSRV is 1.88**: don't use newer std APIs.
@@ -58,21 +58,21 @@ response and lists the extension points every feature is built on. Read its
 
 ```sh
 ./scripts/check.sh quick        # before every commit: fmt, clippy, tests
-./scripts/check.sh              # what CI runs: + feature matrix, examples, docs
+./scripts/check.sh              # before a pull request: + feature matrix, examples, docs
 cargo test -p zapline --all-features --test <name>   # one test file
 ./scripts/gen-llms.sh           # after editing docs/src: regenerates llms.txt
 cargo test -p zapline-guide-check --doc   # every rust block in docs/src compiles
 cargo deny check                # supply chain: advisories, licenses, sources
-./scripts/coverage.sh           # line coverage vs .github/coverage-floor (needs cargo-llvm-cov)
+./scripts/coverage.sh           # line coverage vs scripts/coverage-floor (needs cargo-llvm-cov)
 ```
 
-CI also runs every Monday on `main`, so a new stable Rust that breaks the
-build is caught without a push. While CI is red on `main`, an open issue
-titled "CI is red on main" says where (`.github/workflows/ci-alert.yml`); the
-next green run closes it. Fix it before merging anything else.
-The coverage floor only goes up. CI fails when coverage drops under it, or
-when a pull request lowers the number. When your tests raise coverage, raise
-the floor in the same pull request.
+zapline has no hosted CI while it is unreleased: run these checks locally
+and say in the pull request which ones passed. `./scripts/check.sh` is the
+bar for merging.
+
+The coverage floor only goes up. `./scripts/coverage.sh` fails when coverage
+drops under it. When your tests raise coverage, raise the floor in the same
+pull request.
 
 ### Reliability checks
 

@@ -45,7 +45,7 @@ Windows: `.\scripts\check.ps1`.
 - Every public item gets a doc comment with a short example. New behavior gets
   an integration test in `crates/zapline/tests/`.
 - New Cargo features must compile alone: add them to the feature loop in
-  `scripts/check.sh` and `.github/workflows/ci.yml`.
+  `scripts/check.sh` and `scripts/check.ps1`.
 - Changing a CLI template means updating the expected-file lists in
   `crates/zapline-cli/src/new.rs` tests.
 - Keep the public surface small: one obvious way per task. If you add an
