@@ -45,6 +45,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
+| `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |
 | `mail` | `full` | `zapline::mail`: `Mailer`, `Email`, the dev inbox ([Email](mail.md)) | | `lettre` (SMTP, rustls) |
 | `ai` | `full` | `zapline::ai`: `Llm` for Claude and OpenAI-compatible models, streaming to SSE, typed `Tools` and `App::mcp` ([AI & language models](ai.md)) | `http-client`, `openapi` | none beyond `http-client` |
 | `webhooks` | `full` | `zapline::webhooks`: verify incoming webhooks (`Webhook`, `Signed<T>`: Standard Webhooks, GitHub, Stripe) and send signed ones (`WebhookSender`) ([Webhooks](webhooks.md)) | `http-client` | `hmac`, `sha2`, `getrandom` |

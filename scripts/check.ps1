@@ -37,7 +37,11 @@ if ($Mode -eq "quick") { exit 0 }
 Step "feature matrix"
 Run cargo @("clippy", "-q", "-p", "zapline", "--no-default-features", "--all-targets", "--", "-D", "warnings")
 $features = "macros", "json", "query", "form", "openapi", "validate", "config", "tracing",
+<<<<<<< HEAD
             "http2", "tls", "http3", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views", "postgres", "sqlite", "password", "mail", "storage", "s3", "cache", "oauth", "captcha", "http-client", "ai", "webhooks", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid"
+=======
+            "http2", "tls", "http3", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views", "postgres", "sqlite", "password", "two-factor", "mail", "storage", "s3", "cache", "oauth", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid"
+>>>>>>> origin/feat/two-factor
 foreach ($f in $features) {
     Write-Host "  - $f"
     Run cargo @("clippy", "-q", "-p", "zapline", "--no-default-features", "--features", $f, "--all-targets", "--", "-D", "warnings")
