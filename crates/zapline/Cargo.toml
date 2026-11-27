@@ -16,7 +16,7 @@ categories = ["web-programming::http-server", "asynchronous"]
 default = ["macros", "json", "query", "form", "openapi", "validate", "config", "tracing"]
 full = [
     "default", "http2", "tls", "ws", "fs", "multipart", "compression", "jwt", "jwks", "cookies", "views",
-    "password", "mail", "storage", "cache", "oauth", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid",
+    "password", "mail", "storage", "cache", "oauth", "captcha", "i18n", "redis", "redis-tls", "otlp", "tz", "chrono", "uuid",
 ]
 macros = ["dep:zapline-macros"]
 json = ["dep:serde_json"]
@@ -58,7 +58,9 @@ cache = ["json"]
 storage = ["dep:mime_guess", "dep:hmac", "dep:sha2", "dep:getrandom"]
 s3 = ["storage", "_http-client"]
 oauth = ["json", "_http-client", "dep:sha2", "dep:getrandom"]
-# Internal: the HTTPS client behind `s3`, `oauth`, `jwks` and `otlp`.
+# `zapline::captcha`: Turnstile, hCaptcha and reCAPTCHA verification.
+captcha = ["json", "_http-client"]
+# Internal: the HTTPS client behind `s3`, `oauth`, `captcha`, `jwks` and `otlp`.
 _http-client = ["dep:hyper-rustls", "hyper/client", "hyper-util/client-legacy", "hyper-util/http1"]
 
 [dependencies]

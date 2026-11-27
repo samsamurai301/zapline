@@ -331,6 +331,15 @@ pub const FEATURES: &[Feature] = &[
         usage: "App::new().oauth(OAuth::from_env(\"github\")?)",
     },
     Feature {
+        name: "captcha",
+        description: "Bot checks on public forms: Turnstile, hCaptcha, reCAPTCHA",
+        paths: &["captcha"],
+        items: &["Captcha"],
+        methods: &["App::captcha"],
+        implies: &["json"],
+        usage: "App::new().captcha(Captcha::turnstile(secret)), then captcha.verify(token, ip)",
+    },
+    Feature {
         name: "i18n",
         description: "Translations from locales/*.toml: I18n, the Locale extractor",
         paths: &["i18n"],
@@ -422,6 +431,7 @@ pub const FEATURES: &[Feature] = &[
             "storage",
             "cache",
             "oauth",
+            "captcha",
             "i18n",
             "redis",
             "redis-tls",
@@ -483,6 +493,9 @@ const ALIASES: &[(&str, &str)] = &[
     ("oauth2", "oauth"),
     ("github", "oauth"),
     ("google", "oauth"),
+    ("turnstile", "captcha"),
+    ("hcaptcha", "captcha"),
+    ("recaptcha", "captcha"),
 ];
 
 /// The feature someone probably meant by an unknown name: an alias

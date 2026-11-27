@@ -179,6 +179,8 @@ pub mod session;
 pub mod admin;
 #[cfg(feature = "cache")]
 pub mod cache;
+#[cfg(feature = "captcha")]
+pub mod captcha;
 #[cfg(feature = "config")]
 pub mod config;
 pub mod cron;
