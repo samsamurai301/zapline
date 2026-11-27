@@ -49,13 +49,31 @@ impl TestServer {
     }
 }
 
-/// A port that was free a moment ago.
+/// A free port for a server that binds by address (`App::run*`).
+///
+/// Picked from 20000–29999, below every OS's ephemeral range (Linux starts at
+/// 32768, Windows and macOS at 49152). Asking the OS for port 0 instead hands
+/// back a port that a `TestServer` bound to port 0 in a parallel test may
+/// be given before this server binds it, and the client then talks to the
+/// wrong server. Tests in one binary never get the same port twice.
 pub fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    use std::sync::atomic::{AtomicU16, Ordering};
+    const LOW: u16 = 20_000;
+    const SPAN: u16 = 10_000;
+    static NEXT: AtomicU16 = AtomicU16::new(u16::MAX);
+    // Start each test binary somewhere else in the range.
+    let start = LOW + (std::process::id() % u32::from(SPAN)) as u16;
+    let _ = NEXT.compare_exchange(u16::MAX, start, Ordering::Relaxed, Ordering::Relaxed);
+    for _ in 0..SPAN {
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let port = LOW + (n.wrapping_sub(LOW) % SPAN);
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+            && std::net::UdpSocket::bind(("127.0.0.1", port)).is_ok()
+        {
+            return port;
+        }
+    }
+    panic!("no free port in {LOW}..{}", LOW + SPAN);
 }
 
 /// Wait until something accepts connections on `addr`.

@@ -62,12 +62,16 @@ response and lists the extension points every feature is built on. Read its
 cargo test -p zapline --all-features --test <name>   # one test file
 ./scripts/gen-llms.sh           # after editing docs/src: regenerates llms.txt
 cargo deny check                # supply chain: advisories, licenses, sources
+./scripts/coverage.sh           # line coverage vs .github/coverage-floor (needs cargo-llvm-cov)
 ```
 
 CI also runs every Monday on `main`, so a new stable Rust that breaks the
 build is caught without a push. While CI is red on `main`, an open issue
 titled "CI is red on main" says where (`.github/workflows/ci-alert.yml`); the
 next green run closes it. Fix it before merging anything else.
+The coverage floor only goes up. CI fails when coverage drops under it, or
+when a pull request lowers the number. When your tests raise coverage, raise
+the floor in the same pull request.
 
 ### Reliability checks
 
