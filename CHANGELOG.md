@@ -22,6 +22,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - OpenAPI: handlers taking `session::Flash` document a `303` redirect next to their usual success response, and `zapline g auth`'s `CurrentUser` documents its `401`, so generated apps pass `zapline fuzz`.
 ### Plugins
 - New crate `zapline-wasm`: run untrusted WebAssembly components from an app. `WasmHost` holds a component-model engine metered by fuel; every `call` gets a fresh store with `Limits` (fuel, memory per linear memory, instances, memories, tables) and nothing linked but what the app links (no WASI). Traps, fuel and memory exhaustion and missing imports are `Err`s, never panics; `PluginLog` keeps a plugin's last lines. `bindgen!` uses the re-exported `zapline_wasm::wasmtime`. A separate crate because wasmtime needs Rust 1.97. Guide: "Plugins (WebAssembly)".
+### Fixed
+- `zapline dev` on macOS no longer rebuilds right after starting: FSEvents replays writes from just before the watch began, and those are now ignored.
+- `zapline g auth`: the generated `CurrentUser` documents its `401` and the page form posts document their `303` redirect (`PageOrRedirect`), so generated apps pass `zapline fuzz` again. The generator now also turns on zapline's `openapi` feature.
 
 ### Reliability
 - `ServerConfig::body_read_timeout` (default 30s): a buffered request body (`Json`, `Form`, `String`, `Bytes`, ...) that takes longer to arrive gets `408` (`ZL0068`) and the connection is closed, so clients that send bodies slowly can't hold connections and handlers open. Streaming bodies (`BodyStream`, `Multipart`) are not limited.
