@@ -31,6 +31,7 @@
 - [Background tasks & scheduled jobs](tasks.md)
 - [Cron schedules](cron.md)
 - [Caching](caching.md)
+- [Calling other services](outbound.md)
 
 # Full-stack
 
