@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full local verification: what CI runs, in one command.
+# Full local verification, in one command: the bar for merging.
 #
 #   ./scripts/check.sh            # everything
 #   ./scripts/check.sh quick      # fmt + clippy + tests (all features)
