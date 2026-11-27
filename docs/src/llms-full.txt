@@ -4056,7 +4056,7 @@ fn main() -> std::io::Result<()> {
 | `Database::sqlite(url)` / `Database::postgres(url)` | Pick the backend explicitly (when both features are on) |
 | `Database::sqlite_memory()` | A private in-memory database per app: ideal for tests |
 
-Pool settings: `.max_connections(n)` (default 4 × CPUs, at least 10), `.min_connections(n)`, `.acquire_timeout(d)` (default 5 s; a request that can't get a connection in time gets a 503).
+Pool settings: `.max_connections(n)` (default 4 × CPUs, at least 10), `.min_connections(n)`, `.acquire_timeout(d)` (default 5 s; a request that can't get a connection in time gets a 503), and `.test_before_acquire(bool)`. The last one defaults to `true`: each checkout pings the database, so a dropped connection is replaced instead of failing a request. That ping is one round trip per request, about a quarter of single-query throughput against Postgres. Turn it off when the database is close and reliable.
 
 With both features enabled, `Db` and `Database` default to Postgres; use `SqliteDb` (or `Db<sqlx::Sqlite>`) and `Database::sqlite(url)` for SQLite.
 

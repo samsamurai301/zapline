@@ -133,6 +133,7 @@ pub struct Database<DB: sqlx::Database = DefaultDb> {
     min_connections: u32,
     acquire_timeout: Duration,
     idle_timeout: Option<Duration>,
+    test_before_acquire: bool,
     migrate: bool,
     migrations: Dir,
     _db: PhantomData<fn() -> DB>,
@@ -152,6 +153,7 @@ impl<DB: sqlx::Database> Database<DB> {
             min_connections: 0,
             acquire_timeout: Duration::from_secs(5),
             idle_timeout: Some(Duration::from_secs(600)),
+            test_before_acquire: true,
             migrate: true,
             migrations: Dir::disk(DEFAULT_MIGRATIONS_DIR),
             _db: PhantomData,
@@ -174,6 +176,25 @@ impl<DB: sqlx::Database> Database<DB> {
     /// 503 (default 5 s).
     pub fn acquire_timeout(mut self, timeout: Duration) -> Self {
         self.acquire_timeout = timeout;
+        self
+    }
+
+    /// Check each connection with a ping before handing it to a request
+    /// (default `true`, as in sqlx). A connection the server dropped is
+    /// then replaced instead of failing the request, at the cost of one
+    /// round trip per checkout: about a quarter of single-query throughput
+    /// against Postgres. Turn it off when the database is close and
+    /// reliable, and connections are recycled by `idle_timeout`.
+    ///
+    /// ```
+    /// # #[cfg(feature = "sqlite")] {
+    /// use zapline::db::Database;
+    ///
+    /// let db = Database::sqlite_memory().test_before_acquire(false);
+    /// # }
+    /// ```
+    pub fn test_before_acquire(mut self, enabled: bool) -> Self {
+        self.test_before_acquire = enabled;
         self
     }
 
@@ -227,6 +248,7 @@ impl<DB: sqlx::Database> Database<DB> {
             .min_connections(self.min_connections)
             .acquire_timeout(self.acquire_timeout)
             .idle_timeout(self.idle_timeout)
+            .test_before_acquire(self.test_before_acquire)
             .connect(&url)
             .await
             .map_err(|e| {
