@@ -12,13 +12,24 @@ final `cargo publish` and the visibility switch is safe to repeat.
    `crates/zapline-cli/Cargo.toml`. The CLI derives the version requirement it
    writes into new projects from its own version.
 3. Replace `Unreleased` in `CHANGELOG.md` with the release date.
-4. Dry run, which packages and builds all four crates against each other:
+4. The version bump matches the API changes. From the second release on,
+   compare the public API with the previous release's tag (needs
+   `cargo install cargo-semver-checks`, or run the *Release check* workflow):
+
+   ```sh
+   cargo semver-checks -p zapline -p zapline-macros -p zapline-codegen --baseline-rev v0.1.0
+   ```
+
+   A reported break needs a minor bump before 1.0 (a major one after),
+   and a **Changed** or **Removed** entry in the CHANGELOG (see the guide's
+   *Stability & versioning* chapter).
+5. Dry run, which packages and builds all four crates against each other:
 
    ```sh
    cargo publish --dry-run -p zapline-macros -p zapline-codegen -p zapline -p zapline-cli
    ```
 
-5. Tag and publish (needs a crates.io token: `cargo login`):
+6. Tag and publish (needs a crates.io token: `cargo login`):
 
    ```sh
    git tag v0.1.0 && git push origin v0.1.0
@@ -29,8 +40,8 @@ final `cargo publish` and the visibility switch is safe to repeat.
    the index. **Publishing cannot be undone**; a bad release can only be
    yanked.
 
-6. Create the GitHub release from the tag with the changelog section.
-7. The docs site deploys from `main` (`.github/workflows/pages.yml`). Enable
+7. Create the GitHub release from the tag with the changelog section.
+8. The docs site deploys from `main` (`.github/workflows/pages.yml`). Enable
    it once under *Settings → Pages → Source: GitHub Actions*.
 
 ## First public launch
