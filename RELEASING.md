@@ -5,7 +5,9 @@ final `cargo publish` and the visibility switch is safe to repeat.
 
 ## Checklist
 
-1. `main` is green on CI (Linux, macOS, Windows, MSRV, docs, scaffold).
+1. `main` is green on a full CI run: start the CI workflow by hand on `main`
+   with *full* ticked (Linux, macOS, Windows, MSRV, docs, scaffold, ecosystem,
+   benchmarks). Pull requests run only the Linux checks, to save Actions minutes.
 2. Bump `version` in the root `Cargo.toml` (`[workspace.package]`) and the
    `version = "..."` on the `zapline-macros` and `zapline-codegen` path
    dependencies in `crates/zapline/Cargo.toml` and on `zapline-codegen` in

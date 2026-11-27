@@ -5,6 +5,11 @@ name: Docs site
 on:
   push:
     branches: [main]
+    # Only when the guide or the API docs can have changed.
+    paths:
+      - "docs/**"
+      - "crates/*/src/**"
+      - ".github/workflows/pages.yml"
   workflow_dispatch:
 
 permissions:
