@@ -209,7 +209,8 @@ impl FromRequest for Multipart {
             return Err(Error::payload_too_large());
         }
 
-        let body = BodyStream::new(req.take_body(), limit);
+        let idle = req.body_idle_timeout();
+        let body = BodyStream::new(req.take_body(), limit, idle);
         Ok(Multipart {
             inner: multer::Multipart::with_constraints(body, boundary, config.constraints()),
             max_fields: config.max_fields,

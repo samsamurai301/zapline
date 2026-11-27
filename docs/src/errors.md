@@ -443,10 +443,10 @@ Raise the limit: App::new().body_limit(16 * 1024 * 1024); or stream the body wit
 
 ### ZL0068
 
-**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body. The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
+**Body too slow.** The client took longer than `ServerConfig::body_read_timeout` (30s by default) to send a buffered request body, or a streaming body (`BodyStream`, `Multipart`) sent no data for `ServerConfig::body_idle_timeout` (30s by default). The client gets 408 and the connection is closed, so slow senders cannot hold connections open.
 
 ```text
-Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); or stream large uploads with BodyStream or Multipart
+Raise the timeout: app.server_config_mut().body_read_timeout = Some(Duration::from_secs(120)); for streaming uploads, body_idle_timeout instead
 ```
 
 ### ZL0070

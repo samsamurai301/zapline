@@ -654,3 +654,106 @@ async fn body_read_timeout_can_be_disabled() {
     s.read_to_string(&mut out).await.unwrap();
     assert!(out.ends_with("abcd"), "{out}");
 }
+
+/// Counts a streamed body's bytes.
+async fn count(mut body: zapline::stream::BodyStream) -> Result<String> {
+    let mut n = 0;
+    while let Some(chunk) = body.chunk().await? {
+        n += chunk.len();
+    }
+    Ok(format!("{n} bytes"))
+}
+
+fn idle_app(idle: Option<Duration>) -> App {
+    let mut app = quiet(App::new().post("/", count));
+    app.server_config_mut().body_idle_timeout = idle;
+    app
+}
+
+/// A streaming upload that stalls between chunks gets `408` and is closed.
+#[tokio::test]
+async fn stalled_streaming_bodies_time_out_with_408() {
+    let server = TestServer::spawn(idle_app(Some(Duration::from_millis(300)))).await;
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\nabc")
+        .await
+        .unwrap();
+    let start = Instant::now();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+        .await
+        .expect("the connection was not closed")
+        .unwrap();
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+    assert!(
+        out.to_ascii_lowercase().contains("connection: close"),
+        "{out}"
+    );
+    assert!(start.elapsed() >= Duration::from_millis(250));
+}
+
+/// The limit is on gaps, not the whole upload: a body that keeps coming
+/// finishes even when it takes far longer than the idle timeout.
+#[tokio::test]
+async fn slow_but_steady_streaming_bodies_finish() {
+    let server = TestServer::spawn(idle_app(Some(Duration::from_millis(300)))).await;
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 8\r\nConnection: close\r\n\r\n")
+        .await
+        .unwrap();
+    // 8 bytes over ~1.2 s: four times the timeout in total, never idle that long.
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        s.write_all(b"x").await.unwrap();
+    }
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    assert!(out.starts_with("HTTP/1.1 200"), "{out}");
+    assert!(out.ends_with("8 bytes"), "{out}");
+}
+
+/// `body_idle_timeout: None` lets a streaming body pause as long as it likes.
+#[tokio::test]
+async fn body_idle_timeout_can_be_disabled() {
+    let server = TestServer::spawn(idle_app(None)).await;
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(b"POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\nConnection: close\r\n\r\nab")
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    s.write_all(b"cd").await.unwrap();
+    let mut out = String::new();
+    s.read_to_string(&mut out).await.unwrap();
+    assert!(out.ends_with("4 bytes"), "{out}");
+}
+
+/// Multipart uploads stream through the same timer.
+#[cfg(feature = "multipart")]
+#[tokio::test]
+async fn stalled_multipart_uploads_time_out_with_408() {
+    use zapline::multipart::Multipart;
+    async fn upload(mut form: Multipart) -> Result<String> {
+        while let Some(field) = form.next_field().await? {
+            field.bytes().await?;
+        }
+        Ok("done".into())
+    }
+    let mut app = quiet(App::new().post("/", upload));
+    app.server_config_mut().body_idle_timeout = Some(Duration::from_millis(300));
+    let server = TestServer::spawn(app).await;
+    let mut s = TcpStream::connect(server.addr).await.unwrap();
+    s.write_all(
+        b"POST / HTTP/1.1\r\nHost: x\r\nContent-Type: multipart/form-data; boundary=b\r\n\
+          Content-Length: 200\r\n\r\n--b\r\nContent-Disposition: form-data; name=\"f\"\r\n\r\nab",
+    )
+    .await
+    .unwrap();
+    let mut out = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), s.read_to_end(&mut out))
+        .await
+        .expect("the connection was not closed")
+        .unwrap();
+    let out = String::from_utf8_lossy(&out);
+    assert!(out.starts_with("HTTP/1.1 408"), "{out}");
+}
