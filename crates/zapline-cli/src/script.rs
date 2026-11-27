@@ -1088,29 +1088,26 @@ mod tests {
 
     #[test]
     fn cache_dir_follows_xdg_then_home() {
-        let env = |pairs: &'static [(&'static str, &'static str)]| {
+        fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
             move |k: &str| {
                 pairs
                     .iter()
                     .find(|(name, _)| *name == k)
                     .map(|(_, v)| OsString::from(*v))
             }
-        };
+        }
         // An absolute path on this platform (`/x` has no drive on Windows).
-        let xdg: &'static str = if cfg!(windows) { "C:\\x" } else { "/x" };
-        let pairs: &'static [(&str, &str)] =
-            Box::leak(vec![("XDG_CACHE_HOME", xdg), ("HOME", "/h")].into_boxed_slice());
+        let xdg = if cfg!(windows) { "C:\\x" } else { "/x" };
         assert_eq!(
-            cache_dir_from(env(pairs)).unwrap(),
+            cache_dir_from(env(&[("XDG_CACHE_HOME", xdg), ("HOME", "/h")])).unwrap(),
             PathBuf::from(xdg).join("zapline")
         );
         // Empty and relative XDG values are ignored.
         for xdg in ["", "relative/dir"] {
-            let pairs: &'static [(&str, &str)] =
-                Box::leak(vec![("XDG_CACHE_HOME", xdg), ("HOME", "/h")].into_boxed_slice());
+            let pairs = [("XDG_CACHE_HOME", xdg), ("HOME", "/h")];
             if !cfg!(windows) {
                 assert_eq!(
-                    cache_dir_from(env(pairs)).unwrap(),
+                    cache_dir_from(env(&pairs)).unwrap(),
                     PathBuf::from("/h/.cache/zapline")
                 );
             }

@@ -281,7 +281,8 @@ Click through your app once and keep what happened as a regression test. In a de
 1. **Record.** Start the app with `zapline dev --record` (it sets `ZAPLINE_RECORD=1`), or press **Start recording** at `/_dev`. Then use the app: a browser, curl, your frontend.
 2. **Save.** Run `zapline snap signup`, or name the snapshot in the console and press **Save as snapshot test**. You get `tests/snapshots/signup.json` and, the first time, `tests/snapshots.rs`:
 
-   ```rust
+   ```rust,ignore
+   // `my_app` is your crate: this is the file `zapline snap` writes into it.
    #[tokio::test]
    async fn recorded_traffic() {
        my_app::app()

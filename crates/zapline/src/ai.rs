@@ -8,6 +8,7 @@
 //! to the browser as server-sent events.
 //!
 //! ```no_run
+//! use serde::Deserialize;
 //! use zapline::ai::Llm;
 //! use zapline::prelude::*;
 //!
@@ -21,14 +22,20 @@
 //!     Ok(reply.text)
 //! }
 //!
-//! async fn ask(llm: Llm, question: String) -> Result<impl IntoResponse> {
-//!     Ok(llm.chat().user(question).stream().await?.into_sse())
+//! #[derive(Deserialize)]
+//! struct Ask {
+//!     q: String,
+//! }
+//!
+//! // A GET, so the browser's `EventSource` can open it.
+//! async fn ask(llm: Llm, Query(ask): Query<Ask>) -> Result<impl IntoResponse> {
+//!     Ok(llm.chat().user(ask.q).stream().await?.into_sse())
 //! }
 //!
 //! let app = App::new()
 //!     .state(Llm::from_env().expect("ANTHROPIC_API_KEY"))
 //!     .post("/summarize", summarize)
-//!     .post("/ask", ask);
+//!     .get("/ask", ask);
 //! ```
 //!
 //! Errors are [`Error`]s a handler can return: `502` (code `llm_error`, or
@@ -48,7 +55,7 @@ use crate::extract::FromRequestParts;
 use crate::outbound::{HttpClient, HttpResponse};
 use crate::request::Request;
 use crate::response::{IntoResponse, Response};
-use crate::sse::{Event, Sse};
+use crate::sse::{Event, KeepAlive, Sse};
 use crate::{Error, Result};
 
 mod mcp;
@@ -263,20 +270,29 @@ impl Llm {
     /// Use `http` for the calls, for example one that may reach a model
     /// server on your private network
     /// ([`allow_private_networks`](HttpClient::allow_private_networks)).
+    /// Its own settings apply, timeout included: `HttpClient::new()` waits
+    /// 30 s, where `Llm`'s own client waits 10 minutes for long
+    /// generations, so set one that fits.
     ///
     /// ```
+    /// use std::time::Duration;
     /// use zapline::ai::Llm;
     /// use zapline::outbound::HttpClient;
-    /// let local = Llm::openai_compatible("http://10.0.0.5:8000/v1", "", "qwen")
-    ///     .http_client(HttpClient::new().allow_private_networks(true));
+    /// let local = Llm::openai_compatible("http://10.0.0.5:8000/v1", "", "qwen").http_client(
+    ///     HttpClient::new()
+    ///         .allow_private_networks(true)
+    ///         .timeout(Duration::from_secs(600)),
+    /// );
     /// ```
     #[must_use]
     pub fn http_client(self, http: HttpClient) -> Self {
         self.with(|i| i.http = http.retries(0))
     }
 
-    /// The longest reply, in tokens (default 16 000, or 64 000 when
-    /// streaming). Requests can override it.
+    /// The longest reply, in tokens. Requests can override it. Claude
+    /// needs one, so it defaults to 16 000 (64 000 when streaming); an
+    /// OpenAI-compatible server gets none unless set, and uses its own
+    /// (a small local model's context may be shorter than those defaults).
     ///
     /// ```
     /// use zapline::ai::Llm;
@@ -427,9 +443,6 @@ impl Chat {
 
     fn body(&self, stream: bool, tools: Option<&Tools>) -> Value {
         let inner = &self.llm.inner;
-        let max_tokens = self
-            .max_tokens
-            .unwrap_or(if stream { 64_000 } else { 16_000 });
         let role = |r: Role| match r {
             Role::User => "user",
             Role::Assistant => "assistant",
@@ -440,6 +453,9 @@ impl Chat {
         };
         match inner.provider {
             Provider::Anthropic => {
+                let max_tokens = self
+                    .max_tokens
+                    .unwrap_or(if stream { 64_000 } else { 16_000 });
                 let messages: Vec<Value> = self.messages.iter().map(message).collect();
                 let mut body = json!({
                     "model": inner.model,
@@ -471,9 +487,19 @@ impl Chat {
                 messages.extend(self.messages.iter().map(message));
                 let mut body = json!({
                     "model": inner.model,
-                    "max_tokens": max_tokens,
                     "messages": messages,
                 });
+                if let Some(n) = self.max_tokens {
+                    // OpenAI's own API takes `max_completion_tokens` (its
+                    // reasoning models refuse `max_tokens`); compatible
+                    // servers know `max_tokens`.
+                    let field = if is_openai_api(&inner.base_url) {
+                        "max_completion_tokens"
+                    } else {
+                        "max_tokens"
+                    };
+                    body[field] = json!(n);
+                }
                 if stream {
                     body["stream"] = json!(true);
                     body["stream_options"] = json!({"include_usage": true});
@@ -558,10 +584,10 @@ impl Chat {
         let provider = self.llm.inner.provider;
         let res = self.post(false).await?;
         let body: Value = res.json().await?;
-        Ok(match provider {
+        match provider {
             Provider::Anthropic => Reply::from_anthropic(&body),
             Provider::OpenAi => Reply::from_openai(&body),
-        })
+        }
     }
 
     /// Send the request and stream the reply as it is generated.
@@ -579,10 +605,30 @@ impl Chat {
             pending: VecDeque::new(),
             usage: Usage::default(),
             stop: None,
+            refused: false,
             done: false,
+            ended: false,
             failed: None,
         })
     }
+}
+
+/// OpenAI's own API, as opposed to a compatible server.
+fn is_openai_api(base_url: &str) -> bool {
+    base_url
+        .parse::<http::Uri>()
+        .ok()
+        .and_then(|u| u.host().map(|h| h.eq_ignore_ascii_case("api.openai.com")))
+        .unwrap_or(false)
+}
+
+/// A reply without the fields every reply has.
+fn bad_shape(what: &str) -> Error {
+    Error::new(
+        StatusCode::BAD_GATEWAY,
+        format!("the language model's reply has no {what}"),
+    )
+    .with_code("llm_error")
 }
 
 async fn provider_error(status: StatusCode, res: HttpResponse) -> Error {
@@ -684,44 +730,58 @@ pub struct Reply {
 }
 
 impl Reply {
-    fn from_anthropic(v: &Value) -> Self {
+    fn from_anthropic(v: &Value) -> Result<Self> {
         let text = v["content"]
             .as_array()
-            .map(|blocks| {
-                blocks
-                    .iter()
-                    .filter(|b| b["type"] == "text")
-                    .filter_map(|b| b["text"].as_str())
-                    .collect::<String>()
-            })
-            .unwrap_or_default();
-        Reply {
+            .ok_or_else(|| bad_shape("`content`"))?
+            .iter()
+            .filter(|b| b["type"] == "text")
+            .filter_map(|b| b["text"].as_str())
+            .collect::<String>();
+        let stop = v["stop_reason"]
+            .as_str()
+            .ok_or_else(|| bad_shape("`stop_reason`"))?;
+        Ok(Reply {
             text,
-            stop: StopReason::from_anthropic(v["stop_reason"].as_str().unwrap_or("")),
+            stop: StopReason::from_anthropic(stop),
             usage: Usage {
                 input_tokens: v["usage"]["input_tokens"].as_u64().unwrap_or(0),
                 output_tokens: v["usage"]["output_tokens"].as_u64().unwrap_or(0),
             },
             model: v["model"].as_str().unwrap_or("").to_owned(),
             tool_calls: Vec::new(),
-        }
+        })
     }
 
-    fn from_openai(v: &Value) -> Self {
-        let choice = &v["choices"][0];
-        Reply {
-            text: choice["message"]["content"]
+    fn from_openai(v: &Value) -> Result<Self> {
+        let choice = v["choices"]
+            .as_array()
+            .and_then(|c| c.first())
+            .ok_or_else(|| bad_shape("`choices`"))?;
+        let message = choice
+            .get("message")
+            .filter(|m| m.is_object())
+            .ok_or_else(|| bad_shape("`message`"))?;
+        // A refusal comes as a `refusal` text with `finish_reason: "stop"`.
+        let refusal = message["refusal"].as_str().filter(|r| !r.is_empty());
+        let stop = match refusal {
+            Some(_) => StopReason::Refusal,
+            None => StopReason::from_openai(choice["finish_reason"].as_str().unwrap_or("")),
+        };
+        Ok(Reply {
+            text: message["content"]
                 .as_str()
+                .or(refusal)
                 .unwrap_or("")
                 .to_owned(),
-            stop: StopReason::from_openai(choice["finish_reason"].as_str().unwrap_or("")),
+            stop,
             usage: Usage {
                 input_tokens: v["usage"]["prompt_tokens"].as_u64().unwrap_or(0),
                 output_tokens: v["usage"]["completion_tokens"].as_u64().unwrap_or(0),
             },
             model: v["model"].as_str().unwrap_or("").to_owned(),
             tool_calls: Vec::new(),
-        }
+        })
     }
 }
 
@@ -733,7 +793,13 @@ pub struct TokenStream {
     pending: VecDeque<String>,
     usage: Usage,
     stop: Option<StopReason>,
+    /// The model refused (OpenAI's `delta.refusal`): wins over a later
+    /// `finish_reason: "stop"`.
+    refused: bool,
     done: bool,
+    /// The provider's end-of-reply marker arrived (`message_stop`,
+    /// `[DONE]`); without it, the end of the connection is a cut-off reply.
+    ended: bool,
     /// An error the provider reported mid-reply, raised once the text
     /// before it has been handed out.
     failed: Option<Error>,
@@ -774,6 +840,15 @@ impl TokenStream {
                 }
                 None => {
                     self.done = true;
+                    if !self.ended && self.failed.is_none() {
+                        self.failed = Some(
+                            Error::new(
+                                StatusCode::BAD_GATEWAY,
+                                "the language model's reply ended early",
+                            )
+                            .with_code("llm_error"),
+                        );
+                    }
                 }
             }
         }
@@ -792,20 +867,13 @@ impl TokenStream {
     /// Parse every complete SSE event in the buffer.
     fn drain_events(&mut self) {
         while !self.done {
-            let text = String::from_utf8_lossy(&self.buf);
-            let Some(end) = text.find("\n\n").or_else(|| text.find("\r\n\r\n")) else {
+            let Some((end, sep)) = event_end(&self.buf) else {
                 return;
             };
-            let sep = if text[end..].starts_with("\r\n\r\n") {
-                4
-            } else {
-                2
-            };
-            let event = text[..end].to_owned();
-            drop(text);
-            let _ = self.buf.split_to(end + sep);
+            let raw = self.buf.split_to(end + sep);
+            let event = String::from_utf8_lossy(&raw[..end]).into_owned();
             let data: String = event
-                .lines()
+                .split(['\r', '\n'])
                 .filter_map(|l| l.strip_prefix("data:"))
                 .map(str::trim_start)
                 .collect::<Vec<_>>()
@@ -815,6 +883,7 @@ impl TokenStream {
             }
             if data == "[DONE]" {
                 self.done = true;
+                self.ended = true;
                 return;
             }
             let Ok(v) = serde_json::from_str::<Value>(&data) else {
@@ -848,7 +917,10 @@ impl TokenStream {
                     self.usage.output_tokens = n;
                 }
             }
-            "message_stop" => self.done = true,
+            "message_stop" => {
+                self.done = true;
+                self.ended = true;
+            }
             "error" => {
                 self.done = true;
                 let msg = v["error"]["message"].as_str().unwrap_or("stream error");
@@ -865,13 +937,36 @@ impl TokenStream {
     }
 
     fn openai_event(&mut self, v: &Value) {
-        if let Some(t) = v["choices"][0]["delta"]["content"].as_str() {
+        // A server error inside the stream (no HTTP status to carry it).
+        if let Some(err) = v.get("error").filter(|e| !e.is_null()) {
+            self.done = true;
+            let msg = err["message"]
+                .as_str()
+                .or_else(|| err.as_str())
+                .unwrap_or("stream error");
+            self.failed = Some(
+                Error::new(
+                    StatusCode::BAD_GATEWAY,
+                    format!("the language model failed mid-reply: {msg}"),
+                )
+                .with_code("llm_error"),
+            );
+            return;
+        }
+        let delta = &v["choices"][0]["delta"];
+        if let Some(t) = delta["content"].as_str() {
             if !t.is_empty() {
                 self.pending.push_back(t.to_owned());
             }
         }
+        if delta["refusal"].as_str().is_some_and(|r| !r.is_empty()) {
+            self.refused = true;
+            self.stop = Some(StopReason::Refusal);
+        }
         if let Some(s) = v["choices"][0]["finish_reason"].as_str() {
-            self.stop = Some(StopReason::from_openai(s));
+            if !self.refused {
+                self.stop = Some(StopReason::from_openai(s));
+            }
         }
         if let Some(u) = v.get("usage").filter(|u| u.is_object()) {
             self.usage.input_tokens = u["prompt_tokens"].as_u64().unwrap_or(0);
@@ -882,12 +977,18 @@ impl TokenStream {
     /// Relay the reply to the browser as server-sent events: one `token`
     /// event per piece of text (`data` is the text), then a `done` event
     /// with `{"stop": ..., "input_tokens": ..., "output_tokens": ...}`, or an
-    /// `error` event with `{"error": ...}`.
+    /// `error` event with `{"error": ..., "code": ...}` (the full error is
+    /// logged; a `5xx` sends a generic message). A comment every 15 s keeps
+    /// proxies from closing the stream while the model thinks.
+    ///
+    /// `EventSource` reconnects (and so asks the model again) whenever the
+    /// stream ends, so close it on `done` and on `error`:
     ///
     /// ```js
-    /// const events = new EventSource("/ask?q=...");
+    /// const events = new EventSource("/ask?q=" + encodeURIComponent(question));
     /// events.addEventListener("token", (e) => (out.textContent += e.data));
     /// events.addEventListener("done", () => events.close());
+    /// events.addEventListener("error", () => events.close());
     /// ```
     pub fn into_sse(self) -> Response {
         let stream = futures_util::stream::unfold(Some(self), |state| async move {
@@ -916,18 +1017,41 @@ impl TokenStream {
                     Some((done, None))
                 }
                 Err(e) => {
-                    let err = Event::default()
-                        .event("error")
-                        .data(json!({"error": e.to_string()}).to_string());
+                    let message = if e.status().is_server_error() {
+                        crate::tasks::log_error(format_args!(
+                            "language model stream failed: {e} ({e:?})"
+                        ));
+                        "the answer could not be completed"
+                    } else {
+                        e.message()
+                    };
+                    let err = Event::default().event("error").data(
+                        json!({"error": message, "code": e.code().unwrap_or("llm_error")})
+                            .to_string(),
+                    );
                     Some((err, None))
                 }
             }
         });
-        let mut res = Sse::new(stream).into_response();
+        let mut res = Sse::new(stream)
+            .keep_alive(KeepAlive::new())
+            .into_response();
         res.headers_mut()
             .insert("x-llm-stream", HeaderValue::from_static("1"));
         res
     }
+}
+
+/// Where the first complete SSE event in `buf` ends, and the length of the
+/// blank line after it: events end at the earliest of `\n\n`, `\r\r` or
+/// `\r\n\r\n` (all three line endings are allowed).
+fn event_end(buf: &[u8]) -> Option<(usize, usize)> {
+    let find = |pat: &[u8]| buf.windows(pat.len()).position(|w| w == pat);
+    [&b"\r\n\r\n"[..], b"\n\n", b"\r\r"]
+        .into_iter()
+        .filter_map(|pat| find(pat).map(|at| (at, pat.len())))
+        // The earliest; at a tie, the longer separator (`\r\n\r\n`).
+        .min_by_key(|&(at, len)| (at, std::cmp::Reverse(len)))
 }
 
 /// A `token` event; SSE data can't hold raw newlines, so each line of the
@@ -977,6 +1101,48 @@ mod tests {
         );
         assert_eq!(body["messages"][1], json!({"role": "user", "content": "u"}));
         assert_eq!(body["stream_options"]["include_usage"], true);
+    }
+
+    #[test]
+    fn events_end_at_any_blank_line() {
+        assert_eq!(event_end(b"data: a\n\ndata: b"), Some((7, 2)));
+        assert_eq!(event_end(b"data: a\r\n\r\n"), Some((7, 4)));
+        assert_eq!(event_end(b"data: a\r\rdata: b"), Some((7, 2)));
+        // A CRLF event is not cut at its first `\n`, and an LF one after a
+        // CRLF one is found too.
+        assert_eq!(event_end(b"data: a\r\n"), None);
+        assert_eq!(event_end(b"data: a\r\ndata: b\n\n"), Some((16, 2)));
+    }
+
+    #[test]
+    fn openai_token_limits_and_shapes() {
+        let local = Llm::openai_compatible("http://x/v1", "", "m");
+        assert!(local
+            .chat()
+            .user("u")
+            .body(false, None)
+            .get("max_tokens")
+            .is_none());
+        let set = local
+            .clone()
+            .max_tokens(100)
+            .chat()
+            .user("u")
+            .body(false, None);
+        assert_eq!(set["max_tokens"], 100);
+        let openai = Llm::openai_compatible("https://api.openai.com/v1", "k", "o3").max_tokens(100);
+        let body = openai.chat().user("u").body(false, None);
+        assert_eq!(body["max_completion_tokens"], 100);
+        assert!(body.get("max_tokens").is_none());
+
+        assert!(Reply::from_openai(&json!({"choices": []})).is_err());
+        let refused = Reply::from_openai(&json!({"choices": [{
+            "message": {"content": null, "refusal": "I can't help with that."},
+            "finish_reason": "stop"
+        }]}))
+        .unwrap();
+        assert_eq!(refused.stop, StopReason::Refusal);
+        assert!(Reply::from_anthropic(&json!({"type": "error"})).is_err());
     }
 
     #[test]

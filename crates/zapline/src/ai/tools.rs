@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{Chat, Msg, Provider, Reply, Usage};
+use super::{Chat, Msg, Provider, Reply, StopReason, Usage};
 use crate::extract::FromRequestParts;
 use crate::handler::BoxFuture;
 use crate::request::{Request, Shared};
@@ -49,6 +49,8 @@ struct Tool {
 #[derive(Clone, Default)]
 pub struct Tools {
     tools: Vec<Arc<Tool>>,
+    /// Extra hosts web pages may reach the MCP endpoint on.
+    pub(crate) mcp_hosts: Vec<String>,
 }
 
 impl fmt::Debug for Tools {
@@ -129,6 +131,27 @@ impl Tools {
         self
     }
 
+    /// Hosts (`Host` header values, port optional) a web page may call
+    /// these tools' MCP endpoint on, besides `localhost`, `127.0.0.1` and
+    /// `[::1]`. A browser request for any other host is refused, so a page
+    /// can't reach a local server through DNS rebinding. Clients that
+    /// aren't browsers (no `Origin` header) are not affected.
+    ///
+    /// ```
+    /// use zapline::ai::Tools;
+    /// let tools = Tools::new().mcp_allowed_hosts(["app.example.com"]);
+    /// ```
+    #[must_use]
+    pub fn mcp_allowed_hosts<I, S>(mut self, hosts: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.mcp_hosts
+            .extend(hosts.into_iter().map(|h| h.into().to_ascii_lowercase()));
+        self
+    }
+
     /// The tools' names, in the order added.
     pub fn names(&self) -> Vec<&str> {
         self.tools.iter().map(|t| t.name.as_str()).collect()
@@ -194,11 +217,14 @@ impl Tools {
 }
 
 /// What a tool can reach besides its arguments: the app's state (the same
-/// values `App::state` registered and handlers get). As a handler argument
-/// it carries this request's app; [`ToolContext::none`] carries nothing.
+/// values `App::state` registered and handlers get), and the request's
+/// extensions, where authentication middleware puts the caller. As a
+/// handler argument it carries this request's; [`ToolContext::none`]
+/// carries nothing.
 #[derive(Clone, Default)]
 pub struct ToolContext {
     shared: Option<Arc<Shared>>,
+    extensions: http::Extensions,
 }
 
 impl fmt::Debug for ToolContext {
@@ -234,9 +260,24 @@ impl ToolContext {
         })
     }
 
+    /// A value from the request's extensions, such as the user your
+    /// authentication middleware stored, so a tool acts as its caller.
+    ///
+    /// ```
+    /// use zapline::ai::ToolContext;
+    /// #[derive(Clone)]
+    /// struct UserId(i64);
+    /// let cx = ToolContext::none();
+    /// assert!(cx.extension::<UserId>().is_none());
+    /// ```
+    pub fn extension<T: Clone + Send + Sync + 'static>(&self) -> Option<&T> {
+        self.extensions.get::<T>()
+    }
+
     pub(crate) fn from_request(req: &Request) -> Self {
         ToolContext {
             shared: Some(req.shared.clone()),
+            extensions: req.extensions().clone(),
         }
     }
 }
@@ -293,7 +334,7 @@ impl Chat {
         let provider = self.llm.inner.provider;
         let mut calls: Vec<ToolCall> = Vec::new();
         let mut usage = Usage::default();
-        for _ in 0..MAX_ROUNDS {
+        for round in 0..MAX_ROUNDS {
             let body = self.body(false, Some(tools));
             let res = self.post_body(&body).await?;
             let v: Value = res.json().await?;
@@ -302,17 +343,31 @@ impl Chat {
                 Provider::OpenAi => openai_calls(&v),
             };
             let mut reply = match provider {
-                Provider::Anthropic => Reply::from_anthropic(&v),
-                Provider::OpenAi => Reply::from_openai(&v),
+                Provider::Anthropic => Reply::from_anthropic(&v)?,
+                Provider::OpenAi => Reply::from_openai(&v)?,
             };
             usage.input_tokens += reply.usage.input_tokens;
             usage.output_tokens += reply.usage.output_tokens;
-            if requested.is_empty() {
+            // Tools run only when the model asked for them and finished its
+            // turn: a turn cut off at `max_tokens` (its last call may be
+            // half written) or refused comes back as it is.
+            let wants_tools = !requested.is_empty()
+                && !matches!(reply.stop, StopReason::MaxTokens | StopReason::Refusal);
+            if !wants_tools {
+                if reply.stop == StopReason::ToolUse {
+                    return Err(Error::new(
+                        http::StatusCode::BAD_GATEWAY,
+                        "the model stopped to call a tool but named none",
+                    )
+                    .with_code("llm_error"));
+                }
                 reply.usage = usage;
                 reply.tool_calls = calls;
                 return Ok(reply);
             }
-            if calls.len() + requested.len() > MAX_CALLS {
+            // No model turn would see these results: stop before running
+            // tools whose work would be thrown away.
+            if round + 1 == MAX_ROUNDS || calls.len() + requested.len() > MAX_CALLS {
                 break;
             }
             // The model's turn goes back unchanged (thinking blocks included).
@@ -330,8 +385,11 @@ impl Chat {
                         "type": "tool_result", "tool_use_id": id,
                         "content": output, "is_error": is_error,
                     })),
+                    // OpenAI's tool messages have no error flag: say so in
+                    // the text, so the model doesn't take it for data.
                     Provider::OpenAi => self.messages.push(Msg::Raw(json!({
-                        "role": "tool", "tool_call_id": id, "content": output,
+                        "role": "tool", "tool_call_id": id,
+                        "content": if is_error { format!("Error: {output}") } else { output.clone() },
                     }))),
                 }
                 calls.push(ToolCall {

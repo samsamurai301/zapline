@@ -2074,7 +2074,8 @@ Click through your app once and keep what happened as a regression test. In a de
 1. **Record.** Start the app with `zapline dev --record` (it sets `ZAPLINE_RECORD=1`), or press **Start recording** at `/_dev`. Then use the app: a browser, curl, your frontend.
 2. **Save.** Run `zapline snap signup`, or name the snapshot in the console and press **Save as snapshot test**. You get `tests/snapshots/signup.json` and, the first time, `tests/snapshots.rs`:
 
-   ```rust
+   ```rust,ignore
+   // `my_app` is your crate: this is the file `zapline snap` writes into it.
    #[tokio::test]
    async fn recorded_traffic() {
        my_app::app()
@@ -4054,7 +4055,7 @@ A handler that takes `HttpClient` gets the one registered with `.state(..)`, or 
 
 | Setting | Default | Change with |
 |---|---|---|
-| Timeout, until headers and again for the body (or between chunks when streaming) | 30 s | `.timeout(d)`, per request too |
+| Timeout per attempt, until headers and again for the body (or between chunks when streaming); each retry gets it again | 30 s | `.timeout(d)`, per request too |
 | Connecting | 10 s | `.connect_timeout(d)` |
 | Retries for `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` after a failed connection, a timeout, `429`, `502`, `503` or `504` | 2, with backoff (100 ms, 200 ms, ... ± 25%), or what `Retry-After` asks for (up to 10 s) | `.retries(n)` |
 | Largest buffered body (`json`, `text`, `bytes`) | 16 MiB | `.max_response_size(n)` |
@@ -4071,7 +4072,7 @@ Every failure is an `Error` that a handler can return with `?`:
 | The address is refused (see below) | `400`, code `upstream_blocked` |
 | Not an absolute `http://` or `https://` URL | `400`, code `upstream_invalid_url` |
 | No connection | `502`, code `upstream_unreachable` |
-| `error_for_status()` on a non-2xx answer | `502`, code `upstream_status` (the message has the status and the start of the body) |
+| `error_for_status()` on a non-2xx answer | `502`, code `upstream_status`. The message names the host and status only; the URL (without its query) and the start of the body are in the error's source, for your logs |
 | Body larger than the limit | `502`, code `upstream_too_large` |
 | `json()` on a body that doesn't match | `502`, code `upstream_invalid_json` |
 | Timeout | `504`, code `upstream_timeout` |
@@ -4260,7 +4261,7 @@ async fn billing(Signed(event): Signed<Event>) -> StatusCode {
 fn app() -> App {
     App::new()
         .post("/webhooks/stripe", billing)
-        .meta(Webhook::stripe(std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()))
+        .meta(Webhook::stripe(std::env::var("STRIPE_WEBHOOK_SECRET").expect("STRIPE_WEBHOOK_SECRET")))
 }
 ```
 
@@ -4277,8 +4278,10 @@ fn app() -> App {
   - a body that isn't the expected JSON: `422`.
 - **Replays:** signed timestamps more than 5 minutes from now are refused (`401`, `webhook_timestamp_stale`), so a captured request can't be sent again later. Change the window with `.tolerance(..)`. GitHub signs no timestamp; skip repeats by their `X-GitHub-Delivery` id.
 - **Rotating secrets:** `.also(old_secret)` accepts both the old and the new secret during the switch.
+- **Empty or invalid secrets are refused at startup:** `Webhook::github("")`, `Webhook::stripe("")` and an invalid `.also(..)` panic, since an empty key would let anyone sign. Read the secret with `expect`, not `unwrap_or_default`.
+- **Malformed signatures:** a header with no well-formed signature, or more than 8, is `400 webhook_signature_missing`, so junk entries can't make a request expensive to check.
 - **Verifying it yourself:** `webhook.verify(headers, body)` gives the same check on raw bytes.
-- **Exempt it from cross-site checks.** A provider's server sends no browser `Origin`, so add the path to the exemptions: `SameOrigin::new().exempt(["/webhooks/"])` and `Csrf::new().exempt("/webhooks/*")`.
+- **Exempt it from cross-site checks.** A provider's server sends no browser `Origin`, so exempt the signed endpoint, and only it: `SameOrigin::new().exempt(["/webhooks/stripe"])` and `Csrf::new().exempt("/webhooks/stripe")`. A whole `/webhooks/` prefix would also exempt any unsigned route added under it later.
 
 ## Sending
 
@@ -4298,7 +4301,7 @@ async fn notify(url: &str, secret: &str) -> Result<()> {
 }
 ```
 
-- **Secrets:** give each subscriber their own secret from `WebhookSender::generate_secret()` (`whsec_` and 32 random bytes). Store it, and show it to them once.
+- **Secrets:** give each subscriber their own secret from `WebhookSender::generate_secret()?` (`whsec_` and 32 random bytes; an error, never a weaker secret, when the OS has no secure randomness). Store it, and show it to them once.
 - **Retries:** a connection failure, timeout, `408`, `429` or `5xx` is retried 3 times, waiting 1 s, 2 s, then 4 s (`.retries(n)`, `.backoff(d)`). Every attempt carries the same `webhook-id`, so receivers can drop duplicates. Each attempt is signed with the current time, so a late retry isn't refused as stale.
 - **No retry:** another `4xx` (the receiver refused it) isn't retried. When every attempt fails, `send` returns `502` (code `webhook_delivery_failed`) with the last answer.
 - **Durable delivery:** `send` retries for seconds, within one request or job. For delivery that survives restarts, call it from a [durable job](jobs.md), which retries with backoff of its own.
@@ -5797,9 +5800,9 @@ Send people to `/auth/github` (optionally `?next=/settings`) to start. That rout
 With the `two-factor` feature, users can add an authenticator app (Google Authenticator, 1Password, Authy, ...) as a second step after their password. `zapline::auth::totp::Totp` makes and checks the six-digit codes (RFC 6238), and `zapline::auth::recovery_codes` covers users who lose their phone.
 
 **Turning it on for a user:**
-1. Make a secret with `Totp::generate()`, and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
+1. Make a secret with `Totp::generate()?` (an error, never a weak secret, when the OS has no secure randomness), and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
 2. Ask for one code and check it, to be sure their app is set up.
-3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)`. Show the codes themselves once.
+3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)?` (ten distinct codes). Show the codes themselves once.
 
 **Signing in**, after the password:
 
@@ -5859,7 +5862,8 @@ async fn open_link(links: MagicLinks, Path(token): Path<String>) -> Result<Strin
 }
 ```
 
-- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, that's the last sign-in time; for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, use a per-user counter you increment on every sign-in (a timestamp in whole seconds may not change between two quick sign-ins); for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Consume the link before signing in.** `verify` only checks the token. Two requests opening the same link at once both pass it, so claim it with a conditional update, such as `UPDATE users SET login_count = login_count + 1 WHERE id = $1 AND login_count = $2`, and start the session only when that changed a row. `zapline g auth` does this.
 - **What's in a token:** the user and purpose are signed, so a sign-in link can't be used to confirm an email, and a token can't be edited to name another user. The signature is checked in constant time.
 - **Errors:** an expired link gets `400`, code `link_expired`, so the page can offer to send a new one. Anything else (tampered, wrong purpose, used, unknown user) gets `400`, code `link_invalid`.
 
@@ -7051,7 +7055,17 @@ use zapline::prelude::*;
 fn app() -> App {
     let payments = Routes::new()
         .post("/payments", || async { (StatusCode::CREATED, "charged") })
-        .wrap(Idempotency::new().required());     // clients must send a key
+        .wrap(
+            Idempotency::new()
+                .required()                       // clients must send a key
+                // Whose key it is: here an account header your auth layer
+                // (wrapped outside) has checked. Without `.scope(..)`, it's
+                // the `Authorization` header, and requests with neither skip
+                // idempotency.
+                .scope(|req| {
+                    req.headers().get("x-account")?.to_str().ok().map(str::to_owned)
+                }),
+        );
 
     App::new().nest("/api", payments)
 }
@@ -7072,19 +7086,19 @@ It follows the IETF `Idempotency-Key` header draft and applies only to `POST` an
 
 Things to know:
 
-- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request.
+- **Keys belong to a client.** By default a key is scoped to the request's `Authorization` header, so two API clients can't see each other's responses even if they pick the same key. Requests with no `Authorization` header skip idempotency, because there's nothing to tell their clients apart. Apps with cookie sessions should scope by user: `.scope(|req| ..)` returns who the key belongs to, or `None` to skip idempotency for that request. The scope is only as trustworthy as what it's read from: check the `Authorization` header (authentication wrapped outside `Idempotency`) or scope by an authenticated identity, or a client sending a new bogus header per request can fill the memory store.
 - **Only final answers are stored.** A `2xx`, or a `4xx` like "card declined", is stored, so a retry gets the same answer. These aren't stored, so the client's retry runs the handler again:
   - `5xx` responses;
   - answers that may change: `401`, `403`, `404` and `405`;
   - answers that ask for a retry: `408`, `409`, `425` and `429`;
-  - streamed bodies and bodies over 1 MiB.
+  - streamed bodies, and responses over 1 MiB (body and headers).
 
   `Set-Cookie` headers reach the first response only and are never replayed, so a replay can't hand a session to whoever sends the key again. Apps that refresh a session cookie on every response still get idempotency.
-- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed.
-- **Uploads pass through.** `multipart/*` requests skip idempotency. Fingerprinting buffers the request body, which would undo streaming and the larger body limits of upload routes. So do bodies whose `Content-Length` is over the app's body limit, which a `BodyStream` route may read under its own larger limit. Other bodies are buffered within the app's body limit.
-- **Slow handlers keep their key.** While a handler runs, its lock is renewed every third of `.lock_timeout(..)`. If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
-- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
-- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. When the store is full, the oldest stored responses are dropped. A client whose whole share is requests still running gets `429` (code `idempotency_keys_exhausted`) for new keys, and other clients are unaffected. Use Redis where a second run costs money.
+- **Replays skip what runs inside.** A replay is answered before the handler, and before any middleware inside `Idempotency`, so their auth checks don't run again. The client gets back what it already received. To stop replays as soon as a credential is revoked, wrap authentication *outside* `Idempotency`. Put `Compression` outside too, so stored bodies stay uncompressed, and `SetRequestId` and `Cors`, so a retry gets its own request id and its own origin's CORS headers instead of the first request's.
+- **Large uploads pass through.** Fingerprinting buffers the request body within the app's body limit. Bodies whose `Content-Length` is over that limit skip idempotency, since a `BodyStream` route may read them under its own larger limit (and a route without one rejects them unread). A chunked upload with no `Content-Length` is buffered like any body, so leave routes taking large chunked uploads out of `Idempotency` (`Routes::wrap` on the routes that need it).
+- **Slow handlers keep their key.** While a handler runs, and until its response is stored, its lock is renewed every third of `.lock_timeout(..)` (at least 30 ms). If the handler panics or the client disconnects, the key is released. If the whole instance dies, the lock expires after `.lock_timeout(..)` (default 5 minutes).
+- **Several instances:** `.redis(redis)` keeps keys and responses in Redis, so a retry that lands on another instance is still answered once. When Redis is down, or takes over 5 seconds to answer, keyed requests get `503` (code `idempotency_unavailable`) rather than risking a second run. Unlike `RateLimit`, it fails closed. If a response can't be stored after the handler ran (Redis failed twice in a row), it's logged, and a retry after the lock timeout runs the handler again.
+- **Memory mode is best effort.** At most `.max_keys(n)` keys are kept (default 10 000), and one client can hold a tenth of them, so it can't push out the others' stored responses. Stored responses use at most `.max_memory(bytes)` (default 64 MiB), again a tenth per client. When the store is full, the oldest stored responses are dropped. A client whose whole share is requests still running gets `429` (code `idempotency_keys_exhausted`) for new keys, and other clients are unaffected. Use Redis where a second run costs money.
 
 ## Captcha
 
@@ -9769,7 +9783,7 @@ The **default** features are `macros`, `json`, `query`, `form`, `openapi`, `vali
 | `compression` | `full` | `middleware::Compression` and `CompressionLevel` ([Hardening](hardening.md#compression)) | | `async-compression` (gzip, brotli, zstd, deflate, zlib), `tokio-util` |
 | `jwt` | `full` | JSON Web Tokens: `JwtConfig`, `Claims`, `Jwt<C>`, `JwtAuthenticator`, `Authenticate::jwt()` and `App::jwt`; key rings with `JwtKey` (rotate, retire) and `App::serve_jwks` ([Authentication](auth.md#jwt)) | `json` | `jsonwebtoken` (aws-lc backend, PEM keys) |
 | `jwks` | `full` | `Jwks`: verify tokens with an identity provider's JWK Set, cached with a TTL, refreshed on unknown `kid` (rate limited), stale keys kept on errors, OpenID discovery ([JWKS](auth.md#tokens-from-an-identity-provider-jwks)) | `jwt` | `hyper-rustls` (hyper client, rustls) |
-| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) and `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
+| `cookies` | `full` | `zapline::cookies` (`CookieJar`, signed and private jars, `Key`), `zapline::session` (`SessionLayer`, `Session`) `auth::{Csrf, CsrfToken}` ([Cookies, sessions & CSRF](sessions.md)) and `auth::magic_link::MagicLinks` ([Magic links](auth.md#magic-links)) | `json` | `cookie` (`percent-encode`, `signed`, `private`), `getrandom`, `hmac`, `sha2` (signed CSRF tokens) |
 | `views` | `full` | `zapline::view`: `Views`, `App::views`, `HxRequest`, `Hx` ([Views & htmx](views.md)) | | `minijinja` (`loader`) |
 | `password` | `full` | `zapline::auth::password`: Argon2id `hash` and `verify` ([Authentication](auth.md#passwords)) | | `argon2`, `getrandom` |
 | `two-factor` | `full` | `zapline::auth::totp` (TOTP codes, RFC 6238, with replay protection) and `zapline::auth::recovery_codes` ([Two-factor login](auth.md#two-factor-login-totp-and-recovery-codes)) | | `hmac`, `sha1`, `sha2`, `getrandom` |

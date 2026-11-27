@@ -11,7 +11,7 @@
 //! ```
 //! use zapline::auth::totp::Totp;
 //!
-//! let totp = Totp::generate();
+//! let totp = Totp::generate()?;
 //! let uri = totp.otpauth_uri("Shop", "ada@example.com");
 //! assert!(uri.starts_with("otpauth://totp/Shop:ada%40example.com?secret="));
 //!
@@ -21,6 +21,7 @@
 //! let step = totp.verify(&code, last).expect("a fresh code is accepted");
 //! // Store `step` as the user's last step: the same code is now refused.
 //! assert!(totp.verify(&code, Some(step)).is_none());
+//! # Ok::<(), zapline::Error>(())
 //! ```
 
 use std::fmt;
@@ -50,19 +51,21 @@ impl fmt::Debug for Totp {
 impl Totp {
     /// A new random 160-bit secret (as RFC 4226 recommends).
     ///
+    /// # Errors
+    ///
+    /// `500` when the operating system's secure random numbers are
+    /// unavailable (there is no weaker fallback).
+    ///
     /// ```
     /// use zapline::auth::totp::Totp;
-    /// assert_eq!(Totp::generate().secret_base32().len(), 32);
+    /// assert_eq!(Totp::generate()?.secret_base32().len(), 32);
+    /// # Ok::<(), zapline::Error>(())
     /// ```
-    pub fn generate() -> Self {
+    pub fn generate() -> Result<Self> {
         let mut secret = vec![0u8; 20];
-        if getrandom::getrandom(&mut secret).is_err() {
-            for chunk in secret.chunks_mut(4) {
-                let r = fastrand::u32(..).to_le_bytes();
-                chunk.copy_from_slice(&r[..chunk.len()]);
-            }
-        }
-        Totp { secret }
+        getrandom::getrandom(&mut secret)
+            .map_err(|_| Error::internal("secure random numbers are unavailable"))?;
+        Ok(Totp { secret })
     }
 
     /// The secret stored earlier with [`secret_base32`](Self::secret_base32)
@@ -202,12 +205,13 @@ impl Totp {
         }
         let now = unix_seconds / 30;
         let mut found = None;
-        // Check every candidate, so timing doesn't reveal which matched.
+        // Check every candidate, so timing doesn't reveal which matched,
+        // and keep the latest match: should two neighbouring steps share a
+        // code, recording the earlier would let it pass a second time.
         for step in [now.saturating_sub(1), now, now + 1] {
             let expected = format!("{:06}", self.code_for(step));
             if constant_time_eq(expected.as_bytes(), code.as_bytes())
                 && last_step.is_none_or(|last| step > last)
-                && found.is_none()
             {
                 found = Some(step);
             }
@@ -251,7 +255,7 @@ mod tests {
 
     #[test]
     fn base32_round_trips() {
-        let totp = Totp::generate();
+        let totp = Totp::generate().unwrap();
         let again = Totp::from_base32(&totp.secret_base32().to_lowercase()).unwrap();
         assert_eq!(again.secret, totp.secret);
         assert_eq!(
@@ -266,7 +270,7 @@ mod tests {
 
     #[test]
     fn bad_input_is_refused() {
-        let totp = Totp::generate();
+        let totp = Totp::generate().unwrap();
         for code in ["", "12345", "1234567", "abcdef"] {
             assert_eq!(totp.verify(code, None), None, "{code}");
         }

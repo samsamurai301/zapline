@@ -189,7 +189,13 @@ pub mod cron;
 #[cfg(any(feature = "postgres", feature = "sqlite"))]
 pub mod db;
 pub mod di;
-#[cfg(any(feature = "jwks", feature = "oauth", feature = "otlp", feature = "s3"))]
+#[cfg(any(
+    feature = "jwks",
+    feature = "oauth",
+    feature = "otlp",
+    feature = "s3",
+    feature = "captcha"
+))]
 mod http_client;
 #[cfg(feature = "i18n")]
 pub mod i18n;

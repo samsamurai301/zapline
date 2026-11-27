@@ -159,9 +159,11 @@ impl HttpClient {
         Self::build(config)
     }
 
-    /// The longest a request may take: until the response headers arrive,
-    /// and again for reading a buffered body (`bytes`, `text`, `json`), or
-    /// between two chunks when streaming. Default 30 s.
+    /// The longest one attempt may wait for the response headers, and
+    /// again for reading a buffered body (`bytes`, `text`, `json`), or
+    /// between two chunks when streaming. Default 30 s. Each
+    /// [retry](Self::retries) gets the full timeout again, after its
+    /// backoff, so with retries a request can take several times this.
     ///
     /// ```
     /// use std::time::Duration;
@@ -567,7 +569,9 @@ impl HttpResponse {
     }
 
     /// `Ok(self)` for a 2xx status. Otherwise a `502` error (code
-    /// `upstream_status`) naming the status and the start of the body.
+    /// `upstream_status`) naming the host and the status. Its message
+    /// reaches the client, so the URL (query strings may hold keys) and the
+    /// upstream's body are only in the error's source, for the logs.
     ///
     /// # Errors
     ///
@@ -576,30 +580,38 @@ impl HttpResponse {
         if self.status.is_success() {
             return Ok(self);
         }
-        let (status, url) = (self.status, self.url.clone());
-        let mut res = self;
-        res.max = 2048;
-        let detail = match res.bytes_lossy().await {
-            Some(body) if !body.trim().is_empty() => format!(": {}", body.trim()),
-            _ => String::new(),
-        };
-        Err(Error::new(
-            StatusCode::BAD_GATEWAY,
-            format!("{url} answered {status}{detail}"),
-        )
-        .with_code("upstream_status"))
-    }
-
-    async fn bytes_lossy(mut self) -> Option<String> {
-        let mut out = BytesMut::new();
-        while let Ok(Some(chunk)) = self.chunk().await {
-            let room = self.max.saturating_sub(out.len());
-            out.extend_from_slice(&chunk[..chunk.len().min(room)]);
-            if out.len() >= self.max {
-                break;
+        let (status, host, url) = (self.status, host_of(&self.url), redact(&self.url));
+        let mut detail = format!("{url} answered {status}");
+        if let Some(body) = self.start_of_body(2048).await {
+            if !body.trim().is_empty() {
+                detail.push_str(": ");
+                detail.push_str(body.trim());
             }
         }
-        Some(String::from_utf8_lossy(&out).into_owned())
+        Err(
+            Error::new(StatusCode::BAD_GATEWAY, format!("{host} answered {status}"))
+                .with_code("upstream_status")
+                .with_source(io::Error::other(detail)),
+        )
+    }
+
+    /// Up to `max` bytes of the body, within one timeout for the whole read
+    /// (a trickling error page can't hold the handler); `None` when the
+    /// read fails or times out.
+    async fn start_of_body(mut self, max: usize) -> Option<String> {
+        let timeout = self.timeout;
+        let read = async {
+            let mut out = BytesMut::new();
+            while out.len() < max {
+                let Some(chunk) = self.chunk().await.ok()? else {
+                    break;
+                };
+                let room = max - out.len();
+                out.extend_from_slice(&chunk[..chunk.len().min(room)]);
+            }
+            Some(String::from_utf8_lossy(&out).into_owned())
+        };
+        tokio::time::timeout(timeout, read).await.ok().flatten()
     }
 
     /// The whole body, within the client's size limit and timeout.
@@ -698,6 +710,20 @@ impl HttpResponse {
                 }
             }
         }
+    }
+}
+
+/// `url` without userinfo, query or fragment, for logs.
+fn redact(url: &str) -> String {
+    match url.parse::<Uri>() {
+        Ok(u) => format!(
+            "{}://{}{}{}",
+            u.scheme_str().unwrap_or("http"),
+            u.host().unwrap_or(""),
+            u.port_u16().map(|p| format!(":{p}")).unwrap_or_default(),
+            u.path()
+        ),
+        Err(_) => host_of(url),
     }
 }
 
@@ -814,7 +840,14 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
         || ip.is_multicast()
         || ip.is_unique_local()
         || ip.is_unicast_link_local()
+        // IPv4-compatible (`::a.b.c.d`, deprecated) and the rest of `::/96`.
+        || s[..6] == [0; 6]
+        // `::ffff:0:a.b.c.d` (IPv4-translated, SIIT).
+        || s[..6] == [0, 0, 0, 0, 0xffff, 0]
+        || (s[0] == 0x0100 && s[1..4] == [0, 0, 0]) // discard-only
+        || (s[0] == 0x2001 && s[1] == 0x0000) // Teredo: tunnels to any IPv4
         || (s[0] == 0x2001 && s[1] == 0x0db8) // documentation
+        || (s[0] & 0xffc0) == 0xfec0 // site-local (deprecated, still routed internally)
         || (s[0] == 0x0064 && s[1] == 0xff9b) // NAT64: may map to a private IPv4
         || (s[0] == 0x2002)) // 6to4: may embed a private IPv4
 }
@@ -885,6 +918,13 @@ mod tests {
             "64:ff9b::a00:1",
             "2002:a00:1::1",
             "::ffff:10.0.0.1",
+            "::a00:1",
+            "::7f00:1",
+            "::ffff:0:a00:1",
+            "100::1",
+            "2001::1",
+            "fec0::1",
+            "64:ff9b:1::a00:1",
         ] {
             assert!(!is_public(ip.parse().unwrap()), "{ip}");
         }

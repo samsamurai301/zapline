@@ -7,7 +7,7 @@
 //! ```
 //! use zapline::auth::recovery_codes;
 //!
-//! let codes = recovery_codes::generate(10);        // show these to the user, once
+//! let codes = recovery_codes::generate(10)?;       // show these to the user, once
 //! let mut stored: Vec<String> =                   // keep only these
 //!     codes.iter().map(|c| recovery_codes::hash(c)).collect();
 //!
@@ -16,6 +16,7 @@
 //! let used = recovery_codes::find(&typed, &stored).expect("a valid code");
 //! stored.remove(used);                            // each code works once
 //! assert!(recovery_codes::find(&typed, &stored).is_none());
+//! # Ok::<(), zapline::Error>(())
 //! ```
 
 use sha2::{Digest, Sha256};
@@ -28,27 +29,37 @@ const ALPHABET: &[u8; 31] = b"abcdefghjkmnpqrstuvwxyz23456789";
 
 /// A uniformly random character of [`ALPHABET`]: bytes of 248 or more are
 /// redrawn, so no character is likelier than another.
-fn random_char() -> char {
+fn random_char() -> crate::Result<char> {
     loop {
         let mut b = [0u8; 1];
-        if getrandom::getrandom(&mut b).is_err() {
-            b[0] = fastrand::u8(..);
-        }
+        getrandom::getrandom(&mut b)
+            .map_err(|_| crate::Error::internal("secure random numbers are unavailable"))?;
         if b[0] < 248 {
-            return ALPHABET[usize::from(b[0] % 31)] as char;
+            return Ok(ALPHABET[usize::from(b[0] % 31)] as char);
         }
     }
 }
 
-/// `n` new codes like `x7k2m-q9pd4`: 10 characters (about 49 bits) from an
-/// unambiguous alphabet, in two groups.
-pub fn generate(n: usize) -> Vec<String> {
-    (0..n)
-        .map(|_| {
-            let chars: String = (0..10).map(|_| random_char()).collect();
-            format!("{}-{}", &chars[..5], &chars[5..])
-        })
-        .collect()
+/// `n` new, distinct codes like `x7k2m-q9pd4`: 10 characters (about 49
+/// bits) from an unambiguous alphabet, in two groups.
+///
+/// # Errors
+///
+/// `500` when the operating system's secure random numbers are
+/// unavailable (there is no weaker fallback).
+pub fn generate(n: usize) -> crate::Result<Vec<String>> {
+    let mut codes: Vec<String> = Vec::with_capacity(n);
+    while codes.len() < n {
+        let chars = (0..10)
+            .map(|_| random_char())
+            .collect::<crate::Result<String>>()?;
+        let code = format!("{}-{}", &chars[..5], &chars[5..]);
+        // A repeat would be one code that works twice.
+        if !codes.contains(&code) {
+            codes.push(code);
+        }
+    }
+    Ok(codes)
 }
 
 /// What users type, compared loosely: case, spaces and dashes don't matter.
@@ -90,7 +101,7 @@ mod tests {
 
     #[test]
     fn codes_are_unique_readable_and_loosely_matched() {
-        let codes = generate(50);
+        let codes = generate(50).unwrap();
         let mut unique = codes.clone();
         unique.sort();
         unique.dedup();

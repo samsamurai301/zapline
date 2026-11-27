@@ -234,8 +234,15 @@ pub const FEATURES: &[Feature] = &[
     Feature {
         name: "cookies",
         description: "Cookies (plain, signed, private), sessions and CSRF protection",
-        paths: &["cookies", "session", "auth::Csrf", "auth::CsrfToken"],
+        paths: &[
+            "cookies",
+            "session",
+            "auth::Csrf",
+            "auth::CsrfToken",
+            "auth::magic_link",
+        ],
         items: &[
+            "MagicLinks",
             "CookieJar",
             "SignedCookieJar",
             "PrivateCookieJar",
@@ -292,7 +299,7 @@ pub const FEATURES: &[Feature] = &[
         items: &["Totp"],
         methods: &[],
         implies: &[],
-        usage: "Totp::generate(), then totp.verify(code, last_step)",
+        usage: "Totp::generate()?, then totp.verify(code, last_step)",
     },
     Feature {
         name: "mail",
@@ -394,6 +401,7 @@ pub const FEATURES: &[Feature] = &[
             "Cache::redis",
             "Live::redis",
             "RateLimit::redis",
+            "Idempotency::redis",
             "RateLimitPolicy::redis",
         ],
         implies: &["json"],

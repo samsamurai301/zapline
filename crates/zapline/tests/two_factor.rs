@@ -30,8 +30,8 @@ fn app(store: Store) -> App {
         .state(store)
         // Enrollment: a new secret, the QR URI, and recovery codes (shown once).
         .post("/2fa/enroll", |State(store): State<Store>| async move {
-            let totp = Totp::generate();
-            let codes = recovery_codes::generate(8);
+            let totp = Totp::generate().unwrap();
+            let codes = recovery_codes::generate(8).unwrap();
             let mut acc = store.lock().unwrap();
             acc.totp_secret = Some(totp.secret_base32());
             acc.recovery_hashes = codes.iter().map(|c| recovery_codes::hash(c)).collect();

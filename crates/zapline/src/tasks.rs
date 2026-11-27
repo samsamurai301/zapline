@@ -135,12 +135,12 @@ fn panic_message(p: &(dyn Any + Send)) -> &str {
 }
 
 #[cfg(feature = "tracing")]
-fn log_error(msg: fmt::Arguments<'_>) {
+pub(crate) fn log_error(msg: fmt::Arguments<'_>) {
     tracing::error!("{msg}");
 }
 
 #[cfg(not(feature = "tracing"))]
-fn log_error(msg: fmt::Arguments<'_>) {
+pub(crate) fn log_error(msg: fmt::Arguments<'_>) {
     eprintln!("[zapline] error: {msg}");
 }
 

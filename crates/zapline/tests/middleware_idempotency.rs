@@ -259,20 +259,20 @@ async fn a_changed_content_type_is_a_different_request() {
 }
 
 #[tokio::test]
-async fn multipart_uploads_pass_through_unbuffered() {
+async fn a_multipart_content_type_does_not_skip_idempotency() {
+    // The client picks the content type: claiming `multipart/` must not
+    // let it repeat a request under the same key.
     let (c, runs) = app(Idempotency::new());
     for _ in 0..2 {
-        let r = c
-            .post("/charge")
+        c.post("/charge")
             .bearer("client")
             .header("idempotency-key", "upload")
-            .header("content-type", "multipart/form-data; boundary=x")
+            .header("content-type", "multipart/x")
             .body("--x--\r\n")
             .send()
             .await;
-        assert_eq!(r.header("idempotent-replayed"), None);
     }
-    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -638,6 +638,52 @@ async fn a_full_store_drops_the_oldest_response() {
         .await;
     assert_eq!(a_retry.header("idempotent-replayed"), None);
     assert_eq!(runs.load(Ordering::SeqCst), 4);
+}
+
+#[tokio::test]
+async fn responses_over_the_memory_budget_are_not_stored() {
+    // 10 KiB in all, 1 KiB per client: a 4 KiB response isn't kept.
+    let runs = Arc::new(AtomicUsize::new(0));
+    let r = runs.clone();
+    let c = App::new()
+        .wrap(Idempotency::new().max_memory(10 * 1024))
+        .post("/big", move || {
+            r.fetch_add(1, Ordering::SeqCst);
+            async { "x".repeat(4096) }
+        })
+        .post("/small", || async { "ok" })
+        .test();
+    let send = |path: &'static str| {
+        c.post(path)
+            .bearer("client")
+            .header("idempotency-key", path)
+            .send()
+    };
+    assert_eq!(send("/big").await.text().len(), 4096);
+    let again = send("/big").await;
+    assert_eq!(again.header("idempotent-replayed"), None, "not stored");
+    assert_eq!(again.status(), 200, "and not locked either");
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+    send("/small").await;
+    assert_eq!(
+        send("/small").await.header("idempotent-replayed"),
+        Some("true")
+    );
+}
+
+#[tokio::test]
+async fn huge_retention_settings_do_not_panic() {
+    let (c, _) = app(Idempotency::new()
+        .ttl(Duration::MAX)
+        .lock_timeout(Duration::MAX));
+    let send = || {
+        c.post("/charge")
+            .bearer("client")
+            .header("idempotency-key", "forever")
+            .send()
+    };
+    assert_eq!(send().await.status(), 201);
+    assert_eq!(send().await.header("idempotent-replayed"), Some("true"));
 }
 
 #[cfg(feature = "redis")]

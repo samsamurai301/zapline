@@ -16,9 +16,10 @@
 //!
 //! Keys belong to a client: by default its `Authorization` header, or
 //! whatever [`scope`](Idempotency::scope) returns. Requests with neither
-//! skip idempotency, and so do `multipart/*` uploads and bodies whose
-//! `Content-Length` is over the app's body limit (they stream, under their
-//! route's own limit).
+//! skip idempotency, and so do bodies whose `Content-Length` is over the
+//! app's body limit (they stream, under their route's own limit). Other
+//! bodies, uploads included, are buffered within the app's body limit, so
+//! leave routes taking larger chunked uploads out of this middleware.
 //!
 //! ```
 //! use zapline::middleware::Idempotency;
@@ -30,7 +31,7 @@
 //! ```
 
 use std::collections::{BTreeSet, HashMap};
-use std::hash::{BuildHasher, Hash, Hasher};
+use std::hash::{BuildHasher, Hasher};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
@@ -51,10 +52,15 @@ pub const IDEMPOTENCY_KEY: HeaderName = HeaderName::from_static("idempotency-key
 /// Set to `true` on a replayed response.
 pub const IDEMPOTENT_REPLAYED: HeaderName = HeaderName::from_static("idempotent-replayed");
 
-/// Responses with larger bodies are passed through but not stored.
-const MAX_STORED_BODY: usize = 1024 * 1024;
+/// Responses larger than this (body and headers) are passed through but
+/// not stored.
+const MAX_STORED: usize = 1024 * 1024;
 const MAX_KEY_LEN: usize = 255;
 const DEFAULT_MAX_KEYS: usize = 10_000;
+/// Default memory budget for stored responses (memory mode).
+const DEFAULT_MAX_MEMORY: usize = 64 * 1024 * 1024;
+/// The shortest lock timeout: renewal runs every third of it.
+const MIN_LOCK: Duration = Duration::from_millis(30);
 
 type ScopeFn = dyn Fn(&Request) -> Option<String> + Send + Sync;
 
@@ -66,7 +72,7 @@ type ScopeFn = dyn Fn(&Request) -> Option<String> + Send + Sync;
 /// instances serve the app. Clones share state.
 ///
 /// What is stored: status, headers (except `Date` and `Set-Cookie`) and
-/// body, for complete responses up to 1 MiB. Cookies reach the first
+/// body, for complete responses up to 1 MiB (headers included). Cookies reach the first
 /// response only: a replay never hands a session to whoever sends the key
 /// again. Not stored, so a retry runs the handler again: server errors
 /// (`5xx`); `401`, `403`, `404`, `405`, `408`, `409`, `425` and `429`;
@@ -77,9 +83,18 @@ type ScopeFn = dyn Fn(&Request) -> Option<String> + Send + Sync;
 /// A replay is answered before anything inside this middleware runs,
 /// handlers' own auth checks included: it returns what the same client
 /// already received. To stop replays once a credential is revoked, wrap
-/// authentication *outside* `Idempotency`.
+/// authentication *outside* `Idempotency`. Wrap [`SetRequestId`] and
+/// [`Cors`] outside too: inside, a replay would repeat the first request's
+/// id and allowed origin.
+///
+/// The default scope, the `Authorization` header, is whatever the client
+/// sends. Check it (authentication outside this middleware) or scope by an
+/// authenticated identity, or a client sending a new bogus header per
+/// request can fill the memory store.
 ///
 /// [`Compression`]: crate::middleware::Compression
+/// [`SetRequestId`]: crate::middleware::SetRequestId
+/// [`Cors`]: crate::middleware::Cors
 #[derive(Clone)]
 pub struct Idempotency {
     required: bool,
@@ -112,7 +127,7 @@ impl Idempotency {
             ttl: Duration::from_secs(24 * 60 * 60),
             lock_timeout: Duration::from_secs(5 * 60),
             scope: None,
-            store: Arc::new(MemStore::new(DEFAULT_MAX_KEYS)),
+            store: Arc::new(MemStore::new(DEFAULT_MAX_KEYS, DEFAULT_MAX_MEMORY)),
             #[cfg(feature = "redis")]
             redis: None,
         }
@@ -151,7 +166,7 @@ impl Idempotency {
     /// How long a key stays locked after its instance stops renewing it
     /// (default 5 minutes). While a handler runs, the lock is renewed every
     /// third of this, so slow handlers keep their key; this only matters
-    /// when an instance dies mid-request.
+    /// when an instance dies mid-request. At least 30 ms.
     ///
     /// ```
     /// use std::time::Duration;
@@ -160,7 +175,7 @@ impl Idempotency {
     /// ```
     #[must_use]
     pub fn lock_timeout(mut self, timeout: Duration) -> Self {
-        self.lock_timeout = timeout.max(Duration::from_millis(1));
+        self.lock_timeout = timeout.max(MIN_LOCK);
         self
     }
 
@@ -189,8 +204,9 @@ impl Idempotency {
     /// scope, so one client can't push out the others' responses. When
     /// full, expired keys are dropped first, then the oldest stored
     /// responses (the client's own first). A client whose share is all
-    /// requests still running gets `429` (code `idempotency_keys_exhausted`)
-    /// for new keys. Memory mode is best effort:
+    /// requests still running, or that finds the whole store running, gets
+    /// `429` (code `idempotency_keys_exhausted`) for new keys. Memory mode
+    /// is best effort:
     /// use [`redis`](Self::redis) where a second run would cost money.
     ///
     /// ```
@@ -199,7 +215,23 @@ impl Idempotency {
     /// ```
     #[must_use]
     pub fn max_keys(mut self, n: usize) -> Self {
-        self.store = Arc::new(MemStore::new(n.max(1)));
+        self.store = Arc::new(MemStore::new(n.max(1), self.store.max_bytes));
+        self
+    }
+
+    /// Most memory the stored responses may use in memory mode (default
+    /// 64 MiB), and a tenth of that per scope. Responses are counted by
+    /// body and header size; the oldest are dropped to make room, and a
+    /// response that doesn't fit isn't stored (a retry runs the handler
+    /// again).
+    ///
+    /// ```
+    /// use zapline::middleware::Idempotency;
+    /// let mw = Idempotency::new().max_memory(256 * 1024 * 1024);
+    /// ```
+    #[must_use]
+    pub fn max_memory(mut self, bytes: usize) -> Self {
+        self.store = Arc::new(MemStore::new(self.store.max_keys, bytes.max(1)));
         self
     }
 
@@ -256,9 +288,10 @@ impl Middleware for Idempotency {
                 }
             },
         };
-        // Multipart uploads stream (often past the app's body limit, under
-        // their route's own): buffering them to fingerprint would break that.
-        if is_multipart(&req) || over_body_limit(&req) {
+        // A body declared over the app's limit may be a route's own larger
+        // upload: buffering it here would answer `413`. (Skipping is safe:
+        // a route without a larger limit rejects it unread.)
+        if over_body_limit(&req) {
             return next.run(req);
         }
         // Without a scope there's no owner to keep keys apart, so clients
@@ -286,7 +319,23 @@ impl Middleware for Idempotency {
             req.body = Some(ReqBody::Full(body));
 
             let token = new_token();
-            match backend.begin(&id, scope, fp, token, lock_timeout).await {
+            // Armed before the key is taken: if this request is cancelled
+            // while `begin` waits on Redis, the lock it may hold is
+            // released. Releasing only ever frees this token's own lock, and
+            // the guard stays armed until the key is stored or released.
+            let mut guard = Guard {
+                backend: Some(backend.clone()),
+                id,
+                token,
+            };
+            let begin = backend
+                .begin(&guard.id, scope, fp, token, lock_timeout)
+                .await;
+            if !matches!(begin, Begin::Run | Begin::Unavailable) {
+                // Someone else holds the key: nothing of ours to free.
+                guard.backend = None;
+            }
+            match begin {
                 Begin::Run => {}
                 Begin::Replay(stored) => return stored.replay(),
                 Begin::InFlight => {
@@ -313,21 +362,14 @@ impl Middleware for Idempotency {
                 }
             }
 
-            // Releases the key if the handler is cancelled or panics, and
-            // stays armed until the key is stored or released, so a cancel
-            // during those calls releases it too.
-            let mut guard = Guard {
-                backend: Some(backend.clone()),
-                id,
-                token,
-            };
             // Renew the lock while the handler runs, so a handler slower
-            // than `lock_timeout` doesn't let a retry run alongside it. In
-            // its own task: a slow renewal (Redis) never holds up the
-            // response once the handler is done.
+            // than `lock_timeout` doesn't let a retry run alongside it, and
+            // until the response is stored or the key released, so slow
+            // storage doesn't either. In its own task: a slow renewal
+            // (Redis) never holds up the handler.
             let renewer = {
                 let (backend, id) = (backend.clone(), guard.id.clone());
-                let every = (lock_timeout / 3).max(Duration::from_millis(5));
+                let every = lock_timeout / 3;
                 AbortOnDrop(tokio::spawn(async move {
                     loop {
                         tokio::time::sleep(every).await;
@@ -336,23 +378,28 @@ impl Middleware for Idempotency {
                 }))
             };
             let res = next.run(req).await;
-            drop(renewer);
             let (res, stored) = capture(res, fp);
-            match stored {
+            let settled = match stored {
                 Some(stored) => {
-                    if !backend.finish(&guard.id, token, stored, ttl).await {
+                    let done = backend.finish(&guard.id, token, stored, ttl).await;
+                    if !done {
                         crate::tasks::log_warn(format_args!(
                             "idempotency: the response to key {} was not stored; \
-                             a retry after the lock times out runs the handler again",
+                             a retry may run the handler again",
                             guard.id
                         ));
                     }
+                    done
                 }
                 // Not storable: free the key before answering, so an
                 // immediate retry runs instead of seeing `409`.
                 None => backend.release(&guard.id, token).await,
+            };
+            drop(renewer);
+            if settled {
+                guard.backend = None;
             }
-            guard.backend = None;
+            // Otherwise the guard tries the release again in the background.
             res
         })
     }
@@ -385,31 +432,28 @@ fn parse_key(v: &HeaderValue) -> Option<&str> {
     ok.then_some(s)
 }
 
-/// A hasher with fixed keys, so every instance hashes alike.
+/// A hasher with fixed keys, so every instance hashes alike. Only `write`
+/// is used, with lengths as fixed-size integers: `Hash` impls may change
+/// between Rust versions and platforms (`usize` lengths), `write` doesn't.
 #[allow(deprecated)]
 fn stable_hasher() -> std::hash::SipHasher {
     std::hash::SipHasher::new()
 }
 
+/// One length-prefixed field, the same on every platform.
+fn write_part(h: &mut impl Hasher, bytes: &[u8]) {
+    h.write(&(bytes.len() as u64).to_le_bytes());
+    h.write(bytes);
+}
+
 fn scope_hash(scope: &[u8]) -> u64 {
     let mut h = stable_hasher();
-    scope.hash(&mut h);
+    write_part(&mut h, scope);
     h.finish()
 }
 
 fn slot_id(scope: u64, key: &str) -> String {
     format!("zapline:idempotency:{scope:016x}:{key}")
-}
-
-fn is_multipart(req: &Request) -> bool {
-    req.headers()
-        .get(CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|ct| {
-            ct.trim_start()
-                .get(..10)
-                .is_some_and(|p| p.eq_ignore_ascii_case("multipart/"))
-        })
 }
 
 /// A body known (from its `Content-Length`) to be larger than the app's
@@ -425,14 +469,12 @@ fn over_body_limit(req: &Request) -> bool {
 /// (extractors accept or reject a body by it) and body.
 fn fingerprint(req: &Request, body: &[u8]) -> u64 {
     let mut h = stable_hasher();
-    req.method().as_str().hash(&mut h);
-    req.path().hash(&mut h);
-    req.query_string().unwrap_or("").hash(&mut h);
-    req.headers()
-        .get(CONTENT_TYPE)
-        .map_or(&b""[..], HeaderValue::as_bytes)
-        .hash(&mut h);
-    body.hash(&mut h);
+    write_part(&mut h, req.method().as_str().as_bytes());
+    write_part(&mut h, req.path().as_bytes());
+    write_part(&mut h, req.query_string().unwrap_or("").as_bytes());
+    let content_type = req.headers().get(CONTENT_TYPE);
+    write_part(&mut h, content_type.map_or(&b""[..], HeaderValue::as_bytes));
+    write_part(&mut h, body);
     h.finish()
 }
 
@@ -457,6 +499,16 @@ struct Stored {
 }
 
 impl Stored {
+    /// Roughly what it takes in memory (and in its encoded form).
+    fn size(&self) -> usize {
+        let headers: usize = self
+            .headers
+            .iter()
+            .map(|(n, v)| 8 + n.as_str().len() + v.len())
+            .sum();
+        64 + headers + self.body.len()
+    }
+
     fn replay(&self) -> Response {
         let mut res = Response::new(Body::from(self.body.clone()));
         *res.status_mut() = StatusCode::from_u16(self.status).unwrap_or(StatusCode::OK);
@@ -538,7 +590,7 @@ fn capture(res: Response, fp: u64) -> (Response, Option<Stored>) {
     let (parts, body) = res.into_parts();
     let bytes = match body {
         Body::Empty | Body::Full(None) => Bytes::new(),
-        Body::Full(Some(b)) if b.len() <= MAX_STORED_BODY => b,
+        Body::Full(Some(b)) if b.len() <= MAX_STORED => b,
         other => return (Response::from_parts(parts, other), None),
     };
     let headers = parts
@@ -555,7 +607,11 @@ fn capture(res: Response, fp: u64) -> (Response, Option<Stored>) {
         headers,
         body: bytes.clone(),
     };
-    (Response::from_parts(parts, Body::from(bytes)), Some(stored))
+    let fits = stored.size() <= MAX_STORED;
+    (
+        Response::from_parts(parts, Body::from(bytes)),
+        fits.then_some(stored),
+    )
 }
 
 enum Begin {
@@ -566,6 +622,8 @@ enum Begin {
     Mismatch,
     /// This scope's share of the store is all requests still running.
     Exhausted,
+    /// The shared store can't be reached (Redis only).
+    #[cfg_attr(not(feature = "redis"), allow(dead_code))]
     Unavailable,
 }
 
@@ -606,9 +664,13 @@ impl Backend {
         }
     }
 
-    async fn release(&self, id: &str, token: u128) {
+    /// Free our key; `false` when that may not have happened.
+    async fn release(&self, id: &str, token: u128) -> bool {
         match self {
-            Backend::Memory(m) => m.release(id, token),
+            Backend::Memory(m) => {
+                m.release(id, token);
+                true
+            }
             #[cfg(feature = "redis")]
             Backend::Redis(r) => redis_store::release(r, id, token).await,
         }
@@ -621,7 +683,13 @@ impl Backend {
             #[cfg(feature = "redis")]
             Backend::Redis(r) => {
                 if let Ok(rt) = tokio::runtime::Handle::try_current() {
-                    rt.spawn(async move { redis_store::release(&r, &id, token).await });
+                    rt.spawn(async move {
+                        // One more try, a little later, if Redis failed.
+                        if !redis_store::release(&r, &id, token).await {
+                            tokio::time::sleep(Duration::from_secs(1)).await;
+                            redis_store::release(&r, &id, token).await;
+                        }
+                    });
                 }
             }
         }
@@ -654,6 +722,23 @@ struct Entry {
     scope: u64,
 }
 
+impl Entry {
+    fn bytes(&self) -> usize {
+        match &self.slot {
+            Slot::Done(s) => s.size(),
+            Slot::Running { .. } => 0,
+        }
+    }
+}
+
+/// `now + d`, or far in the future when that overflows.
+fn later(now: Instant, d: Duration) -> Instant {
+    const FAR: Duration = Duration::from_secs(100 * 365 * 24 * 60 * 60);
+    now.checked_add(d)
+        .or_else(|| now.checked_add(FAR))
+        .unwrap_or(now)
+}
+
 /// Keys in memory, with the stored responses ordered by expiry (overall
 /// and per scope), so making room never scans the whole store.
 #[derive(Default)]
@@ -661,6 +746,8 @@ struct Keys {
     map: HashMap<String, Entry>,
     scopes: HashMap<u64, ScopeKeys>,
     done: BTreeSet<(Instant, String)>,
+    /// Memory used by stored responses.
+    bytes: usize,
     /// When expired locks (from cancelled renewals) were last looked for.
     swept: Option<Instant>,
 }
@@ -668,12 +755,17 @@ struct Keys {
 #[derive(Default)]
 struct ScopeKeys {
     count: usize,
+    bytes: usize,
     done: BTreeSet<(Instant, String)>,
 }
 
 impl Keys {
     fn count(&self, scope: u64) -> usize {
         self.scopes.get(&scope).map_or(0, |s| s.count)
+    }
+
+    fn scope_bytes(&self, scope: u64) -> usize {
+        self.scopes.get(&scope).map_or(0, |s| s.bytes)
     }
 
     /// Add a running request's key (replacing nothing: callers remove first).
@@ -692,12 +784,15 @@ impl Keys {
 
     fn forget(&mut self, id: &str, old: &Entry) {
         let is_done = matches!(old.slot, Slot::Done(_));
+        let bytes = old.bytes();
         if is_done {
             self.done.remove(&(old.until, id.to_owned()));
+            self.bytes -= bytes;
         }
         if let Some(s) = self.scopes.get_mut(&old.scope) {
             if is_done {
                 s.done.remove(&(old.until, id.to_owned()));
+                s.bytes -= bytes;
             }
             s.count -= 1;
             if s.count == 0 {
@@ -711,15 +806,15 @@ impl Keys {
         let Some(e) = self.map.get_mut(id) else {
             return;
         };
+        let bytes = stored.size();
         e.slot = Slot::Done(Arc::new(stored));
         e.until = until;
         let scope = e.scope;
         self.done.insert((until, id.to_owned()));
-        self.scopes
-            .entry(scope)
-            .or_default()
-            .done
-            .insert((until, id.to_owned()));
+        self.bytes += bytes;
+        let s = self.scopes.entry(scope).or_default();
+        s.done.insert((until, id.to_owned()));
+        s.bytes += bytes;
     }
 
     /// The stored response that expires first, among `scope`'s or all.
@@ -765,14 +860,19 @@ struct MemStore {
     /// Most keys one scope may hold, so one client can't flush the
     /// others' stored responses.
     per_scope: usize,
+    /// Most memory stored responses may use, overall and per scope.
+    max_bytes: usize,
+    per_scope_bytes: usize,
 }
 
 impl MemStore {
-    fn new(max_keys: usize) -> Self {
+    fn new(max_keys: usize, max_bytes: usize) -> Self {
         MemStore {
             keys: Mutex::new(Keys::default()),
             max_keys,
             per_scope: (max_keys / 10).max(1),
+            max_bytes,
+            per_scope_bytes: (max_bytes / 10).max(1),
         }
     }
 
@@ -812,14 +912,16 @@ impl MemStore {
         if full(&keys) {
             match keys.oldest_done(None) {
                 Some(k) => keys.remove(&k),
-                None => return Begin::Unavailable,
+                // Every key is a running request: this client waits, like
+                // one that filled its own share.
+                None => return Begin::Exhausted,
             }
         }
         keys.insert(
             id.to_owned(),
             Entry {
                 slot: Slot::Running { fp, token },
-                until: now + lock,
+                until: later(now, lock),
                 scope,
             },
         );
@@ -830,7 +932,7 @@ impl MemStore {
         let mut keys = self.lock();
         if let Some(e) = keys.map.get_mut(id) {
             if matches!(e.slot, Slot::Running { token: t, .. } if t == token) {
-                e.until = Instant::now() + lock;
+                e.until = later(Instant::now(), lock);
             }
         }
     }
@@ -841,10 +943,31 @@ impl MemStore {
             keys.map.get(id),
             Some(Entry { slot: Slot::Running { token: t, .. }, .. }) if *t == token
         );
-        if ours {
-            keys.mark_done(id, stored, Instant::now() + ttl);
+        if !ours {
+            return false;
         }
-        ours
+        // Make room in this scope's budget, then in the whole store's, from
+        // the oldest stored responses. One that can't fit isn't stored.
+        let (size, scope) = (stored.size(), keys.map[id].scope);
+        let mut fits = size <= self.per_scope_bytes;
+        while fits && keys.scope_bytes(scope) + size > self.per_scope_bytes {
+            match keys.oldest_done(Some(scope)) {
+                Some(k) => keys.remove(&k),
+                None => fits = false,
+            }
+        }
+        while fits && keys.bytes + size > self.max_bytes {
+            match keys.oldest_done(None) {
+                Some(k) => keys.remove(&k),
+                None => fits = false,
+            }
+        }
+        if !fits {
+            keys.remove(id);
+            return false;
+        }
+        keys.mark_done(id, stored, later(Instant::now(), ttl));
+        true
     }
 
     fn release(&self, id: &str, token: u128) {
@@ -860,6 +983,21 @@ impl MemStore {
 mod redis_store {
     use super::*;
     use crate::redis::{Redis, Reply};
+
+    /// Longest wait for one Redis call: a stalled Redis is treated like
+    /// one that is down instead of holding requests.
+    const DEADLINE: Duration = Duration::from_secs(5);
+
+    async fn call(redis: &Redis, args: [&[u8]; 6]) -> crate::Result<Reply> {
+        call_args(redis, &args).await
+    }
+
+    async fn call_args(redis: &Redis, args: &[&[u8]]) -> crate::Result<Reply> {
+        match tokio::time::timeout(DEADLINE, redis.cmd(args.iter().copied())).await {
+            Ok(reply) => reply,
+            Err(_) => Err(Error::service_unavailable("Redis did not answer in time")),
+        }
+    }
 
     /// Take the key, or return what holds it. `1` = taken.
     const BEGIN: &str = r#"
@@ -894,16 +1032,18 @@ return 0
 
     pub(super) async fn renew(redis: &Redis, id: &str, token: u128, lock: Duration) {
         let ms = millis(lock);
-        let reply = redis
-            .cmd([
+        let reply = call(
+            redis,
+            [
                 "EVAL".as_bytes(),
                 RENEW.as_bytes(),
                 b"1",
                 id.as_bytes(),
                 &token.to_be_bytes(),
                 ms.as_bytes(),
-            ])
-            .await;
+            ],
+        )
+        .await;
         if let Err(e) = reply {
             crate::tasks::log_warn(format_args!(
                 "idempotency: renewing a key's lock failed: {}",
@@ -936,18 +1076,23 @@ return 0
         let ms = millis(lock);
         // A key that expires between SET and GET answers nil: try again.
         for _ in 0..3 {
-            let reply = redis
-                .cmd([
+            let reply = call(
+                redis,
+                [
                     "EVAL".as_bytes(),
                     BEGIN.as_bytes(),
                     b"1",
                     id.as_bytes(),
                     &value,
                     ms.as_bytes(),
-                ])
-                .await;
+                ],
+            )
+            .await;
             let held = match reply {
                 Ok(Reply::Int(1)) => return Begin::Run,
+                // Our own lock: an earlier attempt took the key but its
+                // reply was lost (the connection is retried).
+                Ok(Reply::Bulk(b)) if b == value => return Begin::Run,
                 Ok(Reply::Nil) => continue,
                 Ok(Reply::Bulk(b)) => b,
                 Ok(other) => {
@@ -993,8 +1138,9 @@ return 0
     ) -> bool {
         let (ms, lock, encoded) = (millis(ttl), lock_value(s.fp, token), s.encode());
         for _ in 0..2 {
-            let reply = redis
-                .cmd([
+            let reply = call_args(
+                redis,
+                &[
                     "EVAL".as_bytes(),
                     FINISH.as_bytes(),
                     b"1",
@@ -1002,8 +1148,9 @@ return 0
                     &lock,
                     &encoded,
                     ms.as_bytes(),
-                ])
-                .await;
+                ],
+            )
+            .await;
             match reply {
                 Ok(Reply::Int(1)) => return true,
                 Ok(_) => {
@@ -1022,21 +1169,28 @@ return 0
         false
     }
 
-    pub(super) async fn release(redis: &Redis, id: &str, token: u128) {
-        let reply = redis
-            .cmd([
+    /// `false` when Redis failed, so the key may still be locked.
+    pub(super) async fn release(redis: &Redis, id: &str, token: u128) -> bool {
+        let reply = call_args(
+            redis,
+            &[
                 "EVAL".as_bytes(),
                 RELEASE.as_bytes(),
                 b"1",
                 id.as_bytes(),
                 &token.to_be_bytes(),
-            ])
-            .await;
-        if let Err(e) = reply {
-            crate::tasks::log_warn(format_args!(
-                "idempotency: releasing a key failed: {}",
-                e.message()
-            ));
+            ],
+        )
+        .await;
+        match reply {
+            Ok(_) => true,
+            Err(e) => {
+                crate::tasks::log_warn(format_args!(
+                    "idempotency: releasing a key failed: {}",
+                    e.message()
+                ));
+                false
+            }
         }
     }
 }

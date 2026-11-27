@@ -38,6 +38,7 @@ fn client() -> &'static HttpsClient {
 
 /// Send `req` and buffer the response. `what` names the service in errors
 /// ("S3", "the OAuth provider").
+#[cfg(any(feature = "jwks", feature = "oauth", feature = "otlp", feature = "s3"))]
 pub(crate) async fn fetch(req: Request<Full<Bytes>>, what: &str) -> Result<Fetched> {
     let res = client()
         .request(req)
@@ -48,6 +49,34 @@ pub(crate) async fn fetch(req: Request<Full<Bytes>>, what: &str) -> Result<Fetch
         .collect()
         .await
         .map_err(|e| Error::service_unavailable(format!("{what} response failed")).with_source(e))?
+        .to_bytes();
+    Ok(Fetched {
+        status: parts.status,
+        headers: parts.headers,
+        body,
+    })
+}
+
+/// [`fetch`], refusing a response body over `max` bytes (for services
+/// whose answers are known to be small).
+#[cfg(feature = "captcha")]
+pub(crate) async fn fetch_limited(
+    req: Request<Full<Bytes>>,
+    what: &str,
+    max: usize,
+) -> Result<Fetched> {
+    let res = client()
+        .request(req)
+        .await
+        .map_err(|e| Error::service_unavailable(format!("cannot reach {what}")).with_source(e))?;
+    let (parts, body) = res.into_parts();
+    let body = http_body_util::Limited::new(body, max)
+        .collect()
+        .await
+        .map_err(|e| {
+            Error::service_unavailable(format!("{what} response failed or was too large"))
+                .with_source(std::io::Error::other(e.to_string()))
+        })?
         .to_bytes();
     Ok(Fetched {
         status: parts.status,

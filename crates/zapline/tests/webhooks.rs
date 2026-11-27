@@ -84,7 +84,7 @@ async fn verify_and_parse(req: Request) -> Result<Signed<Value>> {
 
 #[tokio::test]
 async fn a_signed_webhook_is_delivered_and_verified() {
-    let secret = WebhookSender::generate_secret();
+    let secret = WebhookSender::generate_secret().unwrap();
     let (_s, url, got, _) = receiver(&secret, 0).await;
     let delivery = sender(&secret)
         .send(&url, &json!({"type": "invoice.paid", "amount": 42}))
@@ -100,7 +100,7 @@ async fn a_signed_webhook_is_delivered_and_verified() {
 
 #[tokio::test]
 async fn failures_are_retried_with_the_same_message_id() {
-    let secret = WebhookSender::generate_secret();
+    let secret = WebhookSender::generate_secret().unwrap();
     let (_s, url, got, ids) = receiver(&secret, 2).await;
     let delivery = sender(&secret).send(&url, &json!({"n": 1})).await.unwrap();
     assert_eq!(delivery.attempts, 3);
@@ -111,7 +111,7 @@ async fn failures_are_retried_with_the_same_message_id() {
 
 #[tokio::test]
 async fn retries_give_up_and_say_why() {
-    let secret = WebhookSender::generate_secret();
+    let secret = WebhookSender::generate_secret().unwrap();
     let (_s, url, got, _) = receiver(&secret, 100).await;
     let err = sender(&secret)
         .retries(2)
@@ -127,8 +127,8 @@ async fn retries_give_up_and_say_why() {
 
 #[tokio::test]
 async fn a_wrong_secret_is_rejected_and_not_retried() {
-    let (_s, url, got, _) = receiver(&WebhookSender::generate_secret(), 0).await;
-    let err = sender(&WebhookSender::generate_secret())
+    let (_s, url, got, _) = receiver(&WebhookSender::generate_secret().unwrap(), 0).await;
+    let err = sender(&WebhookSender::generate_secret().unwrap())
         .send(&url, &json!({}))
         .await
         .unwrap_err();
@@ -140,7 +140,7 @@ async fn a_wrong_secret_is_rejected_and_not_retried() {
 
 #[tokio::test]
 async fn private_addresses_are_refused_by_default() {
-    let plain = WebhookSender::new(&WebhookSender::generate_secret()).unwrap();
+    let plain = WebhookSender::new(&WebhookSender::generate_secret().unwrap()).unwrap();
     for url in ["http://127.0.0.1:9/hook", "http://169.254.169.254/latest"] {
         let err = plain.send(url, &json!({})).await.unwrap_err();
         assert_eq!(err.code(), Some("upstream_blocked"), "{url}");
@@ -149,7 +149,7 @@ async fn private_addresses_are_refused_by_default() {
 
 #[tokio::test]
 async fn the_extractor_rejects_unsigned_and_malformed_requests() {
-    let secret = WebhookSender::generate_secret();
+    let secret = WebhookSender::generate_secret().unwrap();
     let c = App::new()
         .post("/hook", |Signed(v): Signed<Value>| async move { Json(v) })
         .meta(Webhook::standard(&secret).unwrap())

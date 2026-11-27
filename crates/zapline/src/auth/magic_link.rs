@@ -2,10 +2,16 @@
 //! email confirmation, account invitations (feature `cookies`).
 //!
 //! A token names a user, a purpose and an expiry, signed with the app's
-//! cookie [`Key`](crate::cookies::Key). To make a link single-use without a
+//! cookie [`Key`]. To make a link single-use without a
 //! table of used tokens, bind it to a value that changes once it's used:
-//! the user's last sign-in time for a sign-in link, the unconfirmed email
-//! for a confirmation link. When the value changes, old links stop working.
+//! a per-user sign-in counter for a sign-in link (a timestamp in whole
+//! seconds may not change between two sign-ins), the unconfirmed email for
+//! a confirmation link. When the value changes, old links stop working.
+//!
+//! [`MagicLinks::verify`] only checks the token: two requests opening one
+//! link at the same moment both pass. Consume the binding with a
+//! conditional update (`... SET login_count = login_count + 1 WHERE id = $1
+//! AND login_count = $2`) and act only when it changed a row.
 //!
 //! ```
 //! use std::time::Duration;

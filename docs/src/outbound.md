@@ -38,7 +38,7 @@ A handler that takes `HttpClient` gets the one registered with `.state(..)`, or 
 
 | Setting | Default | Change with |
 |---|---|---|
-| Timeout, until headers and again for the body (or between chunks when streaming) | 30 s | `.timeout(d)`, per request too |
+| Timeout per attempt, until headers and again for the body (or between chunks when streaming); each retry gets it again | 30 s | `.timeout(d)`, per request too |
 | Connecting | 10 s | `.connect_timeout(d)` |
 | Retries for `GET`, `HEAD`, `PUT`, `DELETE`, `OPTIONS` after a failed connection, a timeout, `429`, `502`, `503` or `504` | 2, with backoff (100 ms, 200 ms, ... ± 25%), or what `Retry-After` asks for (up to 10 s) | `.retries(n)` |
 | Largest buffered body (`json`, `text`, `bytes`) | 16 MiB | `.max_response_size(n)` |
@@ -55,7 +55,7 @@ Every failure is an `Error` that a handler can return with `?`:
 | The address is refused (see below) | `400`, code `upstream_blocked` |
 | Not an absolute `http://` or `https://` URL | `400`, code `upstream_invalid_url` |
 | No connection | `502`, code `upstream_unreachable` |
-| `error_for_status()` on a non-2xx answer | `502`, code `upstream_status` (the message has the status and the start of the body) |
+| `error_for_status()` on a non-2xx answer | `502`, code `upstream_status`. The message names the host and status only; the URL (without its query) and the start of the body are in the error's source, for your logs |
 | Body larger than the limit | `502`, code `upstream_too_large` |
 | `json()` on a body that doesn't match | `502`, code `upstream_invalid_json` |
 | Timeout | `504`, code `upstream_timeout` |

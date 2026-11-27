@@ -25,6 +25,14 @@ async fn provider() -> (TestServer, Arc<Mutex<Vec<String>>>) {
                 r#"{"success":true}"#
             } else if body.contains("response=broken") {
                 r#"{"oops":1}"#
+            } else if body.contains("response=human") {
+                r#"{"success":true,"score":0.9,"action":"signup"}"#
+            } else if body.contains("response=bot") {
+                r#"{"success":true,"score":0.1,"action":"signup"}"#
+            } else if body.contains("response=logintoken") {
+                r#"{"success":true,"score":0.9,"action":"login"}"#
+            } else if body.contains("response=wrongsecret") {
+                r#"{"success":false,"error-codes":["invalid-input-secret"]}"#
             } else {
                 r#"{"success":false,"error-codes":["invalid-input-response"]}"#
             }
@@ -151,4 +159,40 @@ async fn without_a_registered_captcha_the_handler_fails_loudly() {
         .post("/signup", |_c: Captcha| async { "never" })
         .test();
     assert_eq!(c.post("/signup").send().await.status(), 500);
+}
+
+#[tokio::test]
+async fn scores_actions_and_site_errors() {
+    let (server, _) = provider().await;
+    let url = format!("http://{}/siteverify", server.addr);
+    let status = |captcha: Captcha, token: &'static str| {
+        let c = app(captcha).test();
+        async move {
+            let r = c
+                .post("/signup")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(form(token))
+                .send()
+                .await;
+            (r.status().as_u16(), r.text())
+        }
+    };
+    let recaptcha = || Captcha::recaptcha("s").verify_url(url.clone());
+    assert_eq!(status(recaptcha(), "human").await.0, 200);
+    // A low v3 score is a bot, whatever `success` says.
+    let (code, body) = status(recaptcha(), "bot").await;
+    assert_eq!(code, 400);
+    assert!(body.contains(r#""code":"captcha_failed""#), "{body}");
+    assert_eq!(status(recaptcha().min_score(0.05), "bot").await.0, 200);
+    // A token minted for another form's action.
+    assert_eq!(status(recaptcha().action("signup"), "human").await.0, 200);
+    assert_eq!(
+        status(recaptcha().action("signup"), "logintoken").await.0,
+        400
+    );
+    assert_eq!(status(recaptcha().action("signup"), "good").await.0, 400);
+    // A wrong secret is the site's fault: 503, not "you failed".
+    let (code, body) = status(recaptcha(), "wrongsecret").await;
+    assert_eq!(code, 503);
+    assert!(body.contains(r#""code":"captcha_unavailable""#), "{body}");
 }

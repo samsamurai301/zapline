@@ -73,6 +73,8 @@ const PENDING_AT: &str = "pending_since";
 const PENDING_TTL: Duration = Duration::from_secs(5 * 60);
 /// Session key for a TOTP secret being set up, until a code confirms it.
 const SETUP_SECRET: &str = "totp_setup_secret";
+/// Session key: a reset password's hash, applied once the second factor is in.
+const PENDING_PASSWORD: &str = "pending_password_hash";
 /// How many recovery codes a user gets.
 const RECOVERY_CODES: usize = 10;
 
@@ -237,21 +239,30 @@ pub fn mount(app: App) -> App {
             Routes::new()
                 .mount((signup, login, forgot, reset))
                 .mount((two_factor, send_link, open_link))
+                // Turning two-factor login on or off takes a code: limited
+                // too, so a stolen session can't guess one.
+                .mount((two_factor_setup, two_factor_enable, two_factor_disable))
                 // @@html
                 .mount((signup_form, login_form, forgot_form, reset_form))
                 .mount((two_factor_form, link_form, link_open))
+                .mount((security_setup, security_enable, security_disable))
                 // html@@
                 .wrap(throttle()),
         )
         .mount((logout, me))
-        .mount((two_factor_setup, two_factor_enable, two_factor_disable))
         // @@html
         .mount((signup_page, login_page, logout_form, forgot_page, reset_page))
         .mount((two_factor_page, link_page, security_page))
-        .mount((security_setup, security_enable, security_disable))
         // html@@
         .mount((github_callback, google_callback))
-        .admin(|admin| admin.protect(admins_only).exclude(["password_resets"]));
+        .admin(|admin| {
+            admin
+                .protect(admins_only)
+                .exclude(["password_resets"])
+                // Second-factor state: an admin who could edit these could
+                // plant recovery codes or replay an authenticator code.
+                .hide(["users.totp_secret", "users.totp_last_step", "users.recovery_codes"])
+        });
     let mut social = SocialLogins::default();
     for (name, label) in PROVIDERS {
         if let Ok(provider) = OAuth::from_env(name) {
@@ -336,14 +347,7 @@ async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<
             let unusable = password::hash(&password::new_token()?).await?;
             let user = match existing {
                 Some(user) => {
-                    sqlx::query(
-                        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
-                         email_verified = TRUE WHERE id = $2 AND email_verified = FALSE",
-                    )
-                    .bind(&unusable)
-                    .bind(user.id)
-                    .execute(&**db)
-                    .await?;
+                    claim_unverified(db, user.id).await?;
                     user
                 }
                 None => {
@@ -369,25 +373,53 @@ async fn social_login(db: &Db, session: &Session, oauth: &OAuthLogin) -> Result<
     sign_in(db, session, user).await
 }
 
+/// An account whose email was never proved may have been opened by someone
+/// else, to wait for the real owner. When the owner proves the address (a
+/// social login, an emailed link or reset), the account becomes theirs: the
+/// registrant's password and second factor go, and their sessions end.
+async fn claim_unverified(db: &Db, id: i64) -> Result<()> {
+    let unusable = password::hash(&password::new_token()?).await?;
+    sqlx::query(
+        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
+         totp_secret = NULL, totp_last_step = NULL, recovery_codes = '', \
+         email_verified = TRUE WHERE id = $2 AND email_verified = FALSE",
+    )
+    .bind(&unusable)
+    .bind(id)
+    .execute(&**db)
+    .await?;
+    Ok(())
+}
+
 /// Signs `user` in, or, when they have two-factor login on, starts the
 /// second step: the session remembers who is half-way for `PENDING_TTL`,
 /// and the code goes to `POST /api/auth/2fa` (or the `/login/2fa` page).
 /// Every way of signing in comes through here.
 async fn sign_in(db: &Db, session: &Session, user: User) -> Result<User> {
-    let secret: Option<String> = sqlx::query_scalar("SELECT totp_secret FROM users WHERE id = $1")
-        .bind(user.id)
-        .fetch_one(&**db)
-        .await?;
-    if secret.is_some() {
-        session.regenerate();
-        session.remove(USER_ID);
-        session.remove(SESSION_VERSION);
-        session.insert(PENDING_USER, user.id)?;
-        session.insert(PENDING_AT, unix_now())?;
-        return Err(two_factor_required());
+    // One statement checks for a second factor and counts the sign-in, so
+    // a factor turned on meanwhile can't be skipped.
+    let version: Option<i64> = sqlx::query_scalar(
+        "UPDATE users SET login_count = login_count + 1 \
+         WHERE id = $1 AND totp_secret IS NULL RETURNING session_version",
+    )
+    .bind(user.id)
+    .fetch_optional(&**db)
+    .await?;
+    match version {
+        Some(version) => {
+            begin_session(session, &user, version)?;
+            Ok(user)
+        }
+        None => {
+            session.regenerate();
+            session.remove(USER_ID);
+            session.remove(SESSION_VERSION);
+            session.remove(PENDING_PASSWORD);
+            session.insert(PENDING_USER, user.id)?;
+            session.insert(PENDING_AT, unix_now())?;
+            Err(two_factor_required())
+        }
     }
-    start_session(db, session, &user).await?;
-    Ok(user)
 }
 
 async fn start_session(db: &Db, session: &Session, user: &User) -> Result<()> {
@@ -398,12 +430,21 @@ async fn start_session(db: &Db, session: &Session, user: &User) -> Result<()> {
     .bind(user.id)
     .fetch_one(&**db)
     .await?;
+    begin_session(session, user, version)
+}
+
+fn begin_session(session: &Session, user: &User, version: i64) -> Result<()> {
     // A fresh session id on login prevents session fixation.
     session.regenerate();
     session.remove(PENDING_USER);
     session.remove(PENDING_AT);
+    session.remove(PENDING_PASSWORD);
     session.insert(USER_ID, user.id)?;
     session.insert(SESSION_VERSION, version)
+}
+
+fn two_factor_enabled() -> Error {
+    Error::conflict("two-factor login is already on").with_code("two_factor_enabled")
 }
 
 fn two_factor_required() -> Error {
@@ -445,13 +486,16 @@ async fn use_code(db: &Db, id: i64, state: &TwoFactorState, code: &str) -> Resul
     };
     let totp = Totp::from_base32(secret)?;
     let last = state.totp_last_step.map(|s| s as u64);
+    // Both updates also require the factor that was read to still be
+    // enrolled: a code for a factor turned off (or replaced) meanwhile fails.
     if let Some(step) = totp.verify(code, last) {
         let used = sqlx::query(
             "UPDATE users SET totp_last_step = $1 \
-             WHERE id = $2 AND (totp_last_step IS NULL OR totp_last_step < $1)",
+             WHERE id = $2 AND totp_secret = $3 AND (totp_last_step IS NULL OR totp_last_step < $1)",
         )
         .bind(step as i64)
         .bind(id)
+        .bind(secret)
         .execute(&**db)
         .await?;
         return Ok(used.rows_affected() == 1);
@@ -459,12 +503,15 @@ async fn use_code(db: &Db, id: i64, state: &TwoFactorState, code: &str) -> Resul
     let mut hashes: Vec<String> = state.recovery_codes.lines().map(str::to_owned).collect();
     if let Some(i) = recovery_codes::find(code, &hashes) {
         hashes.remove(i);
-        let used = sqlx::query("UPDATE users SET recovery_codes = $1 WHERE id = $2 AND recovery_codes = $3")
-            .bind(hashes.join("\n"))
-            .bind(id)
-            .bind(&state.recovery_codes)
-            .execute(&**db)
-            .await?;
+        let used = sqlx::query(
+            "UPDATE users SET recovery_codes = $1 WHERE id = $2 AND recovery_codes = $3 AND totp_secret = $4",
+        )
+        .bind(hashes.join("\n"))
+        .bind(id)
+        .bind(&state.recovery_codes)
+        .bind(secret)
+        .execute(&**db)
+        .await?;
         return Ok(used.rows_affected() == 1);
     }
     Ok(false)
@@ -487,6 +534,15 @@ async fn complete_two_factor(db: &Db, session: &Session, code: &str) -> Result<U
     if !use_code(db, id, &state, code).await? {
         return Err(code_invalid());
     }
+    // A password reset waits for the second factor before it applies.
+    // (`start_session` below clears the pending hash.)
+    if let Some(hash) = session.get::<String>(PENDING_PASSWORD) {
+        sqlx::query("UPDATE users SET password_hash = $1, session_version = session_version + 1 WHERE id = $2")
+            .bind(&hash)
+            .bind(id)
+            .execute(&**db)
+            .await?;
+    }
     let user = User { id, email: state.email };
     start_session(db, session, &user).await?;
     Ok(user)
@@ -499,8 +555,13 @@ fn issuer() -> String {
 
 /// Starts turning two-factor login on: a new secret, kept in the session
 /// until a code from the user's app confirms it.
-fn begin_two_factor(session: &Session, user: &User) -> Result<TwoFactorSetup> {
-    let totp = Totp::generate();
+/// Refused while a factor is on: replacing it would let a stolen session
+/// lock the owner out. Turn it off first (which takes a current code).
+async fn begin_two_factor(db: &Db, session: &Session, user: &User) -> Result<TwoFactorSetup> {
+    if has_two_factor(db, user).await? {
+        return Err(two_factor_enabled());
+    }
+    let totp = Totp::generate()?;
     session.insert(SETUP_SECRET, totp.secret_base32())?;
     Ok(TwoFactorSetup {
         secret: totp.secret_base32(),
@@ -518,11 +579,11 @@ async fn enable_two_factor(db: &Db, session: &Session, user: &User, code: &str) 
     let Some(step) = Totp::from_base32(&secret)?.verify(code, None) else {
         return Err(code_invalid());
     };
-    let codes = recovery_codes::generate(RECOVERY_CODES);
+    let codes = recovery_codes::generate(RECOVERY_CODES)?;
     let hashes: Vec<String> = codes.iter().map(|c| recovery_codes::hash(c)).collect();
-    sqlx::query(
+    let enabled = sqlx::query(
         "UPDATE users SET totp_secret = $1, totp_last_step = $2, recovery_codes = $3, \
-         session_version = session_version + 1 WHERE id = $4",
+         session_version = session_version + 1 WHERE id = $4 AND totp_secret IS NULL",
     )
     .bind(&secret)
     .bind(step as i64)
@@ -530,6 +591,9 @@ async fn enable_two_factor(db: &Db, session: &Session, user: &User, code: &str) 
     .bind(user.id)
     .execute(&**db)
     .await?;
+    if enabled.rows_affected() == 0 {
+        return Err(two_factor_enabled());
+    }
     session.remove(SETUP_SECRET);
     start_session(db, session, user).await?;
     Ok(codes)
@@ -605,13 +669,21 @@ async fn sign_in_with_link(db: &Db, session: &Session, links: &MagicLinks, token
         .await?;
     let count = row.as_ref().map(|(_, count)| count.to_string());
     links.verify(token, "sign-in", |_| count)?;
-    let Some((email, _)) = row else {
+    let Some((email, count)) = row else {
         return Err(login_required());
     };
-    sqlx::query("UPDATE users SET email_verified = TRUE WHERE id = $1")
+    // Use the link up before anything else: of two requests opening it at
+    // once, only one gets past this.
+    let claimed = sqlx::query("UPDATE users SET login_count = login_count + 1 WHERE id = $1 AND login_count = $2")
         .bind(id)
+        .bind(count)
         .execute(&**db)
         .await?;
+    if claimed.rows_affected() == 0 {
+        return Err(Error::bad_request("this link is invalid or was already used").with_code("link_invalid"));
+    }
+    // The link came by email, so it proves the address.
+    claim_unverified(db, id).await?;
     sign_in(db, session, User { id, email }).await
 }
 
@@ -664,23 +736,33 @@ async fn reset_password(db: &Db, session: &Session, form: &ResetPassword) -> Res
     let Some(user_id) = user_id else {
         return Err(Error::bad_request("this reset link is invalid or has expired").with_code("invalid_token"));
     };
-    let hash = password::hash(form.password.as_str()).await?;
-    let user = sqlx::query_as::<_, User>(
-        // Bumping session_version logs out every session of this account.
-        // The link came by email, so the address is the user's.
-        "UPDATE users SET password_hash = $1, session_version = session_version + 1, \
-         email_verified = TRUE WHERE id = $2 RETURNING id, email",
-    )
-    .bind(&hash)
-    .bind(user_id)
-    .fetch_one(&**db)
-    .await?;
     // Other links sent to this account stop working too.
     sqlx::query("DELETE FROM password_resets WHERE user_id = $1")
         .bind(user_id)
         .execute(&**db)
         .await?;
-    // A reset doesn't skip the second factor: a stolen inbox isn't enough.
+    // The link came by email, so the address is the user's.
+    claim_unverified(db, user_id).await?;
+    let hash = password::hash(form.password.as_str()).await?;
+    let user = sqlx::query_as::<_, User>("SELECT id, email FROM users WHERE id = $1")
+        .bind(user_id)
+        .fetch_one(&**db)
+        .await?;
+    if has_two_factor(db, &user).await? {
+        // A reset doesn't skip the second factor, and a stolen inbox alone
+        // can't change the password either: it applies once the code is in.
+        let pending = sign_in(db, session, user).await;
+        if matches!(&pending, Err(e) if e.code() == Some("two_factor_required")) {
+            session.insert(PENDING_PASSWORD, hash)?;
+        }
+        return pending;
+    }
+    // Bumping session_version logs out every session of this account.
+    sqlx::query("UPDATE users SET password_hash = $1, session_version = session_version + 1 WHERE id = $2")
+        .bind(&hash)
+        .bind(user_id)
+        .execute(&**db)
+        .await?;
     sign_in(db, session, user).await
 }
 
@@ -765,8 +847,8 @@ async fn two_factor(
 
 /// Start turning two-factor login on: a secret for the authenticator app.
 #[post("/api/auth/2fa/setup", tag = "auth")]
-async fn two_factor_setup(session: Session, CurrentUser(user): CurrentUser) -> Result<Json<TwoFactorSetup>> {
-    Ok(Json(begin_two_factor(&session, &user)?))
+async fn two_factor_setup(db: Db, session: Session, CurrentUser(user): CurrentUser) -> Result<Json<TwoFactorSetup>> {
+    Ok(Json(begin_two_factor(&db, &session, &user).await?))
 }
 
 /// Confirm the setup with a code from the app: two-factor login is on, and
@@ -1115,8 +1197,8 @@ async fn security_page(views: Views, db: Db, flash: Flash, user: Option<CurrentU
 
 /// Start the setup: show the secret to scan or type into the app.
 #[post("/account/security/setup", tag = "pages")]
-async fn security_setup(views: Views, session: Session, CurrentUser(user): CurrentUser) -> Result<Html<String>> {
-    let setup = begin_two_factor(&session, &user)?;
+async fn security_setup(views: Views, db: Db, session: Session, CurrentUser(user): CurrentUser) -> Result<Html<String>> {
+    let setup = begin_two_factor(&db, &session, &user).await?;
     views.render("auth/security.html", context! { setup => setup })
 }
 

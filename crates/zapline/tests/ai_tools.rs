@@ -1,6 +1,6 @@
 //! Tools: the agent loop against fake Claude and OpenAI-compatible
 //! servers, tools reading app state, and the MCP endpoint.
-#![cfg(feature = "ai")]
+#![cfg(all(feature = "ai", feature = "macros"))]
 
 mod server_support;
 
@@ -340,6 +340,44 @@ async fn mcp_refuses_other_origins_and_bad_messages() {
     assert_eq!(evil.status(), 403);
     let host = c.post("/mcp").json(&body).send().await;
     assert_eq!(host.status(), 200);
+    // DNS rebinding: Origin and Host agree, but name the attacker's domain.
+    let rebound = c
+        .post("/mcp")
+        .header("origin", "http://evil.example:8080")
+        .header("host", "evil.example:8080")
+        .json(&body)
+        .send()
+        .await;
+    assert_eq!(rebound.status(), 403);
+    let local = c
+        .post("/mcp")
+        .header("origin", "http://localhost:8080")
+        .header("host", "localhost:8080")
+        .json(&body)
+        .send()
+        .await;
+    assert_eq!(local.status(), 200);
+    let allowed = App::new()
+        .mcp("/mcp", tools().mcp_allowed_hosts(["app.example.com"]))
+        .test();
+    let page = allowed
+        .post("/mcp")
+        .header("origin", "https://app.example.com")
+        .header("host", "app.example.com")
+        .json(&body)
+        .send()
+        .await;
+    assert_eq!(page.status(), 200);
+
+    let text = c.post("/mcp").body(body.to_string()).send().await;
+    assert_eq!(text.status(), 415, "JSON-RPC comes as application/json");
+    let old = c
+        .post("/mcp")
+        .header("mcp-protocol-version", "1999-01-01")
+        .json(&body)
+        .send()
+        .await;
+    assert_eq!(old.status(), 400);
 
     let garbage = c
         .post("/mcp")
@@ -376,4 +414,43 @@ async fn mcp_can_require_a_login() {
         c.post("/mcp").bearer("t").json(&ping).send().await.status(),
         200
     );
+}
+
+/// Who the authentication middleware says is calling.
+#[derive(Clone)]
+struct Caller(&'static str);
+
+#[tokio::test]
+async fn tools_see_who_is_calling() {
+    let whoami = Tools::new().tool(
+        "whoami",
+        "Who is asking.",
+        |_c: City, cx: ToolContext| async move {
+            Ok(cx
+                .extension::<Caller>()
+                .map_or("nobody", |c| c.0)
+                .to_owned())
+        },
+    );
+    let c = App::new()
+        .nest(
+            "/",
+            Routes::new()
+                .mcp("/mcp", whoami)
+                .wrap(|mut req: Request, next: Next| async move {
+                    let who = match req.headers().get("authorization").map(|v| v.as_bytes()) {
+                        Some(b"Bearer ann") => "ann",
+                        _ => "bob",
+                    };
+                    req.extensions_mut().insert(Caller(who));
+                    next.run(req).await
+                }),
+        )
+        .test();
+    let call = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "whoami", "arguments": {"city": "x"}}});
+    for (token, who) in [("ann", "ann"), ("other", "bob")] {
+        let r: Value = c.post("/mcp").bearer(token).json(&call).send().await.json();
+        assert_eq!(r["result"]["content"][0]["text"], who);
+    }
 }

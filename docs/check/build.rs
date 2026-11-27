@@ -30,18 +30,41 @@ fn main() {
         let text = fs::read_to_string(&path).unwrap();
         let mut converted = String::with_capacity(text.len());
         let mut has_rust = false;
+        // Fences inside list items are indented, and a bare ```` ``` ````
+        // opens a Rust block too (rustdoc's default), so track whether a
+        // line opens or closes one.
+        let mut in_block = false;
         for line in text.split_inclusive('\n') {
-            let fence = line.trim_end();
+            let trimmed = line.trim_start();
+            let indent = &line[..line.len() - trimmed.len()];
+            let fence = trimmed.trim_end();
+            if in_block {
+                if fence.starts_with("```") && fence.trim_start_matches('`').is_empty() {
+                    in_block = false;
+                }
+                converted.push_str(line);
+                continue;
+            }
+            let Some(info) = fence.strip_prefix("```") else {
+                converted.push_str(line);
+                continue;
+            };
+            in_block = true;
+            let rust = info.is_empty() || info == "rust" || info.starts_with("rust,");
+            if !rust {
+                converted.push_str(line);
+                continue;
+            }
+            has_rust = true;
             let marked = ["ignore", "no_run", "compile_fail", "should_panic"]
                 .iter()
-                .any(|m| fence.contains(m));
-            if fence == "```rust" || fence.starts_with("```rust,") {
-                has_rust = true;
-            }
-            if fence == "```rust" || (fence.starts_with("```rust,") && !marked) {
-                converted.push_str(&line.replacen("```rust", "```rust,no_run", 1));
-            } else {
+                .any(|m| info.contains(m));
+            if marked {
                 converted.push_str(line);
+            } else {
+                let attrs = info.strip_prefix("rust").unwrap_or("");
+                let newline = if line.ends_with('\n') { "\n" } else { "" };
+                converted.push_str(&format!("{indent}```rust,no_run{attrs}{newline}"));
             }
         }
         let copy = out.join(&name);

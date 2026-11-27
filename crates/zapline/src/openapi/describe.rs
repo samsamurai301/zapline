@@ -145,8 +145,11 @@ impl ApiInput for crate::session::Flash {
     fn describe_input(op: &mut OperationDoc) {
         // Keep the route's own success status too: htmx gets it, and a
         // declared 303 would otherwise replace the default 200.
-        op.success_empty()
-            .response_empty(303, "Redirect after the form post");
+        // `redirect` documents the `Location` header too. Declared on
+        // every route taking a `Flash`: any of them may redirect, and a
+        // documented answer that never comes is harmless to clients and
+        // `zapline fuzz`, where a missing one fails them.
+        op.success_empty().redirect();
     }
 }
 

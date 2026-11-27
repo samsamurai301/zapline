@@ -22,7 +22,7 @@
 //!
 //! let app = App::new()
 //!     .post("/webhooks/billing", hook)
-//!     .meta(Webhook::stripe(std::env::var("STRIPE_WEBHOOK_SECRET").unwrap_or_default()));
+//!     .meta(Webhook::stripe(std::env::var("STRIPE_WEBHOOK_SECRET").expect("STRIPE_WEBHOOK_SECRET")));
 //! ```
 //!
 //! **Sending.** A [`WebhookSender`] signs JSON payloads the Standard
@@ -52,6 +52,10 @@ type HmacSha256 = Hmac<Sha256>;
 /// How long a signed timestamp is accepted (either side of now), so a
 /// captured request can't be replayed later.
 const DEFAULT_TOLERANCE: Duration = Duration::from_secs(5 * 60);
+/// An HMAC-SHA256 signature's length.
+const MAC_LEN: usize = 32;
+/// Most signatures one request may carry (rotation sends two or three).
+const MAX_CANDIDATES: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scheme {
@@ -86,7 +90,19 @@ fn standard_key(secret: &str) -> Result<Vec<u8>> {
     let encoded = secret.strip_prefix("whsec_").unwrap_or(secret);
     BASE64_STANDARD
         .decode(encoded.trim())
-        .map_err(|_| Error::internal("a Standard Webhooks secret is `whsec_` followed by base64"))
+        .ok()
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| Error::internal("a Standard Webhooks secret is `whsec_` followed by base64"))
+}
+
+/// A GitHub or Stripe secret, which must not be empty: anyone can sign
+/// with an empty key.
+fn plain_key(secret: &[u8]) -> Vec<u8> {
+    assert!(
+        !secret.is_empty(),
+        "a webhook secret is empty: anyone could sign requests with it"
+    );
+    secret.to_vec()
 }
 
 impl Webhook {
@@ -120,28 +136,42 @@ impl Webhook {
     /// replays can't be detected; use the `X-GitHub-Delivery` id to skip
     /// duplicates.
     ///
+    /// # Panics
+    ///
+    /// When `secret` is empty (a missing environment variable, say).
+    ///
     /// ```
     /// use zapline::webhooks::Webhook;
     /// let hook = Webhook::github("my-webhook-secret");
     /// ```
     pub fn github(secret: impl AsRef<[u8]>) -> Self {
-        Self::new(Scheme::GitHub, secret.as_ref().to_vec())
+        Self::new(Scheme::GitHub, plain_key(secret.as_ref()))
     }
 
     /// Stripe's scheme: `Stripe-Signature: t=<time>,v1=<hex>` over
     /// `<time>.<body>`, with the endpoint's `whsec_...` signing secret.
+    ///
+    /// # Panics
+    ///
+    /// When `secret` is empty (a missing environment variable, say).
     ///
     /// ```
     /// use zapline::webhooks::Webhook;
     /// let hook = Webhook::stripe("whsec_test_secret");
     /// ```
     pub fn stripe(secret: impl AsRef<[u8]>) -> Self {
-        Self::new(Scheme::Stripe, secret.as_ref().to_vec())
+        Self::new(Scheme::Stripe, plain_key(secret.as_ref()))
     }
 
     /// Also accept signatures made with `secret`: while rotating secrets,
     /// both the old and the new one verify. For the standard scheme it is a
-    /// `whsec_` secret; an invalid one is ignored.
+    /// `whsec_` secret.
+    ///
+    /// # Panics
+    ///
+    /// When `secret` is empty, or for the standard scheme isn't `whsec_`
+    /// followed by base64: a mistyped secret would otherwise be dropped
+    /// silently and every request signed with it refused.
     ///
     /// ```
     /// use zapline::webhooks::Webhook;
@@ -152,12 +182,11 @@ impl Webhook {
         let key = match self.scheme {
             Scheme::Standard => std::str::from_utf8(secret.as_ref())
                 .ok()
-                .and_then(|s| standard_key(s).ok()),
-            Scheme::GitHub | Scheme::Stripe => Some(secret.as_ref().to_vec()),
+                .and_then(|s| standard_key(s).ok())
+                .expect("Webhook::also: a Standard Webhooks secret is `whsec_` followed by base64"),
+            Scheme::GitHub | Scheme::Stripe => plain_key(secret.as_ref()),
         };
-        if let Some(key) = key {
-            self.keys.push(key);
-        }
+        self.keys.push(key);
         self
     }
 
@@ -187,7 +216,7 @@ impl Webhook {
     /// use zapline::webhooks::{Webhook, WebhookSender};
     /// use zapline::HeaderMap;
     ///
-    /// let secret = WebhookSender::generate_secret();
+    /// let secret = WebhookSender::generate_secret()?;
     /// let hook = Webhook::standard(&secret)?;
     /// let headers = HeaderMap::new();
     /// assert!(hook.verify(&headers, b"{}").is_err());
@@ -215,11 +244,11 @@ impl Webhook {
                     .parse()
                     .map_err(|_| missing("webhook-timestamp"))?;
                 self.check_time(ts, now)?;
-                let candidates: Vec<Vec<u8>> = signatures
+                let candidates = signatures
                     .split(' ')
                     .filter_map(|s| s.strip_prefix("v1,"))
-                    .filter_map(|b| BASE64_STANDARD.decode(b).ok())
-                    .collect();
+                    .filter_map(|b| BASE64_STANDARD.decode(b).ok());
+                let candidates = signature_candidates(candidates, "webhook-signature")?;
                 let signed = [id.as_bytes(), b".", timestamp.as_bytes(), b".", body].concat();
                 self.check_macs(&signed, &candidates)
             }
@@ -228,7 +257,7 @@ impl Webhook {
                 let hex = value
                     .strip_prefix("sha256=")
                     .ok_or_else(|| missing("x-hub-signature-256"))?;
-                let candidates: Vec<Vec<u8>> = decode_hex(hex).into_iter().collect();
+                let candidates = signature_candidates(decode_hex(hex), "x-hub-signature-256")?;
                 self.check_macs(body, &candidates)
             }
             Scheme::Stripe => {
@@ -243,6 +272,7 @@ impl Webhook {
                     }
                 }
                 let ts = ts.ok_or_else(|| missing("stripe-signature"))?;
+                let candidates = signature_candidates(candidates, "stripe-signature")?;
                 self.check_time(ts, now)?;
                 let signed = [ts.to_string().as_bytes(), b".", body].concat();
                 self.check_macs(&signed, &candidates)
@@ -262,14 +292,15 @@ impl Webhook {
     }
 
     fn check_macs(&self, signed: &[u8], candidates: &[Vec<u8>]) -> Result<()> {
-        for key in &self.keys {
+        for key in self.keys.iter().filter(|k| !k.is_empty()) {
+            let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
+                continue;
+            };
+            // The body is hashed once per key, whatever the candidates.
+            mac.update(signed);
             for sig in candidates {
-                let Ok(mut mac) = HmacSha256::new_from_slice(key) else {
-                    continue;
-                };
-                mac.update(signed);
                 // Constant-time comparison.
-                if mac.verify_slice(sig).is_ok() {
+                if mac.clone().verify_slice(sig).is_ok() {
                     return Ok(());
                 }
             }
@@ -279,6 +310,23 @@ impl Webhook {
             "webhook_signature_invalid",
         ))
     }
+}
+
+/// The well-formed signatures (32 bytes each), at most [`MAX_CANDIDATES`]:
+/// junk entries can't make a request cost more to check.
+fn signature_candidates(
+    found: impl IntoIterator<Item = Vec<u8>>,
+    header: &str,
+) -> Result<Vec<Vec<u8>>> {
+    let candidates: Vec<Vec<u8>> = found
+        .into_iter()
+        .filter(|sig| sig.len() == MAC_LEN)
+        .take(MAX_CANDIDATES + 1)
+        .collect();
+    if candidates.is_empty() || candidates.len() > MAX_CANDIDATES {
+        return Err(missing(header));
+    }
+    Ok(candidates)
 }
 
 fn missing(header: &str) -> Error {
@@ -385,7 +433,7 @@ impl WebhookSender {
     ///
     /// ```
     /// use zapline::webhooks::WebhookSender;
-    /// let sender = WebhookSender::new(&WebhookSender::generate_secret())?;
+    /// let sender = WebhookSender::new(&WebhookSender::generate_secret()?)?;
     /// # Ok::<(), zapline::Error>(())
     /// ```
     pub fn new(secret: &str) -> Result<Self> {
@@ -400,18 +448,20 @@ impl WebhookSender {
     /// A new random secret (32 bytes), `whsec_` and base64: store one per
     /// subscriber and show it to them once.
     ///
+    /// # Errors
+    ///
+    /// `500` when the operating system's secure random numbers are
+    /// unavailable (there is no weaker fallback).
+    ///
     /// ```
     /// use zapline::webhooks::WebhookSender;
-    /// assert!(WebhookSender::generate_secret().starts_with("whsec_"));
+    /// assert!(WebhookSender::generate_secret()?.starts_with("whsec_"));
+    /// # Ok::<(), zapline::Error>(())
     /// ```
-    pub fn generate_secret() -> String {
+    pub fn generate_secret() -> Result<String> {
         let mut key = [0u8; 32];
-        if getrandom::getrandom(&mut key).is_err() {
-            for chunk in key.chunks_mut(8) {
-                chunk.copy_from_slice(&fastrand::u64(..).to_le_bytes());
-            }
-        }
-        format!("whsec_{}", BASE64_STANDARD.encode(key))
+        getrandom::getrandom(&mut key).map_err(|_| no_randomness())?;
+        Ok(format!("whsec_{}", BASE64_STANDARD.encode(key)))
     }
 
     /// How many times a failed delivery is retried (default 3): after a
@@ -420,7 +470,7 @@ impl WebhookSender {
     ///
     /// ```
     /// use zapline::webhooks::WebhookSender;
-    /// let sender = WebhookSender::new(&WebhookSender::generate_secret())?.retries(5);
+    /// let sender = WebhookSender::new(&WebhookSender::generate_secret()?)?.retries(5);
     /// # Ok::<(), zapline::Error>(())
     /// ```
     #[must_use]
@@ -434,7 +484,7 @@ impl WebhookSender {
     /// ```
     /// use std::time::Duration;
     /// use zapline::webhooks::WebhookSender;
-    /// let sender = WebhookSender::new(&WebhookSender::generate_secret())?
+    /// let sender = WebhookSender::new(&WebhookSender::generate_secret()?)?
     ///     .backoff(Duration::from_millis(500));
     /// # Ok::<(), zapline::Error>(())
     /// ```
@@ -450,7 +500,7 @@ impl WebhookSender {
     /// ```
     /// use zapline::outbound::HttpClient;
     /// use zapline::webhooks::WebhookSender;
-    /// let sender = WebhookSender::new(&WebhookSender::generate_secret())?
+    /// let sender = WebhookSender::new(&WebhookSender::generate_secret()?)?
     ///     .http_client(HttpClient::new().timeout(std::time::Duration::from_secs(5)));
     /// # Ok::<(), zapline::Error>(())
     /// ```
@@ -494,7 +544,7 @@ impl WebhookSender {
             Bytes::from(serde_json::to_vec(payload).map_err(|e| {
                 Error::internal("cannot serialize a webhook payload").with_source(e)
             })?);
-        let id = message_id();
+        let id = message_id()?;
         let mut attempts = 0;
         loop {
             attempts += 1;
@@ -532,9 +582,16 @@ impl WebhookSender {
                 }
             };
             if !retryable || attempts > self.retries {
+                // The subscriber's URL stays out of the message (it may
+                // hold a token); the host is enough to tell them apart.
+                let host = url
+                    .parse::<http::Uri>()
+                    .ok()
+                    .and_then(|u| u.host().map(str::to_owned))
+                    .unwrap_or_else(|| "the subscriber".to_owned());
                 return Err(Error::new(
                     StatusCode::BAD_GATEWAY,
-                    format!("webhook {id} to {url} failed after {attempts} attempt(s): {last}"),
+                    format!("webhook {id} to {host} failed after {attempts} attempt(s): {last}"),
                 )
                 .with_code("webhook_delivery_failed"));
             }
@@ -545,14 +602,15 @@ impl WebhookSender {
 }
 
 /// `msg_` and 16 random bytes in hex.
-fn message_id() -> String {
+fn message_id() -> Result<String> {
     let mut raw = [0u8; 16];
-    if getrandom::getrandom(&mut raw).is_err() {
-        raw[..8].copy_from_slice(&fastrand::u64(..).to_le_bytes());
-        raw[8..].copy_from_slice(&fastrand::u64(..).to_le_bytes());
-    }
+    getrandom::getrandom(&mut raw).map_err(|_| no_randomness())?;
     let hex: String = raw.iter().map(|b| format!("{b:02x}")).collect();
-    format!("msg_{hex}")
+    Ok(format!("msg_{hex}"))
+}
+
+fn no_randomness() -> Error {
+    Error::internal("secure random numbers are unavailable")
 }
 
 #[cfg(test)]
@@ -605,8 +663,8 @@ mod tests {
 
     #[test]
     fn sender_signatures_verify_and_rotation_works() {
-        let old = WebhookSender::generate_secret();
-        let new = WebhookSender::generate_secret();
+        let old = WebhookSender::generate_secret().unwrap();
+        let new = WebhookSender::generate_secret().unwrap();
         let sender = WebhookSender::new(&old).unwrap();
         let ts = now();
         let sig = sender.sign("msg_1", ts, b"{\"a\":1}");
@@ -660,8 +718,8 @@ mod tests {
     #[test]
     fn bad_secrets_and_ids() {
         assert!(Webhook::standard("whsec_***").is_err());
-        let a = message_id();
+        let a = message_id().unwrap();
         assert!(a.starts_with("msg_") && a.len() == 36);
-        assert_ne!(a, message_id());
+        assert_ne!(a, message_id().unwrap());
     }
 }

@@ -42,7 +42,7 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::Value;
 
 use crate::extract::FromRequestParts;
-use crate::http_client::fetch;
+use crate::http_client::fetch_limited;
 use crate::request::Request;
 use crate::{App, Error, Result};
 
@@ -51,6 +51,11 @@ const HCAPTCHA: &str = "https://api.hcaptcha.com/siteverify";
 const RECAPTCHA: &str = "https://www.google.com/recaptcha/api/siteverify";
 /// Longest token accepted; providers' tokens are a few kilobytes at most.
 const MAX_TOKEN: usize = 8 * 1024;
+/// Largest verification answer read; real ones are a few hundred bytes.
+const MAX_ANSWER: usize = 64 * 1024;
+/// reCAPTCHA v3's score threshold unless [`Captcha::min_score`] says
+/// otherwise (Google's suggested default).
+const DEFAULT_MIN_SCORE: f64 = 0.5;
 
 /// A captcha provider and its secret key. Cheap to clone; a handler
 /// argument once registered with [`App::captcha`].
@@ -65,6 +70,8 @@ struct Inner {
     verify_url: String,
     secret: String,
     timeout: Duration,
+    min_score: f64,
+    action: Option<String>,
 }
 
 impl fmt::Debug for Captcha {
@@ -86,6 +93,8 @@ impl Captcha {
                 verify_url: url.to_owned(),
                 secret,
                 timeout: Duration::from_secs(10),
+                min_score: DEFAULT_MIN_SCORE,
+                action: None,
             }),
         }
     }
@@ -120,7 +129,9 @@ impl Captcha {
     }
 
     /// Google reCAPTCHA (v2 or v3), with the site's secret key. Its widget
-    /// posts the token as `g-recaptcha-response`.
+    /// posts the token as `g-recaptcha-response`. v3 answers carry a score:
+    /// below [`min_score`](Self::min_score) (default 0.5) the token is
+    /// rejected; set [`action`](Self::action) to check it too.
     ///
     /// ```
     /// use zapline::captcha::Captcha;
@@ -161,6 +172,34 @@ impl Captcha {
         self.with(|inner| inner.timeout = timeout)
     }
 
+    /// The lowest reCAPTCHA v3 score accepted, from 0.0 (a bot) to 1.0
+    /// (a person); default 0.5. Answers without a score (v2, Turnstile,
+    /// hCaptcha's free tier) are judged by `success` alone.
+    ///
+    /// ```
+    /// use zapline::captcha::Captcha;
+    /// let captcha = Captcha::recaptcha("6Lc...").min_score(0.7);
+    /// ```
+    #[must_use]
+    pub fn min_score(self, score: f64) -> Self {
+        self.with(|inner| inner.min_score = score)
+    }
+
+    /// The action the widget was rendered with (`grecaptcha.execute(site,
+    /// {action: "signup"})`, Turnstile's `data-action`). A token minted for
+    /// another action, or with none, is rejected, so a token from one form
+    /// can't pass another.
+    ///
+    /// ```
+    /// use zapline::captcha::Captcha;
+    /// let captcha = Captcha::recaptcha("6Lc...").action("signup");
+    /// ```
+    #[must_use]
+    pub fn action(self, action: impl Into<String>) -> Self {
+        let action = action.into();
+        self.with(|inner| inner.action = Some(action))
+    }
+
     fn with(self, f: impl FnOnce(&mut Inner)) -> Self {
         let mut inner = Arc::try_unwrap(self.inner).unwrap_or_else(|shared| Inner {
             name: shared.name,
@@ -168,6 +207,8 @@ impl Captcha {
             verify_url: shared.verify_url.clone(),
             secret: shared.secret.clone(),
             timeout: shared.timeout,
+            min_score: shared.min_score,
+            action: shared.action.clone(),
         });
         f(&mut inner);
         Captcha {
@@ -187,8 +228,10 @@ impl Captcha {
     /// # Errors
     ///
     /// `400` with code `captcha_missing` for an empty token, `captcha_failed`
-    /// when the provider rejects it; `503` with code `captcha_unavailable`
-    /// when the provider can't be reached or answers nonsense (fail closed).
+    /// when the provider rejects it (or its score or action doesn't match);
+    /// `503` with code `captcha_unavailable` when the provider can't be
+    /// reached, answers nonsense, or blames the site's own configuration
+    /// (a wrong secret key): fail closed, without blaming the visitor.
     ///
     /// ```no_run
     /// # async fn run() -> zapline::Result<()> {
@@ -223,7 +266,7 @@ impl Captcha {
             .body(Full::new(Bytes::from(form)))
             .map_err(|e| unavailable(inner.name).with_source(e))?;
         let what = format!("the {} verification service", inner.name);
-        let res = tokio::time::timeout(inner.timeout, fetch(request, &what))
+        let res = tokio::time::timeout(inner.timeout, fetch_limited(request, &what, MAX_ANSWER))
             .await
             .map_err(|_| unavailable(inner.name))?
             .map_err(|e| unavailable(inner.name).with_source(e))?;
@@ -234,12 +277,55 @@ impl Captcha {
         let body: Value = serde_json::from_slice(&res.body)
             .map_err(|e| unavailable(inner.name).with_source(e))?;
         match body.get("success").and_then(Value::as_bool) {
-            Some(true) => Ok(()),
-            Some(false) => Err(failed()),
-            None => Err(unavailable(inner.name)
-                .with_source(std::io::Error::other("the answer has no `success` field"))),
+            Some(true) => {}
+            Some(false) => {
+                return match site_error(&body) {
+                    Some(code) => Err(unavailable(inner.name).with_source(std::io::Error::other(
+                        format!("the provider reports a site problem: {code}"),
+                    ))),
+                    None => Err(failed()),
+                };
+            }
+            None => {
+                return Err(unavailable(inner.name)
+                    .with_source(std::io::Error::other("the answer has no `success` field")))
+            }
         }
+        if let Some(score) = body.get("score") {
+            let score = score.as_f64().ok_or_else(|| {
+                unavailable(inner.name).with_source(std::io::Error::other("a non-numeric score"))
+            })?;
+            if score < inner.min_score {
+                return Err(failed());
+            }
+        }
+        if let Some(expected) = &inner.action {
+            if body.get("action").and_then(Value::as_str) != Some(expected.as_str()) {
+                return Err(failed());
+            }
+        }
+        Ok(())
     }
+}
+
+/// An `error-codes` entry that is the site's fault, not the visitor's: a
+/// missing or wrong secret, a site key that doesn't match it, or the
+/// provider's own failure.
+fn site_error(body: &Value) -> Option<String> {
+    const SITE: &[&str] = &[
+        "missing-input-secret",
+        "invalid-input-secret",
+        "sitekey-secret-mismatch",
+        "invalid-or-already-seen-secret",
+        "internal-error",
+        "bad-request",
+    ];
+    body.get("error-codes")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .find(|c| SITE.contains(c))
+        .map(str::to_owned)
 }
 
 fn failed() -> Error {

@@ -620,6 +620,8 @@ fn flash_routes_declare_their_redirect_and_their_success() {
         let responses = &op(&spec, path, "post")["responses"];
         assert!(responses.get("303").is_some(), "{path}: {responses}");
         assert!(responses.get("200").is_some(), "{path}: {responses}");
+        let location = &responses["303"]["headers"]["Location"];
+        assert!(location.is_object(), "{path}: the redirect names Location");
     }
     let page_200 = &op(&spec, "/page", "post")["responses"]["200"];
     assert!(page_200["content"]["text/html"].is_object(), "{page_200}");

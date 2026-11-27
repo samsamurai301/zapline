@@ -137,7 +137,14 @@ pub fn patch_manifest(manifest: &str) -> Result<Option<String>> {
     let mut out = if has_zapline {
         features::add_features(
             manifest,
-            &["cookies", "mail", "oauth", "password", "two-factor"],
+            &[
+                "cookies",
+                "mail",
+                "oauth",
+                "openapi",
+                "password",
+                "two-factor",
+            ],
         )?
     } else {
         manifest.to_string()
@@ -280,7 +287,7 @@ mod tests {
             "[dependencies]\nzapline = { version = \"0.1\", features = [\"sqlite\", \"views\"] }\n";
         let p = patch_manifest(m).unwrap().unwrap();
         assert!(
-            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"sqlite\", \"two-factor\", \"views\"]"),
+            p.contains("features = [\"cookies\", \"mail\", \"oauth\", \"openapi\", \"password\", \"sqlite\", \"two-factor\", \"views\"]"),
             "{p}"
         );
         assert!(p.contains("[profile.dev.package.argon2]\nopt-level = 3"));
@@ -290,7 +297,7 @@ mod tests {
             .unwrap();
         assert!(
             bare.contains(
-                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"password\", \"two-factor\"] }"
+                "zapline = { version = \"0.1\", features = [\"cookies\", \"mail\", \"oauth\", \"openapi\", \"password\", \"two-factor\"] }"
             ),
             "{bare}"
         );

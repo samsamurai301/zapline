@@ -144,9 +144,9 @@ Send people to `/auth/github` (optionally `?next=/settings`) to start. That rout
 With the `two-factor` feature, users can add an authenticator app (Google Authenticator, 1Password, Authy, ...) as a second step after their password. `zapline::auth::totp::Totp` makes and checks the six-digit codes (RFC 6238), and `zapline::auth::recovery_codes` covers users who lose their phone.
 
 **Turning it on for a user:**
-1. Make a secret with `Totp::generate()`, and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
+1. Make a secret with `Totp::generate()?` (an error, never a weak secret, when the OS has no secure randomness), and show `totp.otpauth_uri("Shop", &email)` as a QR code. Users who can't scan can type `totp.secret_base32()` instead.
 2. Ask for one code and check it, to be sure their app is set up.
-3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)`. Show the codes themselves once.
+3. Store `secret_base32()` with the user (encrypted, like any credential), and save the hashes of `recovery_codes::generate(10)?` (ten distinct codes). Show the codes themselves once.
 
 **Signing in**, after the password:
 
@@ -206,7 +206,8 @@ async fn open_link(links: MagicLinks, Path(token): Path<String>) -> Result<Strin
 }
 ```
 
-- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, that's the last sign-in time; for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Single use without a table:** bind each link to a value that changes once the link is used. For sign-in, use a per-user counter you increment on every sign-in (a timestamp in whole seconds may not change between two quick sign-ins); for email confirmation, the unconfirmed address. Then you don't need to store which links were used.
+- **Consume the link before signing in.** `verify` only checks the token. Two requests opening the same link at once both pass it, so claim it with a conditional update, such as `UPDATE users SET login_count = login_count + 1 WHERE id = $1 AND login_count = $2`, and start the session only when that changed a row. `zapline g auth` does this.
 - **What's in a token:** the user and purpose are signed, so a sign-in link can't be used to confirm an email, and a token can't be edited to name another user. The signature is checked in constant time.
 - **Errors:** an expired link gets `400`, code `link_expired`, so the page can offer to send a new one. Anything else (tampered, wrong purpose, used, unknown user) gets `400`, code `link_invalid`.
 

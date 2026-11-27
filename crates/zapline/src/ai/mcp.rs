@@ -18,9 +18,11 @@ const VERSIONS: [&str; 2] = ["2025-06-18", "2025-03-26"];
 impl App {
     /// Serve `tools` to MCP clients at `path` (`POST` for JSON-RPC
     /// messages). Requests from a web page on another origin are refused, as
-    /// the MCP spec requires (a page could otherwise reach a server on
-    /// `localhost` through DNS rebinding). To require a login, mount it with
-    /// [`Routes::mcp`] in a group wrapped with your authentication.
+    /// the MCP spec requires, and so are web pages calling it under a host
+    /// other than `localhost`, `127.0.0.1`, `[::1]` or those added with
+    /// [`Tools::mcp_allowed_hosts`]: a page could otherwise reach a server
+    /// on `localhost` through DNS rebinding. To require a login, mount it
+    /// with [`Routes::mcp`] in a group wrapped with your authentication.
     ///
     /// ```
     /// use zapline::ai::{ToolContext, Tools};
@@ -60,19 +62,36 @@ impl Routes {
     }
 }
 
-/// Whether a request's `Origin` (when it has one) is this server.
-fn same_origin(req: &Request) -> bool {
+/// Whether a browser page may make this request: no `Origin` (not a
+/// browser), or an `Origin` that is this server under an allowed host.
+/// Matching `Origin` to `Host` alone isn't enough: under DNS rebinding
+/// both name the attacker's domain.
+fn browser_allowed(req: &Request, tools: &Tools) -> bool {
     let Some(origin) = req.headers().get(ORIGIN).and_then(|v| v.to_str().ok()) else {
-        // Not from a browser page.
         return true;
     };
+    // HTTP/2 and HTTP/3 carry the host as the URI's authority.
     let host = req
         .headers()
         .get(HOST)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
+        .map(str::to_owned)
+        .or_else(|| req.uri().authority().map(|a| a.as_str().to_owned()))
+        .unwrap_or_default();
     let origin_host = origin.split_once("://").map_or(origin, |(_, rest)| rest);
-    !host.is_empty() && origin_host.eq_ignore_ascii_case(host)
+    !host.is_empty() && origin_host.eq_ignore_ascii_case(&host) && host_allowed(&host, tools)
+}
+
+/// `host` (with or without a port) is a loopback name or one the app allowed.
+fn host_allowed(host: &str, tools: &Tools) -> bool {
+    let host = host.to_ascii_lowercase();
+    let name = if host.starts_with('[') {
+        host.find(']').map_or(host.as_str(), |i| &host[..=i])
+    } else {
+        host.split_once(':').map_or(host.as_str(), |(name, _)| name)
+    };
+    matches!(name, "localhost" | "127.0.0.1" | "[::1]")
+        || tools.mcp_hosts.iter().any(|h| *h == host || *h == name)
 }
 
 fn rpc_error(id: Value, code: i64, message: &str) -> Value {
@@ -87,8 +106,27 @@ fn json_response(status: StatusCode, body: &Value) -> Response {
 }
 
 async fn handle(mut req: Request, tools: &Tools) -> Response {
-    if !same_origin(&req) {
+    if !browser_allowed(&req, tools) {
         return StatusCode::FORBIDDEN.into_response();
+    }
+    let is_json = req
+        .headers()
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(';').next())
+        .is_some_and(|m| m.trim().eq_ignore_ascii_case("application/json"));
+    if !is_json {
+        return StatusCode::UNSUPPORTED_MEDIA_TYPE.into_response();
+    }
+    // After `initialize`, clients name the negotiated version on every
+    // request; one this server doesn't speak is refused (absent: assumed).
+    if let Some(v) = req.headers().get("mcp-protocol-version") {
+        if !v.to_str().is_ok_and(|v| VERSIONS.contains(&v)) {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                &rpc_error(Value::Null, -32600, "unsupported MCP-Protocol-Version"),
+            );
+        }
     }
     let cx = ToolContext::from_request(&req);
     let body = match req.body_bytes().await {
