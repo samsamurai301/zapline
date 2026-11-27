@@ -1,6 +1,6 @@
 # Releasing
 
-zapline is four crates published in dependency order. Everything except the
+zapline is five crates published in dependency order. Everything except the
 final `cargo publish` and the visibility switch is safe to repeat.
 
 ## Checklist
@@ -23,17 +23,17 @@ final `cargo publish` and the visibility switch is safe to repeat.
    A reported break needs a minor bump before 1.0 (a major one after),
    and a **Changed** or **Removed** entry in the CHANGELOG (see the guide's
    *Stability & versioning* chapter).
-5. Dry run, which packages and builds all four crates against each other:
+5. Dry run, which packages and builds all five crates against each other:
 
    ```sh
-   cargo publish --dry-run -p zapline-macros -p zapline-codegen -p zapline -p zapline-cli
+   cargo publish --dry-run -p zapline-macros -p zapline-codegen -p zapline -p zapline-cli -p zapline-wasm
    ```
 
 6. Tag and publish (needs a crates.io token: `cargo login`):
 
    ```sh
    git tag v0.1.0 && git push origin v0.1.0
-   cargo publish -p zapline-macros -p zapline-codegen -p zapline -p zapline-cli
+   cargo publish -p zapline-macros -p zapline-codegen -p zapline -p zapline-cli -p zapline-wasm
    ```
 
    Cargo publishes them in dependency order and waits for each to appear in

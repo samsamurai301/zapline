@@ -13,13 +13,23 @@ step() { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 step "rustfmt"
 cargo fmt --all --check
 
+# zapline-wasm needs Rust 1.97 (wasmtime); the rest of zapline needs 1.88.
+rust_minor=$(rustc --version | cut -d. -f2)
+wasm=(--exclude zapline-wasm)
+(( rust_minor >= 97 )) && wasm=()
+
 step "clippy (all features)"
-cargo clippy --workspace --exclude bench-servers --all-features --all-targets -- -D warnings
+cargo clippy --workspace --exclude bench-servers ${wasm[@]+"${wasm[@]}"} --all-features --all-targets -- -D warnings
 
 step "tests (all features)"
 cargo test -p zapline --all-features
 cargo test -p zapline-codegen
 cargo test -p zapline-cli
+if (( rust_minor >= 97 )); then
+  cargo test -p zapline-wasm
+else
+  echo "  (skipping zapline-wasm: it needs Rust 1.97, this is 1.$rust_minor)"
+fi
 
 [[ "${1:-}" == "quick" ]] && exit 0
 
